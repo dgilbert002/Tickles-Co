@@ -1,0 +1,51 @@
+# CapitalTwo Python Dependencies
+#
+# Install into project folder (no venv) — packages live in /python_packages:
+#   py -3 -m pip install -r python_engine/requirements.txt --target python_packages
+# The Node server prepends that folder to PYTHONPATH (see server/python_spawn.ts).
+#
+# Classic venv install instead:
+#   pip install -r python_engine/requirements.txt
+#
+# Note: TA-Lib wheels are available on PyPI for many platforms; see SETUP.md if build fails.
+
+# =============================================================================
+# CORE DATA PROCESSING
+# =============================================================================
+numpy>=2.0.0
+pandas>=2.0.0
+
+# =============================================================================
+# TECHNICAL ANALYSIS
+# =============================================================================
+# IMPORTANT: TA-Lib requires system-level installation BEFORE pip install:
+#   - Windows: Download wheel from https://github.com/cgohlke/talib-build/releases
+#   - macOS: brew install ta-lib
+#   - Linux: apt-get install ta-lib OR build from source
+TA-Lib>=0.4.28
+
+# =============================================================================
+# DATABASE
+# =============================================================================
+mysql-connector-python>=8.0.0
+
+# =============================================================================
+# ENVIRONMENT & SYSTEM
+# =============================================================================
+python-dotenv>=1.0.0
+psutil>=5.9.0
+requests>=2.28.0
+
+# =============================================================================
+# PERFORMANCE OPTIMIZATION (Optional but Recommended)
+# =============================================================================
+# Numba provides JIT compilation for faster indicator calculations
+# Skip if you have issues installing LLVM
+numba>=0.57.0
+llvmlite>=0.40.0
+
+# =============================================================================
+# DEVELOPMENT/TESTING (Optional)
+# =============================================================================
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0

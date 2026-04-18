@@ -1,0 +1,649 @@
+# The Platform — ROADMAP (v3)
+
+> **Naming.** The system we're building here is **"The Platform"** — no product
+> name yet. `JarvAIs`, `Capital 2.0`, `Capital Two` are **legacy companies** we
+> mine for reference code; they are not this system.
+> **Supersedes:** `ROADMAP_V2.md` (kept on disk as history; all new work lives here).
+> **Purpose:** Single source of truth for everything we build from Phase 1A onwards.
+> **Audience:** Dean (owner), future-me (CEO agent), Cody, Schemy, Audrey, and any new agent that joins.
+> **Golden rule:** No phase starts until the prior phase's "success criteria" are green.
+>
+> **Last updated:** Phase 1A kickoff draft.
+
+---
+
+## 0. Why this roadmap exists
+
+Phase 1 (backtest stack + candle daemon + catalog + local runner) is live and
+Pass 2-hardened. This roadmap picks up from three parallel decisions made over
+the Apr 16–17 design conversations:
+
+1. **We need the "execution truth layer" (Treasury + Position Sizer + Order Gateway)
+   before any more features,** because without it Rule 1 (backtest ≡ live) is
+   unprovable and every new company reinvents position maths.
+2. **The repo needs a clean, structured home** before Phases 2–12 add another
+   wave of files — otherwise we get a 200-file garage sale.
+3. **Continuous forward-testing is the missing piece of Rule 1.** A backtest that
+   stops the day it's promoted to demo is useless; the backtest engine must keep
+   running on every new candle and pair shadow trades 1:1 with live fills.
+
+This roadmap is ordered to address those three things first (Phases 1A–1D),
+then the big build (Phases 2–12), so that every phase after the foundation is
+easier, not harder.
+
+---
+
+## 1. Locked-in decisions (from the design conversations)
+
+These are non-negotiable without an explicit reversal from Dean.
+
+| # | Decision | Who decided | When |
+|---|---|---|---|
+| 1 | Phase order: **1A → 1B → 1C → 1D → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12** | Dean | 2026-04-17 |
+| 2 | **Risk Agent (LLM judgment layer) is OFF by default.** Every company has a config toggle to turn it on when desired. JarvAIs stays OFF. | Dean | 2026-04-17 |
+| 3 | **Aggressive port from Capital 2.0 worktrees** (liquidation, indicators, adaptive timing, fake candle, conflict resolution, optimisers). Fix known bugs during port. | Dean | 2026-04-17 |
+| 4 | **Fake 5-minute candle is opt-in per strategy**, only enabled for strategies that fire at session close (e.g. Capital.com CFDs). Crypto and any always-on strategy never uses it. Driven by a `uses_fake_close_candle` flag on `strategies`. | Dean | 2026-04-17 |
+| 5 | **Archive, never delete.** All superseded files go to `_archive/YYYY-MM-DD_reason/`. Nothing is ever `rm`-ed or `git rm`-ed. | Dean | 2026-04-17 |
+| 6 | **Janitor is report-only for the first 4 weeks**, then moves with 7-day quarantine and archive-not-delete. | Dean | 2026-04-17 |
+| 7 | **MemU tier discipline:** trading/backtest agents write only to `candidates/`. Promotion to `approved/` is the Synthesizer's job, gated on deflated-Sharpe + OOS + `verified_by`. | Dean | 2026-04-17 |
+| 8 | **Phase 1A restructure ships as one atomic commit** (git tracks renames cleanly, diff is a one-screen review). | Dean | 2026-04-17 |
+| 9 | **Multi-company is a first-class design constraint at every layer.** No phase ships a service that assumes one company. Company id + capabilities flow through every API. | Dean | 2026-04-17 |
+| 10 | Three non-negotiable rules from CONTEXT_V3 stand: Rule 1 (backtest ≡ live 99.9%), Rule 2 (execution accuracy tracked per-entry), Rule 3 (bounded memory + partitioned data + 48GB VPS discipline). | Dean / CONTEXT_V3 | standing |
+
+---
+
+## 2. Phase status at a glance
+
+| Phase | Name | Status | Days | Depends on |
+|---|---|---|---|---|
+| 0 | Infra migration (MySQL→PG+CH+Redis+MemU) | ✅ done | – | – |
+| 1 | Backtest stack + catalog + candle daemon + local runner | ✅ done | – | 0 |
+| 1A | Housekeeping — sync-from-VPS + organic-migration policy | ✅ done 2026-04-18 | – | 1 |
+| **3A.1** | **Intelligence schema + Discord remediation** | **✅ done 2026-04-18** | – | 1A |
+| 1B | Janitor agent (report-only for 4 weeks) | ⏰ | 1 | 1A |
+| 1C | MemU cross-agent wiring + Synthesizer skeleton | ⏰ | 2 | 1A |
+| 1D | Continuous backtest / forward-test engine | ⏰ | 2 | 1A |
+| 3A.2–3A.5 | Collector refactor + MediaProcessor + Qdrant + SignalSearch | ⏰ | 6 | 3A.1 |
+| 2 | Execution Truth Layer (Treasury / Sizer / OMS) | ⏰ | 7 | 1A, 1C |
+| 3 | Market Data Gateway + Redis fan-out | ⏰ | 3 | 1A |
+| 4 | Time / Sessions service (UTC-only, session-by-name) | ⏰ | 2 | 1A |
+| 5 | Company provisioning + capabilities (tenancy shell) | ⏰ | 4 | 2, 4 |
+| 6 | Validation Engine (continuous Rule 1 pairing) | ⏰ | 3 | 1D, 2 |
+| 7 | Indicator library 23 → ~250 + confluence | ⏰ | 7 | 1A |
+| 8 | Walk-forward, OOS, 5 optimisers, promotion gate | ⏰ | 5 | 7 |
+| 9 | Autonomous agents (Validator, Optimizer, Curiosity, RegimeWatcher) | ⏰ | 5 | 1C, 6, 8 |
+| 10 | Alpaca + IBKR adapters | ⏰ | 3 + 3 | 2 |
+| 11 | Arbitrage capability (first arb company) | ⏰ | 3 | 3, 10 |
+| 12 | Owner dashboards (provisioning, wallets, perms, P&L, Rule-1 heatmap) | ⏰ | 5 | 5, 6 |
+
+**Time to first paper-trading JarvAIs agent on a demo account: Phases 1A → 6 ≈ 3 weeks.**
+
+### Phase 3A.1 — Intelligence schema + Discord remediation (landed 2026-04-18)
+
+What shipped:
+
+- `public.collector_sources` (subscription table, replaces `*_config.json`),
+  `public.media_items` (one row per attachment, processing lifecycle), and
+  `public.news_items +8 cols` (`source_id`, `channel_name`, `author`,
+  `author_id`, `message_id`, `metadata jsonb`, `has_media`, `media_count`).
+  Migration file: `migration/2026_04_18_phase3a1_collector_sources.sql`,
+  rollback alongside it.
+- Three dormant-but-fatal Discord collector bugs fixed:
+  `INSERT IGNORE` → `ON CONFLICT (hash_key) DO NOTHING`; removed bogus
+  `tickles_shared.` schema prefix from every SQL; HWM-save exception
+  logging raised from `DEBUG` to `WARNING`.
+- Discord bot token moved from plaintext `discord_config.json` (644) to
+  `/etc/tickles/discord.env` (600 root:root). Token key stripped from JSON.
+- Systemd unit `tickles-discord-collector.service` installed **disabled**
+  and **inactive**. Dean flips it on manually after reviewing.
+- 25 GB of unused downloaded media cleared (none of it had made it to the
+  DB — strategy-irrelevant for now and the reference doc's Phase 3A.2
+  will redesign download + analysis end-to-end).
+- 35 `collector_sources` rows seeded (2 servers + 33 channels) from the
+  existing `discord_config.json`.
+
+Phase 3A.2 onwards (the bigger refactor: `MediaProcessor`, Qdrant
+`tickles_signals` collection, `EmbeddingService`, `SignalSearchService`)
+is scoped in
+`/opt/tickles/shared/migration/Collector_STATUS_UPDATE_INTELLIGENCE_PIPELINE.md`.
+
+---
+
+## 3. Ground rules (carried forward, still binding)
+
+1. Rule 1 — backtest-to-live parity (99.9% target). Every live trade has a shadow
+   backtest row. Drift is attributed, not guessed.
+2. Rule 2 — execution accuracy. Slippage, spread, funding, fees tracked per-entry
+   in `trade_cost_entries`.
+3. Rule 3 — memory efficiency. Bounded caches, partitioned candles, max 50 DB
+   connections total.
+4. Human-in-loop for capital. `approval_mode = human_all` until Phase 8 guardrails
+   + Phase 9 Validator are proven.
+5. Cross-company isolation. Per-company DB, container-tagged MemU, capability-gated
+   access. Allowlist for any cross-company read.
+6. Multi-company from day one. Every service takes `company_id` in its API
+   signature, even if today only `jarvais` exists.
+
+---
+
+## 4. Phase-by-phase detail
+
+Legend per phase: **Goal · Deliverables · Schema changes · Rollback · Success criteria**.
+
+### Phase 1A — Scaffold + sync-from-VPS + organic migration policy (0.5 day) ✅
+
+**Decision 2026-04-18.** We rejected the original "atomic restructure" plan
+because (a) the VPS is live, (b) the local mirror was incomplete so we
+couldn't safely `git mv` from local, and (c) real companies don't migrate
+live systems with a single big-bang rename — they grow the new beside the
+old and retire pieces as they're replaced.
+
+**Discovery while executing 1A.** The live VPS had already been restructured
+into feature folders by an earlier agent session. Specifically `market_data/`,
+`connectors/`, `collectors/`, `services/`, `utils/__init__.py`, and
+`migration/` already existed with code in them — the **local** `_vps_source/`
+was the one lagging behind. So the actual 1A work became:
+
+1. Pull VPS canonical state down over local (`scp tar.gz` + extract).
+2. Retire my invented subfolders (`market_data/collectors/`, `market_data/adapters/`,
+   `trading/adapters/`) — they duplicate VPS's top-level `collectors/` and
+   `connectors/` which handle both directions.
+3. Archive the stale root-level flat files (db/config pairs, *.sql, *.sh,
+   seed scripts, one-shot tests) now that proper homes exist in `utils/`,
+   `market_data/`, `migration/`, and `scripts/`.
+4. Update docs to reflect reality (`ARCHITECTURE.md §3`, `CORE_FILES.md`,
+   `MEMORY.md`).
+
+**Goal.** Local mirrors VPS exactly. Feature-folder skeleton is real, not
+hypothetical. Every new file from Phase 2 onwards lands in the right place.
+
+**Deliverables (what actually shipped).**
+- **VPS canonical folders in `_vps_source/`:** `utils/` (8 files), `market_data/`
+  (6 files), `connectors/` (4 files), `collectors/` (3 py + data dirs),
+  `services/` (2 files), `migration/` (SQL + seeds + historical docs).
+- **Scaffold folders with READMEs** for code that doesn't exist yet:
+  `trading/README.md`, `agents/README.md`, `_archive/README.md`,
+  `market_data/README.md` (updated for real layout).
+- **Archive batch** at `_vps_source/_archive/2026-04-18_sync-from-vps/`
+  with a `MANIFEST.md` mapping every archived file → its successor.
+- **`.cursor/rules/file-structure.mdc`** — enforcement layer.
+- **`CORE_FILES.md`** — Janitor allowlist, updated to match actual paths.
+- **`ARCHITECTURE.md`** — file layout section rewritten to describe reality.
+- **Commits:** `0baaa5d` (V1 checkpoint), `c6a3799` (V2 baseline),
+  `170c466` (scaffold), plus the sync-from-VPS commit landing after this doc.
+
+**Organic migration rules (enforced by reviews).**
+
+1. **New code goes in feature folders.** Any file created from Phase 2
+   onwards must land in `market_data/`, `trading/`, `agents/`, etc. The
+   Cursor rule catches deviations.
+2. **Legacy files are frozen.** Nothing gets moved just because it *looks*
+   misplaced. A file only moves when its replacement is live and validated.
+3. **Retire-and-archive flow.** When a new file replaces an old one:
+   (a) new file written in its feature folder,
+   (b) all callers migrated,
+   (c) smoke tests green,
+   (d) `git mv old_file _archive/YYYY-MM-DD_<reason>/`,
+   (e) systemd units updated if applicable,
+   (f) services restarted,
+   (g) commit with `retire:` prefix.
+4. **Never delete.** `_archive/` is the only destination for retired files.
+5. **Janitor phase 1B** scans monthly and reports (report-only for 4 weeks)
+   on files that look orphaned — Dean reviews, not the agent.
+
+**Schema changes.** None.
+
+**Rollback.** `git revert` the scaffold commit removes the empty folders.
+Nothing else changes.
+
+**Success criteria.**
+- Empty feature folders present on local and VPS.
+- Next file written (first Phase 2 deliverable) lands automatically in
+  `trading/` because the Cursor rule catches any other placement.
+- `tickles-catalog`, `tickles-candle-daemon`, `tickles-bt-workers` services
+  untouched, still `active`.
+
+**Non-goals for 1A.**
+- No systemd-unit edits. (They already point at `backtest.runner`,
+  `candles.daemon`, `catalog.service` — the feature-folder module paths
+  the live code uses.)
+- No change to any file whose import graph is reachable from a running
+  systemd ExecStart.
+
+---
+
+### Phase 1B — Janitor Agent (1 day)
+
+**Goal.** An autonomous filesystem housekeeper with a four-tier safety model
+that can never accidentally archive a core file.
+
+**Deliverables.**
+- `agents/janitor.py` — classifier + scanner + dry-run reporter.
+- `systemd/tickles-janitor.service` — runs daily at 04:00 UTC, emits report to
+  Telegram + MemU `review-findings` category.
+- `CORE_FILES.md` (already committed in 1A) — the allowlist.
+- First-week report generation (report-only mode — NO moves).
+- Docs: `agents/README.md` with the four-tier classification logic.
+
+**Classification tiers (hardcoded in `janitor.py`).**
+
+- **Tier 0 untouchable** — matches systemd `ExecStart`, matches a glob in
+  `CORE_FILES.md`, currently opened by a running process (`lsof`), or in the
+  "do-not-modify" list. Janitor skips immediately, no report, no action.
+- **Tier 1 dependency-protected** — reachable via Python `ast`-derived import
+  graph from any Tier 0 entry point. Same treatment as Tier 0.
+- **Tier 2 pending-cutover** — tagged `status: pending_cutover` in
+  `CORE_FILES.md`. Treated as Tier 0 until the tag is removed.
+- **Tier 3 ambiguous** — survives Tiers 0–2, atime AND mtime > 60 days. LLM
+  reviews. Output goes to Telegram report only.
+
+**Schema changes.** None.
+
+**Rollback.** Disable the service: `systemctl disable --now tickles-janitor`.
+
+**Success criteria.**
+- 4-week dry-run posts a daily report to Telegram / MemU with zero
+  false-positive Tier-0 intrusions.
+- After 4 weeks, Dean flips `janitor.mode = enforce`. 7-day quarantine window
+  activates. Every move lands in `_archive/YYYY-MM-DD_janitor/` with a
+  `MANIFEST.md` explaining why.
+
+---
+
+### Phase 1C — MemU cross-agent wiring + Synthesizer (2 days)
+
+**Goal.** Any agent reads/writes MemU with the category + frontmatter discipline
+from the Opus stack-roadmap doc. The Synthesizer is the only path from
+`candidates/` to `approved/`.
+
+**Deliverables.**
+- `memu/schema.py` — category tree + Pydantic model for frontmatter. Writes
+  missing a required field are rejected at the client.
+- `memu/client.py` — updated `write_insight()` enforces `schema.py`; adds
+  `container` tag (company id or `shared`); adds `parent` (strategy genealogy).
+- `memu/synthesizer.py` — nightly cron agent: scans `candidates/`, runs
+  promotion checks (deflated_sharpe > 1.5, oos_sharpe > 1.0, num_trades > 30,
+  verified_by non-null), moves matching rows to `approved/`.
+- `agents/README.md` — "how agents find each other" (search MemU by predicate,
+  don't poll filesystems).
+- Migration `004_memu_container_tags.sql` — adds `container`, `parent`, and
+  `verified_by` columns to the `insights` table if not present.
+- Smoke test: Cody writes an insight, Schemy writes a schema observation,
+  Audrey queries "show me all insights tagged container=shared in the last 24h"
+  and gets both.
+
+**Categories.**
+```
+strategies/{seeds,variants,approved,archive}
+regimes/
+backtest-results/
+positions/{active,closed}
+review-findings/
+risk-events/
+```
+
+**Frontmatter (enforced on write).**
+`id`, `parent`, `discovered_by`, `timestamp`, `company`, `container`, `status`,
+`verified_by`, `metrics{sharpe,oos_sharpe,deflated_sharpe,win_rate,num_trades}`,
+`train_period`, `test_period`, `oos_period`.
+
+**Schema changes.** Additive columns on `memu.insights`. Backwards compatible.
+
+**Rollback.** Drop the three new columns; revert synthesizer service.
+
+**Success criteria.**
+- Cody → Audrey cross-read round-trip works end-to-end without polling
+  filesystems.
+- Synthesizer rejects a write with missing `verified_by`.
+- `container=jarvais` insights are invisible to any other company's agent
+  unless an allowlist entry is added.
+
+---
+
+### Phase 1D — Continuous backtest / forward-test (2 days)
+
+**Goal.** Every deployed strategy has a forward-test process that runs the same
+engine on every new closed candle, emitting paired "shadow trades" to compare
+against live fills.
+
+**Deliverables.**
+- `backtest/forward_test.py` — long-running process, one per (strategy, account).
+  Listens to Postgres `NOTIFY candle_inserted`; on each new bar, calls
+  `backtest.engine.run_bar(strategy_cfg, bar)`; writes shadow trade to
+  `backtest_forward_trades` in ClickHouse.
+- `migration/005_ch_forward_tables.sql` — adds `backtest_forward_runs` and
+  `backtest_forward_trades`.
+- `backtest/engine.py` — refactor to expose `run_bar()` (single-bar replay)
+  alongside existing `run_backtest()` (batch). Same code path, Rule 1 by
+  construction.
+- `systemd/tickles-forward-test@.service` — templated unit, one instance per
+  active strategy.
+- Integration with catalog API: `/strategies/:id/forward-test-status`.
+
+**Pairing key.** `(strategy_id, signal_timestamp_ms, symbol)` — used later by
+Phase 6 Validator to do the 1:1 join.
+
+**Catch-up logic.** On start, read `last_processed_candle_at` from state, replay
+any missed bars sequentially. No full rerun needed.
+
+**Fake-close-candle discipline (locked decision #4).** Forward-test engine honours
+`strategies.uses_fake_close_candle`: only if true does it build a fake T-60 bar
+at session close. Crypto and always-on strategies never do.
+
+**Schema changes.**
+```sql
+-- ClickHouse
+CREATE TABLE backtests.backtest_forward_runs (...)
+CREATE TABLE backtests.backtest_forward_trades (...)
+
+-- Postgres
+ALTER TABLE tickles_shared.strategies ADD COLUMN uses_fake_close_candle BOOL NOT NULL DEFAULT FALSE;
+```
+
+**Rollback.** Stop forward-test services; `ALTER TABLE ... DROP COLUMN`; drop CH
+tables. No live trade writes depend on it yet.
+
+**Success criteria.**
+- Deploying a strategy starts a forward-test process within 5 s.
+- New candle (via NOTIFY) produces a shadow trade entry in < 500 ms.
+- Restart replays the gap, no double-counting, idempotent by pairing key.
+- `SELECT count() FROM backtest_forward_trades WHERE strategy_id=X` grows
+  monotonically with market time.
+
+---
+
+### Phase 2 — Execution Truth Layer (Treasury + Sizer + OMS) — 7 days
+
+**Goal.** One code path computes "quantity, leverage, SL/TP, expected
+spread/slippage/fees" for both backtest and live. Rule 1 stops depending on hope.
+
+**Deliverables.**
+- `trading/sizer.py` — pure, deterministic function:
+  `size(intent, account, market_snapshot, strategy_cfg) -> SizedIntent`.
+  Ports `liquidation_utils.py` and the fee/spread/overnight math from
+  Capital 2.0 and JarvAIs V1. Zero I/O, fully unit-testable.
+- `trading/treasury.py` — service that owns balance snapshots, per-agent
+  capability checks, and API-key resolution via env/vault reference.
+  Never stores keys in code or DB.
+- `trading/oms.py` — the only thing that calls an exchange adapter. Accepts
+  `TradeIntent`, runs sizer → treasury → adapter → writes `trades` and
+  `trade_cost_entries`. Idempotent via `client_order_id`.
+- `trading/adapters/ccxt_adapter.py` — CCXT/Pro wrapper, crypto.
+- `trading/adapters/capitalcom_adapter.py` — REST client port.
+- `backtest/engine.py` — rewired to call `trading.sizer.size()` instead of its
+  internal fee/slippage code. Same function, same numbers.
+- `migration/006_capabilities.sql` — `capabilities`, `account_registry`,
+  `leverage_history` tables (schema per CONTEXT_V3 §6).
+- Golden test suite: `tests/test_sizer_golden.py` — known inputs → frozen
+  outputs, covering crypto + CFD + spot + edge cases (near-liquidation,
+  min-notional, exchange fee tiers).
+- Risk Agent hook (no-op by default): `trading/risk_agent.py` — if
+  `company.risk_agent_enabled == True`, sizer output passes through it before
+  hitting treasury. Default OFF (locked decision #2).
+
+**Schema changes.** Tables above; no destructive changes.
+
+**Rollback.** Backtest engine reverts to its internal math; new tables can be
+dropped without data loss because nothing reads them yet.
+
+**Success criteria.**
+- Golden-test diffs pre/post port = 0.
+- One end-to-end paper trade: agent submits intent → sizer computes → treasury
+  approves → OMS places via CCXT demo → fill writes `trades` + 2 rows in
+  `trade_cost_entries` (maker_fee + spread).
+- Same intent run through `backtest.engine.run_bar()` produces an identical
+  sized order.
+- Multi-company: submitting an intent with `company_id=foxtrot` while
+  `account.company_id=jarvais` is rejected by treasury with "capability denied".
+
+---
+
+### Phase 3 — Market Data Gateway (3 days)
+
+**Goal.** One CCXT Pro / Capital.com WS connection per exchange, fan out to
+all consumers via Redis pub/sub.
+
+**Deliverables.**
+- `market_data/gateway.py` — multi-exchange WS hub with reconnect, rate-limit
+  smoothing, and per-stream type fan-out.
+- Redis channels: `candles:{ex}:{sym}:{tf}`, `ticker:{ex}:{sym}`,
+  `orderbook:{ex}:{sym}`, `funding:{ex}:{sym}`.
+- `market_data/candles_daemon.py` refactored to consume from the gateway
+  instead of connecting directly.
+- `systemd/tickles-market-gateway.service`.
+- Docs: subscriber code example for any agent or strategy.
+
+**Schema changes.** None (uses existing candles table).
+
+**Rollback.** Candles daemon already works standalone — gateway is additive.
+Disable the gateway service; candles daemon falls back to direct CCXT.
+
+**Success criteria.**
+- 3+ companies subscribe to `candles:binance:BTC/USDT:1m`, none of them open
+  their own CCXT connection.
+- WS reconnect after forced disconnect < 3 s.
+- Rate-limit violations on exchanges = 0 in a 24h window.
+
+---
+
+### Phase 4 — Time / Sessions service (2 days)
+
+**Goal.** UTC everywhere. Sessions by name, DST-aware, never hardcode hours.
+
+**Deliverables.**
+- `utils/time_sessions.py` — session registry + DST math (port
+  `adaptive_timing.py` from Capital 2.0).
+- Migration `007_sessions.sql` — `sessions`, `session_definitions` tables.
+- Pre-seeded sessions: `crypto_24_7`, `london_equity`, `ny_equity`,
+  `tokyo_equity`, `london_open_range`, `ny_open_range`, `capital_com_close`.
+- Enforcement: strategies referencing hours literally (`"open_hour": 7`)
+  raise a validator error on save.
+
+**Schema changes.** Additive — new tables.
+
+**Rollback.** Drop tables; revert strategies that reference session names.
+
+**Success criteria.**
+- Strategy configured with `"session": "london_open_range"` evaluates
+  correctly regardless of VPS clock timezone.
+- DST spring-forward day produces the correct 1-hour shift in session start.
+
+---
+
+### Phase 5 — Company provisioning + capabilities (4 days)
+
+**Goal.** "Move-in ready" tenancy shell. New company = one CLI command + key
+bind + capability grants.
+
+**Deliverables.**
+- `tickles` CLI (`scripts/tickles_cli.py`) — `create-company`, `bind-account`,
+  `grant`, `revoke`, `list-companies`, `list-capabilities`.
+- Migration `008_companies_registry.sql` — `companies`, `account_registry`
+  (already partly from Phase 2), agent registry.
+- `trading/treasury.py` extended — capability checks go through a single
+  `authorize(agent_id, resource, action)` function.
+- Docs: `PROVISIONING.md` — one-page "how to add a new company".
+- Admin web page (tiny aiohttp UI) — `127.0.0.1:8766`, wraps the CLI.
+
+**Schema changes.** Additive.
+
+**Rollback.** CLI + UI are additive. Drop the new tables if we abandon.
+
+**Success criteria.**
+- Creating a test company from CLI in < 30 s, fully isolated DB, CEO agent
+  stub spawned.
+- Granting `read:candles:*` to an agent makes candles queryable; revoking
+  blocks it immediately.
+- Cross-company read attempt denied with audit log entry.
+
+---
+
+### Phase 6 — Validation Engine (3 days)
+
+**Goal.** The Rule 1 enforcer. For every live/demo trade, find its paired
+forward-test shadow, compute drift, attribute the breakdown, halt the strategy
+if the rolling accuracy drops below threshold.
+
+**Deliverables.**
+- `trading/validation.py` — pairing service + drift attribution.
+- Migration `009_trade_validations.sql` (per-company DB) — `trade_validations`
+  table with full drift fields.
+- `systemd/tickles-validator.service`.
+- Materialized view in Postgres: `strategy_rolling_accuracy` (refresh every 5
+  min).
+- Halt integration: when accuracy < `strategy.halt_threshold_pct`, sets
+  `strategies.is_active = FALSE` and notifies CEO.
+
+**Depends on:** Phase 1D (shadow trades exist) + Phase 2 (live trades with
+`candle_data_hash` + `signal_params_hash`).
+
+**Rollback.** Disable service; accuracy tracking stops; no live trades affected.
+
+**Success criteria.**
+- Paper trade fills → `trade_validations` row created within 60 s.
+- Drift breakdown sums to total drift (no unattributed residual).
+- Forcing accuracy < threshold in a test → strategy halted, Telegram alert
+  fires.
+
+---
+
+### Phase 7 — Indicator library 23 → ~250 + confluence (7 days)
+
+**Goal.** Port Capital 2.0's 221 indicators + JarvAIs SMC set; add confluence.
+
+**Deliverables.**
+- `backtest/indicators/comprehensive.py` — ported indicator module.
+- `backtest/indicators/registry.py` — metadata + param_ranges.
+- `backtest/indicators/numba_fast.py` — JIT versions of hot-path indicators.
+- `backtest/strategies/confluence.py` — N-of-M agreement strategy.
+- Seed `indicator_catalog` to ~250 rows.
+
+**Fix during port:** `ttm_squeeze_on` duplicate key, any other bugs noted in
+CONTEXT_V3 §3.6.
+
+**Schema changes.** None (existing tables).
+
+**Rollback.** Old indicators untouched. Drop the new file.
+
+**Success criteria.**
+- `indicator_catalog` has ~250 rows.
+- Confluence strategy runs on any 2-of-5 selection, produces deterministic
+  signals, verifiable by seed.
+- Hot-path indicators ≥ 5× throughput vs pre-JIT.
+
+---
+
+### Phase 8 — Walk-forward + 5 optimisers + promotion gate (5 days)
+
+**Goal.** Trustworthy Sharpe numbers. Automatic "only promote if it passes
+walk-forward OOS + deflated Sharpe".
+
+**Deliverables.**
+- `backtest/walk_forward.py` — rolling IS/OOS windows.
+- `backtest/optimizers/` — random, grid, simulated annealing, GA, Bayesian.
+- `backtest/promotion_gate.py` — single function called at end of a batch.
+- Scheduled job: nightly re-optimisation on top 10 live strategies.
+
+**Schema changes.** Populate `oos_sharpe`, `oos_return_pct` on `backtest_runs`.
+
+**Rollback.** Leave columns at placeholder zero; revert script.
+
+**Success criteria.**
+- Batch of 100 param sweeps produces `deflated_sharpe` and `oos_sharpe` on every
+  row.
+- Promotion gate rejects a strategy with in-sample Sharpe 3, OOS Sharpe 0.4.
+
+---
+
+### Phase 9 — Autonomous agents (5 days)
+
+**Goal.** Stand up the four agents that *use* the foundations built in 1D, 6, 8.
+
+**Deliverables.**
+- `agents/validator.py` — continuous Rule 1 watcher, alerts on drift.
+- `agents/optimizer.py` — weekly walk-forward sweep, proposes DNA strands.
+- `agents/curiosity.py` — port of `relationship_discovery.py`, autonomously
+  sweeps 2-of-250 indicator combinations, writes to MemU
+  `strategies/seeds/`.
+- `agents/regime_watcher.py` — subscribes to `NOTIFY candle_inserted`,
+  classifies regime, writes to MemU `regimes/`.
+- All agents `approval_mode = human_all` (CEO approves proposals).
+
+**Schema changes.** None.
+
+**Rollback.** systemd disable per agent.
+
+**Success criteria.**
+- Curiosity produces 10+ `candidates/` insights in first 24h.
+- Optimizer's weekly proposal gets a CEO-reviewable Telegram card.
+- Validator reliably fires on injected drift in a test.
+
+---
+
+### Phase 10 — Alpaca + IBKR adapters (3 days each, can run parallel)
+
+**Deliverables.**
+- `trading/adapters/alpaca_adapter.py` + PDT pre-trade rule.
+- `trading/adapters/ibkr_adapter.py` + `trade_type='spot_hold'` support.
+
+**Success criteria.** Paper trade round-trip on each. PDT rule blocks a 4th
+day-trade on a sub-$25k Alpaca account.
+
+---
+
+### Phase 11 — Arbitrage (3 days)
+
+**Deliverables.**
+- `backtest/strategies/cross_exchange_arb.py` — reads two Redis ticker streams,
+  emits paired long/short intents.
+- First arb company template: `tickles_arb_btc_bybit_binance`.
+- Docs: arb operational runbook.
+
+**Success criteria.** Demo account arb runs 24h, total slippage cost <
+theoretical edge.
+
+---
+
+### Phase 12 — Owner dashboards (5 days)
+
+**Deliverables.**
+- Web UI over the Phase 5 CLI: company list, wallet bindings, capability grid,
+  per-company P&L, Rule 1 accuracy heatmap per strategy.
+- Mobile-friendly. Authenticated by SSH key + Telegram OTP.
+
+**Success criteria.** Dean can provision a new company from his phone while
+walking the dog.
+
+---
+
+## 5. Still-open decisions (not blocking 1A–1D)
+
+These can be answered any time before their owning phase starts.
+
+| Decision | Phase | Default if unanswered |
+|---|---|---|
+| Vault for API keys (HashiCorp / AWS) vs .env forever | 2 | `.env` until live capital — then migrate |
+| Candle retention extension (currently 1m=90d) | 3 | Keep 90d; revisit when volume grows |
+| Latency-class config per company (`standard` vs `fast`) | 5 | Default `standard`; arb companies flip to `fast` |
+| MemU seeding from existing Mem0 data | 1C | Start clean; bridge later if useful |
+| Autonomy phase B/C/D triggers (human → rule-based approval) | after 6 | Stays `human_all` until proven |
+| Arb company: BTC, gold, or both first | 11 | BTC cross-exchange first |
+
+---
+
+## 6. How agents reading this should use it
+
+1. When joining a fresh session, read `MEMORY.md` first, then this file.
+2. Any new code you write must land in the folder this roadmap and
+   `ARCHITECTURE.md` specify. If you don't know where it goes, ask before
+   creating the file.
+3. If a phase says "deliverables: X files" — don't add a 5th. Group by
+   feature. See `.cursor/rules/file-structure.mdc`.
+4. Update this file's phase-status table when you finish something. Append a
+   dated line under the phase's "Success criteria" describing what you proved.
+5. Store a MemU insight for every non-trivial decision or bug found
+   (`review-findings` category) with the frontmatter from Phase 1C.
+
+---
+
+*End of ROADMAP_V3.md. Phase 1A starts on Dean's next go.*

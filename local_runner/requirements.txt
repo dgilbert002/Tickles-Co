@@ -1,0 +1,20 @@
+# Tickles Local Runner dependencies (Windows, Python 3.12+)
+# Pinned to versions known to work on the VPS as of 2026-04-17.
+
+# Core (shared with VPS engine)
+numpy==2.4.4
+pandas==3.0.2
+redis==7.4.0
+clickhouse-driver==0.2.10
+requests==2.33.2
+
+# Shared pool relies on asyncpg (the local runner may query Postgres
+# via the SSH tunnel when running diagnostics).
+asyncpg==0.31.0
+
+# Windows tray
+pystray==0.19.5
+Pillow==11.0.0
+
+# Optional: bundling
+pyinstaller==6.11.1

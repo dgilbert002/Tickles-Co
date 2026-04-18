@@ -1,0 +1,84 @@
+# ============================================================================
+# Tickles-Co .gitignore
+# Root-level ignore rules for the whole /opt/tickles workspace mirror.
+# Merges the VPS /opt/tickles/.gitignore with the local additions.
+# ============================================================================
+
+# --- Python runtime ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- Virtual environments (VPS .venv, local dev venvs) ---
+.venv/
+venv/
+env/
+
+# --- Secrets (NEVER commit) ---
+.env
+.env.*
+!.env.template
+!.env.example
+*.key
+*.pem
+.git-credentials
+credentials.json
+secrets.json
+
+# Collector configs with secrets (same rule as VPS)
+shared/collectors/discord/data/discord_config.json
+shared/collectors/telegram/data/telegram_config.json
+shared/collectors/telegram/data/*.session
+
+# --- Paperclip workspace runtime (not code, lives on VPS only) ---
+backups/
+data/
+projects/*/logs/
+projects/*/config/local*
+projects/*/node_modules/
+
+# --- Platform runtime artifacts (regenerated, not source) ---
+shared/backtests.txt
+shared/.backtests_state.json
+shared/data/
+shared/logs/
+
+# --- Logs & dumps ---
+logs/
+*.log
+*.sql.bak
+
+# --- OSS reference clones (Phase 12.9 of master plan — local-only) ---
+_references/
+
+# --- Build artifacts ---
+build/
+dist/
+*.whl
+*.zip
+*.tar.gz
+
+# --- IDE / OS cruft ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Paperclip tsx build cache ---
+.paperclip-cache/
+*.tsbuildinfo
+
+# --- Explicit includes (override broader patterns above) ---
+!shared/migration/*.sql
+!shared/migration/*.py
+!shared/utils/*.py
