@@ -646,4 +646,107 @@ These can be answered any time before their owning phase starts.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 1A starts on Dean's next go.*
+## 7. Master-plan alignment (2026-04-10)
+
+The 27-phase "Trading House Master Plan" agreed in the
+`c-JarvAIs` session assigns numbers **13–39** to the work that this
+ROADMAP_V3 labels 1B → 12 plus a pile of new sections. Both
+numberings remain valid. Mapping:
+
+| Master plan # | ROADMAP_V3 § | One-line scope |
+|---|---|---|
+| 13 | (new) | Foundations cleanup (this file's landing pad) |
+| 14 | new   | Universal Asset Catalog |
+| 15 | new   | Data Sufficiency Engine |
+| 16 | §3    | Candle Hub + multi-TF + backfill CLI |
+| 17 | §3    | Market Data Gateway (CCXT-Pro WS + Redis fan-out) |
+| 18 | §7    | Full indicator library (250+) |
+| 19 | §1, §8 | Backtest Engine 2.0 (VectorBT sweeps + Nautilus execution-aligned) |
+| 20 | new   | Feast Feature Store (Redis online / DuckDB offline) |
+| 21 | §6    | Rule-1 Continuous Auditor |
+| 22 | new   | Collectors-as-Services (on-demand lifecycle, incl. forward-test engine) |
+| 23 | §3A.2-5 | Enrichment Pipeline (vision / whisper / chart OCR) |
+| 24 | new   | Services Catalog ("the Menu") |
+| 25 | §2    | Banker + Treasury + Capabilities |
+| 26 | §2, §10 | Execution Layer on NautilusTrader |
+| 27 | new   | Regime Service |
+| 28 | new   | Crash Protection ported + extended |
+| 29 | new   | Alt-Data Ingestion |
+| 30 | §4    | Events Calendar + windows |
+| 31 | §9    | Apex / Quant / Ledger modernised souls |
+| 32 | §9    | Scout / Curiosity / Optimiser / RegimeWatcher activation |
+| 33 | §11   | Arbitrage + Copy-Trader |
+| 34 | new   | Strategy Composer |
+| 35 | new   | Local-to-VPS Backtest Submission |
+| 36 | §12   | Owner Dashboard + Telegram OTP + Mobile |
+| 37 | new   | MCP stack |
+| 38 | new   | Validation + code-analysis + docs freeze |
+| 39 | new   | End-to-end drill |
+
+The ROADMAP_V3 numbering (1A, 1B, 1C, 1D, 2-12, 3A.x) stays on this
+document for historical continuity; the master-plan numbering is
+what every new commit, test file, and change-log entry will cite
+from Phase 13 onwards.
+
+---
+
+## 8. Phase 13 — Foundations cleanup (landed 2026-04-10)
+
+### What shipped
+
+- **Repository home moved.** All platform code now lives under
+  `https://github.com/dgilbert002/Tickles-Co.git` (branch `main`, commit
+  `967df65 init` at landing time). The legacy `JarvAIs` repo becomes
+  read-only reference only.
+- **VPS Git collapsed from 22 GB → 3.4 MB.** The old `.git` on
+  `/opt/tickles` (which had years of accidentally committed binaries)
+  was archived and replaced with a fresh `git init` pointed at the
+  new GitHub remote. All four services
+  (`paperclip`, `tickles-catalog`, `tickles-bt-workers`,
+  `tickles-candle-daemon`) stayed active throughout the swap.
+- **Three operator CLIs scaffolded.** `shared/cli/gateway_cli.py`,
+  `shared/cli/validator_cli.py`, `shared/cli/forward_test_cli.py`.
+  Each CLI's `status` and non-action subcommands work today; action
+  subcommands return a clearly labelled "lands in Phase N" stub and
+  exit code 2 so automation wired against these surfaces today keeps
+  working once real bodies land.
+- **MySQL legacy variants archived.** `shared/utils/config.mysql.py`
+  and `shared/utils/db.mysql.py` moved to
+  `shared/_archive/2026-04-10_mysql_legacy/` with a rollback README.
+  No code outside `reference/` imports them.
+- **Tests folder re-founded.** The pre-migration `.pyc`-only state
+  was scrubbed. `shared/tests/conftest.py` and
+  `shared/tests/test_cli_scaffolding.py` added. Phase 38 will
+  re-author the full regression suite.
+- **Master-plan ↔ ROADMAP_V3 mapping committed** (section 7 above)
+  so nobody re-fights the numbering question.
+
+### Success criteria (all green)
+
+- [x] `python -m shared.cli.gateway_cli --help` exits 0 (proven by
+      `tests/test_cli_scaffolding.py::test_help_via_python_m`).
+- [x] `python -m shared.cli.validator_cli windows` emits one JSON
+      line with `ok: true`.
+- [x] `python -m shared.cli.forward_test_cli --help` exits 0.
+- [x] `rg "config\.mysql|db\.mysql" shared --glob "!reference/**"
+      --glob "!_archive/**"` returns zero hits.
+- [x] `pytest shared/tests/test_cli_scaffolding.py` — all 13
+      parameterised cases pass.
+- [x] `ruff check shared/cli shared/tests` clean (twice — second run
+      required by Operating Protocol).
+- [x] Fresh commit on GitHub `dgilbert002/Tickles-Co` main branch.
+- [x] Same commit pulled onto VPS `/opt/tickles`, services unaffected.
+
+### Rollback
+
+1. `cd /opt/tickles && git reset --hard 967df65` to drop Phase 13.
+2. `mv shared/_archive/2026-04-10_mysql_legacy/*.mysql.py shared/utils/`.
+3. Delete `shared/cli/` and `shared/tests/test_cli_scaffolding.py`.
+
+No service config changed, no systemd units were added or removed,
+so rollback is code-only.
+
+---
+
+*End of ROADMAP_V3.md. Phase 14 (Universal Asset Catalog) starts
+next in the master-plan sequence.*
