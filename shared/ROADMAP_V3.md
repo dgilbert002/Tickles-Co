@@ -748,5 +748,87 @@ so rollback is code-only.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 14 (Universal Asset Catalog) starts
+## 9. Phase 14 — Universal Asset Catalog (landed 2026-04-10)
+
+### What shipped
+
+- **Additive migration** `shared/migration/2026_04_10_phase14_asset_catalog.sql`:
+  - New tables: `venues`, `assets`, `instrument_aliases`.
+  - New nullable FK columns on existing `instruments`: `asset_id`,
+    `venue_id`. Candles + backtest_results keep joining on
+    `instrument_id` untouched.
+  - New read-view `v_asset_venues` — one row per asset × venue with
+    spread / fee / funding / leverage pre-joined for arbitrage &
+    dashboard consumers.
+  - Seed rows for 9 venues: binance, binanceus, bybit, okx,
+    coinbase, kraken, capital, alpaca, yfinance.
+  - Backfill block wires `asset_id` + `venue_id` on every one of the
+    50 existing rows (crypto by `base_currency`, CFDs by symbol).
+  - Rollback file `2026_04_10_phase14_asset_catalog_rollback.sql`.
+- **New Python module `shared/assets/`:**
+  - `schema.py` — pydantic v2 models: `Venue`, `Asset`,
+    `InstrumentRef`, `VenueAssetRow`, plus `AssetClass`,
+    `VenueType`, `AdapterKind` enums matching the Postgres enum.
+  - `service.py` — `AssetCatalogService`: async read API
+    (`list_venues`, `venue_by_code`, `list_assets`,
+    `asset_by_symbol`, `resolve_symbol`, `venues_for_asset`,
+    `spread_snapshot`, `stats`). Resolver checks direct symbol
+    match first, falls back to `instrument_aliases`.
+  - `loader.py` — adapter-based ingester. Adapters:
+    `CcxtAdapter` (crypto — binance/bybit/okx/coinbase/kraken/
+    binanceus), `CapitalAdapter` (defers to existing
+    `shared.connectors.capital_adapter` when `list_markets()`
+    lands), `AlpacaAdapter` (stub until Phase 22),
+    `YFinanceAdapter` (curated seed of 10 FX / commodity / index
+    tickers so gold, silver, crude, S&P 500, EUR/USD, etc. get
+    asset rows without needing a paid data feed).
+    All upserts idempotent. Includes a `--dry-run` mode that
+    fetches without writing.
+- **Operator CLI** `shared/cli/assets_cli.py` wired into the Phase-13
+  CLI package: `stats`, `list-venues`, `list-assets`, `resolve`,
+  `spread`, `load`. Pipe-friendly JSON on every subcommand.
+- **Legacy MySQL seed archived.**
+  `shared/migration/seed_instruments.py` (pymysql, `tickles_shared`
+  MySQL) moved to
+  `shared/_archive/2026-04-10_mysql_legacy/seed_instruments.py.v1-mysql`
+  and superseded by `shared/assets/loader.py`. README updated.
+- **Tests** `shared/tests/test_assets.py` — 22 cases covering pydantic
+  schema (class-value parity with the Postgres enum, canonical vs
+  alias, `VenueAssetRow.total_cost_one_side_pct`), the
+  `AssetCatalogService` against a `FakePool` (list, resolve,
+  alias fallback, spread snapshot sort + delta), and loader
+  helpers (`_d`, `_pct`, `_i`, `_capital_class`, YFinance curated
+  set, CCXT graceful-degrade when ccxt not installed).
+- **Test harness expanded** — `test_cli_scaffolding.py` now also
+  exercises `assets_cli`'s 6 subcommands and `python -m
+  shared.cli.assets_cli --help`.
+
+### Success criteria (all green)
+
+- [x] Migration is idempotent (every `CREATE` uses `IF NOT EXISTS`,
+      every `ALTER` uses `ADD COLUMN IF NOT EXISTS`, every seed
+      uses `ON CONFLICT DO UPDATE`).
+- [x] Backfill links every one of the 50 existing instrument rows
+      to an asset + venue.
+- [x] `python -m shared.cli.assets_cli --help` exits 0.
+- [x] ruff clean on `shared/cli shared/assets shared/tests`.
+- [x] mypy clean on 10 files with `--namespace-packages
+      --explicit-package-bases -p shared.cli -p shared.assets`.
+- [x] pytest `shared/tests/` → **40 / 40 pass** (17 CLI
+      scaffolding + 22 asset-catalog + 1 shared).
+
+### Rollback
+
+1. `cd /opt/tickles && psql -f shared/migration/2026_04_10_phase14_asset_catalog_rollback.sql`
+2. `git revert <phase-14 commit>` or `git reset --hard <phase-13 commit>`.
+3. Restore `seed_instruments.py` from
+   `shared/_archive/2026-04-10_mysql_legacy/seed_instruments.py.v1-mysql`
+   if the MySQL workflow is ever revived.
+
+No services were restarted, no candle/backtest data was touched,
+rollback is SQL-level only.
+
+---
+
+*End of ROADMAP_V3.md. Phase 15 (Data Sufficiency Engine) starts
 next in the master-plan sequence.*

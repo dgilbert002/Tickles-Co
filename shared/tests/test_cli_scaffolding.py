@@ -19,13 +19,14 @@ from typing import List
 
 import pytest
 
-from shared.cli import forward_test_cli, gateway_cli, validator_cli
+from shared.cli import assets_cli, forward_test_cli, gateway_cli, validator_cli
 
 
 CLIS = [
     ("gateway_cli", gateway_cli, {"status", "services", "subscribe", "unsubscribe", "replay"}),
     ("validator_cli", validator_cli, {"status", "windows", "pair", "check"}),
     ("forward_test_cli", forward_test_cli, {"status", "start", "stop", "results"}),
+    ("assets_cli", assets_cli, {"stats", "list-venues", "list-assets", "resolve", "spread", "load"}),
 ]
 
 
@@ -69,6 +70,7 @@ def _run_cli_subprocess(module: str, argv: List[str]) -> subprocess.CompletedPro
     "shared.cli.gateway_cli",
     "shared.cli.validator_cli",
     "shared.cli.forward_test_cli",
+    "shared.cli.assets_cli",
 ])
 def test_help_via_python_m(module: str) -> None:
     res = _run_cli_subprocess(module, ["--help"])

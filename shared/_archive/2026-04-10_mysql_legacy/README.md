@@ -4,6 +4,7 @@
 
 - `config.mysql.py` — legacy MySQL-flavoured config loader (previously `shared/utils/config.mysql.py`)
 - `db.mysql.py` — legacy MySQL-flavoured connection pool helper (previously `shared/utils/db.mysql.py`)
+- `seed_instruments.py.v1-mysql` — legacy MySQL seed script that populated `tickles_shared.instruments` via `pymysql` (previously `shared/migration/seed_instruments.py`). Superseded by the Phase 14 Postgres loader (`shared/assets/loader.py`).
 
 ## Why
 

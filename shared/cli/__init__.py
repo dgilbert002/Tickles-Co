@@ -16,4 +16,4 @@ Convention:
     exit 2  = command recognised but not yet implemented in this phase
 """
 
-__all__ = ["gateway_cli", "validator_cli", "forward_test_cli"]
+__all__ = ["gateway_cli", "validator_cli", "forward_test_cli", "assets_cli"]
