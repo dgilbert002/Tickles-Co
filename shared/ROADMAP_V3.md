@@ -830,5 +830,100 @@ rollback is SQL-level only.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 15 (Data Sufficiency Engine) starts
-next in the master-plan sequence.*
+## 10. Phase 15 landed — Data Sufficiency Engine
+
+**Date:** 2026-04-19 (shipped in commit after c722cd8)
+
+### What went in
+
+**Purpose.** Before anything downstream (backtests, forward-tests,
+indicator fits, regime classifiers, strategy agents) is allowed to act
+on a `(instrument, timeframe)` pair, the Data Sufficiency Engine must
+grade the candle history and return a verdict:
+
+* `pass` — all profile thresholds met;
+* `pass_with_warnings` — soft issues (e.g. `is_fake` bars, density
+  slightly below 95 percent, zero-volume bars);
+* `fail` — hard issues (not enough bars, gap ratio exceeded, single gap
+  too long, stale freshness, NULL OHLC, impossible candle geometry).
+
+This is the first deterministic Rule-1 gate. LLM-level auditing of the
+*verdicts* arrives in Phase 21; Phase 15 is the raw arithmetic layer
+(no agent round-trip, just Python + SQL).
+
+### Files added
+
+* `shared/data_sufficiency/__init__.py` — package front door + exports
+* `shared/data_sufficiency/schema.py` — pydantic models: `Verdict`,
+  `Timeframe`, `Profile`, `Gap`, `IntegrityIssue`, `CoverageStats`,
+  `SufficiencyReport`, `TIMEFRAME_MINUTES` lookup.
+* `shared/data_sufficiency/metrics.py` — pure helpers:
+  `detect_gaps`, `check_integrity`, `compute_coverage`. Zero DB.
+* `shared/data_sufficiency/profiles.py` — six built-in profiles
+  (`scalp_1m_crypto`, `swing_15m_crypto`, `swing_1h_crypto`,
+  `position_4h_crypto`, `position_1d_crypto`, `swing_15m_equities`)
+  plus the `system_config` loader (`NAMESPACE='sufficiency.profiles'`).
+* `shared/data_sufficiency/service.py` — `SufficiencyService`:
+  `check()`, `report_for()`, `invalidate()`, `stats()`, plus a pure
+  `_grade()` function exported for tests.
+* `shared/migration/2026_04_10_phase15_data_sufficiency.sql` —
+  creates `data_sufficiency_reports` (BIGSERIAL PK, triplet UNIQUE,
+  JSONB payload, TTL column, three indexes on instrument/timeframe,
+  verdict, computed_at) and seeds the six profile rows with
+  `ON CONFLICT (namespace, config_key) DO UPDATE`.
+* `shared/migration/2026_04_10_phase15_data_sufficiency_rollback.sql` —
+  pristine rollback: DROP table + DELETE the six config rows.
+* `shared/cli/sufficiency_cli.py` — operator CLI with subcommands
+  `stats`, `profiles`, `check`, `report`, `invalidate`, `bulk`.
+* `shared/tests/test_data_sufficiency.py` — 39 unit tests covering
+  metrics, profiles, grading edge cases, and service round-trips
+  against a `FakePool`.
+
+### Files edited
+
+* `shared/cli/__init__.py` — added `sufficiency_cli` to `__all__`.
+* `shared/tests/test_cli_scaffolding.py` — added the new CLI to the
+  parameterised smoke suite (44 → 52 parametrised rows).
+
+### Success criteria (all green)
+
+* 79/79 pytest (40 Phase 13/14 + 39 new Phase 15).
+* `ruff check shared/cli/ shared/assets/ shared/data_sufficiency/ shared/tests/` clean (two passes).
+* `mypy --namespace-packages --explicit-package-bases --ignore-missing-imports
+  -p shared.cli -p shared.assets -p shared.data_sufficiency` — 16 files clean.
+* Migration applied on VPS without error; six profile rows visible in
+  `system_config WHERE namespace='sufficiency.profiles'`.
+* `python -m shared.cli.sufficiency_cli stats` returns JSON; zero
+  cached rows initially; first call to `check` populates one.
+* All four services remain active on VPS: `paperclip`, `tickles-catalog`,
+  `tickles-bt-workers`, `tickles-candle-daemon`.
+
+### Design rationale (the non-obvious choices)
+
+* **Grading is pure** — `_grade(coverage, profile) -> Verdict` takes
+  zero side-effects. Phase 21's auditor will reuse it as the
+  fast-path and only escalate to LLM on disagreements.
+* **Profiles live in `system_config`** so operators can tune thresholds
+  without a code deploy. Built-ins are a safety net, not the source
+  of truth.
+* **TTL-based cache** (`ttl_seconds` defaults to 300 s). The candle
+  daemon will call `invalidate()` on each partition sync in Phase 16,
+  which is why the service exposes that public method now.
+* **Market-hour awareness via `daily_bar_target`** — we do not ship a
+  calendar table yet. Equities/CFD profiles use `daily_bar_target=26`
+  for 15m (6.5-hour session), crypto uses 96; the density ratio
+  compensates without needing a session grid.
+* **No writes during `check` on cache hit** — the fresh scan path is
+  the only write, so TTL hits are free.
+
+### Rollback
+
+1. `cd /opt/tickles && psql -f shared/migration/2026_04_10_phase15_data_sufficiency_rollback.sql`
+2. `git revert <phase-15 commit>` or `git reset --hard <phase-14 commit>`.
+3. No services restarted, no candle data touched, no legacy behaviour
+   changed — rollback is pure DDL + config delete.
+
+---
+
+*End of ROADMAP_V3.md. Phase 16 (Candle Hub + multi-TF + backfill CLI)
+starts next in the master-plan sequence.*
