@@ -21,6 +21,7 @@ import pytest
 
 from shared.cli import (
     assets_cli,
+    candles_cli,
     forward_test_cli,
     gateway_cli,
     sufficiency_cli,
@@ -35,6 +36,8 @@ CLIS = [
     ("assets_cli", assets_cli, {"stats", "list-venues", "list-assets", "resolve", "spread", "load"}),
     ("sufficiency_cli", sufficiency_cli,
      {"stats", "profiles", "check", "report", "invalidate", "bulk"}),
+    ("candles_cli", candles_cli,
+     {"status", "stats", "coverage", "resample", "backfill", "invalidate"}),
 ]
 
 
@@ -80,6 +83,7 @@ def _run_cli_subprocess(module: str, argv: List[str]) -> subprocess.CompletedPro
     "shared.cli.forward_test_cli",
     "shared.cli.assets_cli",
     "shared.cli.sufficiency_cli",
+    "shared.cli.candles_cli",
 ])
 def test_help_via_python_m(module: str) -> None:
     res = _run_cli_subprocess(module, ["--help"])

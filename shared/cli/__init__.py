@@ -22,4 +22,5 @@ __all__ = [
     "forward_test_cli",
     "assets_cli",
     "sufficiency_cli",
+    "candles_cli",
 ]

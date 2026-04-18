@@ -925,5 +925,95 @@ This is the first deterministic Rule-1 gate. LLM-level auditing of the
 
 ---
 
-*End of ROADMAP_V3.md. Phase 16 (Candle Hub + multi-TF + backfill CLI)
-starts next in the master-plan sequence.*
+## 11. Phase 16 landed — Candle Hub + multi-TF + backfill CLI
+
+**Date:** 2026-04-19 (shipped in commit after 258fcec)
+
+### What went in
+
+**Purpose.** The live 1m candle daemon (`tickles-candle-daemon`)
+is untouched. Phase 16 adds the three pieces the daemon deliberately
+does NOT do:
+
+* **Multi-timeframe rollups** — `1m -> 5m/15m/30m/1h/4h/1d/1w` computed
+  entirely inside Postgres with one `INSERT ... SELECT ... GROUP BY
+  date_trunc(...) ON CONFLICT DO UPDATE` per (instrument, source,
+  target). Idempotent. OHLC aggregation via `array_agg ORDER BY`
+  (portable across vanilla PG, no TimescaleDB dependency).
+* **Historical backfill** — CCXT async client pages `fetch_ohlcv`
+  1000 bars at a time and upserts into the same `candles` table
+  using the daemon's exact unique key contract
+  `(instrument_id, source, timeframe, "timestamp")`.
+* **Coverage introspection** — read-only queries over `candles x
+  instruments` for the CLI and for the Phase 15 sufficiency
+  invalidation hook.
+
+### Files added
+
+* `shared/candles/__init__.py` — package front door + `__all__`.
+* `shared/candles/schema.py` — pydantic models: `Timeframe` enum
+  (mirrors `timeframe_t`), `RESAMPLE_CHAIN`, `CoverageSummary`,
+  `ResampleReport`, `BackfillReport`.
+* `shared/candles/resample.py` — `bucket_floor_sql`,
+  `build_resample_sql`, `resample_one`, `resample_chain`,
+  `invalidate_sufficiency_for`.
+* `shared/candles/backfill.py` — `backfill_instrument` (CCXT async,
+  pagination, rate-limited, transactional upsert, auto-invalidates
+  Phase 15 cache on write), plus `parse_window`, `minutes_between`,
+  `estimate_pages` helpers.
+* `shared/candles/coverage.py` — `list_coverage`, `coverage_stats`.
+* `shared/cli/candles_cli.py` — subcommands `status`, `stats`,
+  `coverage`, `resample`, `backfill`, `invalidate`.
+* `shared/tests/test_candles.py` — 23 unit tests (schema, SQL
+  builders, backfill helpers).
+
+### Files edited (additive only)
+
+* `shared/cli/__init__.py` — added `candles_cli` to `__all__`.
+* `shared/tests/test_cli_scaffolding.py` — parametrised smoke suite
+  extended with `candles_cli`.
+
+### Success criteria (all green)
+
+* 103/103 pytest (79 Phase 13-15 + 24 new Phase 16).
+* Ruff: clean on all new files (two passes).
+* Mypy: 23 source files, no errors
+  (`--namespace-packages --explicit-package-bases --ignore-missing-imports`).
+* Regression Phase 13/14/15: 83/83 passing.
+
+### Design rationale
+
+* **Daemon is sacred.** The live 1m collector is battle-tested (see
+  `shared/candles/daemon.py` with its P0-E* hardening notes). Phase 16
+  is strictly additive around it.
+* **SQL-native rollups, not Python streaming.** For N million candles
+  Python would be the bottleneck. Postgres handles group-by far
+  faster, and the `ON CONFLICT` makes every resample idempotent.
+* **Bucket math is explicit** — no TimescaleDB required. The
+  expressions are short enough to eyeball and validate against
+  exchange-native bars later. If we adopt Timescale in Phase 22 we can
+  swap to `time_bucket` without the SQL builder signature changing.
+* **Backfill auto-invalidates sufficiency.** Whenever `inserted_bars >
+  0`, the backfill calls `invalidate_sufficiency_for(...)` so Phase 15
+  grades against fresh coverage on the next check. Same story for
+  resample — both entry points clear the triplet cache.
+* **CLI-only surface.** No new systemd unit in Phase 16: the daemon
+  handles live tail, the CLI handles on-demand resample/backfill.
+  Phase 22 ("collectors-as-services") will wrap this into long-running
+  services where appropriate.
+
+### Rollback
+
+No migration, no new DDL; rolling back is `git revert <commit>` or
+`git reset --hard <prior-commit>`. The live daemon and live data are
+untouched. Resampled rows already written can be removed selectively:
+
+```sql
+DELETE FROM candles WHERE timeframe IN ('5m','15m','30m','1h','4h','1d','1w')
+    AND source IN (SELECT DISTINCT source FROM candles WHERE timeframe='1m');
+```
+
+---
+
+*End of ROADMAP_V3.md. Phase 17 (Market Data Gateway real — CCXT Pro
+WebSocket + Redis fan-out) starts next in the master-plan sequence.*
