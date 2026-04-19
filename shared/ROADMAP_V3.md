@@ -1290,5 +1290,109 @@ back to the original 23-indicator registry automatically.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 19 (Backtest Engine 2.0 — VectorBT +
-Nautilus parity layer) is next in the master-plan sequence.*
+## Phase 19 — Backtest Engine 2.0 (VectorBT + Nautilus)
+
+### Purpose
+
+The existing `shared/backtest/engine.py` is accurate and audited but
+slow (Python for-loop per bar). Phase 19 introduces an **engine
+registry** so strategies / optimisers / Scout can pick the right
+backend for the job without rewriting call-sites:
+
+  * `classic` — the existing hardened event-loop engine, source of
+    truth for Rule 1.
+  * `vectorbt` — numba-vectorised engine for parameter sweeps
+    (thousands of combos in seconds).
+  * `nautilus` — scaffolded NautilusTrader adapter; real
+    implementation lands in Phase 26 when the execution layer goes
+    live.
+
+A parity harness keeps the engines honest: any new engine must
+produce numbers within per-metric tolerances of the classic engine
+on the same strategy + config, and CI runs this harness.
+
+### Built
+
+**Package — `shared/backtest/engines/`**
+
+* `protocol.py` — `BacktestEngine` Protocol + `EngineCapabilities`
+  dataclass. Every engine answers `available() -> bool` and
+  `run(df, strategy, cfg) -> BacktestResult` using the existing
+  config/result schema, so no downstream changes are needed.
+* `classic.py` — thin wrapper around `engine.run_backtest`; advertises
+  intrabar SL/TP + funding + fees + slippage; no sweep mode.
+* `vectorbt_adapter.py` — wraps `vectorbt.Portfolio.from_signals`.
+  Entries/exits are shifted forward by one bar to match our
+  next-bar-open rule; `size_type="percent"`, `sl_stop` / `tp_stop`
+  translated from percent to fraction. Trade records are mapped back
+  into our `Trade` dataclass. Runs only when vectorbt is installed;
+  gracefully reports `available() == False` otherwise.
+* `nautilus_adapter.py` — stub that imports cleanly, reports
+  capability flags, and raises `RuntimeError("…Phase 26…")` on
+  `run()`. This keeps engine discovery symmetric today.
+
+**Parity harness — `shared/backtest/parity.py`**
+
+* `ParityTolerances` — dataclass with per-metric absolute tolerances
+  (`num_trades_abs`, `pnl_pct_abs`, `sharpe_abs`, `winrate_abs`,
+  `max_drawdown_abs`).
+* `EngineDigest` — five-metric summary per engine plus runtime/ok
+  fields.
+* `parity_summary(candles_df, strategy, cfg, engines, …)` — runs
+  every listed engine, digests their results, and compares each
+  non-source engine against the source-of-truth within tolerance.
+  Missing-dep engines are reported but never fail the harness.
+
+**Operator CLI — `shared/cli/engines_cli.py`**
+
+Four subcommands, JSON stdout:
+
+* `list` — every engine with `available` + capabilities.
+* `capabilities` — full capability matrix.
+* `sample --engine <name>` — run a small synthetic SMA-cross backtest
+  against an engine (smoke-test).
+* `parity [--engines classic,vectorbt]` — run the synthetic backtest
+  through the listed engines and emit the full parity report.
+
+**Tests — `shared/tests/test_engines.py`**
+
+11 smoke tests: registry presence, `get()` KeyError, classic runs
+end-to-end on synthetic data, vectorbt runs when installed (skipped
+otherwise), Nautilus stub raises `RuntimeError("…Phase 26…")`,
+parity runs classic-only, parity compares classic vs vectorbt with
+wide tolerances when vectorbt is present, and the four CLI
+subcommands (list / sample / parity / capabilities).
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/` green locally *and* on VPS (141 passing).
+2. `ruff` + `mypy --ignore-missing-imports` clean on the new
+   modules.
+3. `python -m shared.cli.engines_cli list` reports the three
+   engines and their availability flags.
+4. `python -m shared.cli.engines_cli parity --engines classic,vectorbt`
+   returns `ok: true` with both engines listed.
+5. Phase 13 – 18 unchanged — indicator catalog still ≥ 250, systemd
+   units still active(running), gateway/sufficiency/candles CLIs
+   unaffected.
+
+### Rollback
+
+Phase 19 adds zero database migrations, zero systemd units, and zero
+mutable external state. Rollback is:
+
+```bash
+cd /opt/tickles
+git revert <phase-19-commit>
+# optional cleanup: drop vectorbt from venv if we want an all-classic box
+/opt/tickles/.venv/bin/pip uninstall -y vectorbt
+```
+
+Downstream code has no hard dependency on the new `engines/` package
+— `engine.run_backtest` remains the primary entry point throughout
+Phases 13 – 18 and was not touched.
+
+---
+
+*End of ROADMAP_V3.md. Phase 20 (Feast Feature Store + Redis online /
+DuckDB offline) is next in the master-plan sequence.*

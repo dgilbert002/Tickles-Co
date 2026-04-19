@@ -24,4 +24,5 @@ __all__ = [
     "sufficiency_cli",
     "candles_cli",
     "indicators_cli",
+    "engines_cli",
 ]
