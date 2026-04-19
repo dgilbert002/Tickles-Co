@@ -1621,5 +1621,120 @@ reverting.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 22 (Collectors-as-Services) is
+## Phase 22 — Collectors-as-Services (generic service runtime)
+
+### Purpose
+
+Every long-lived Tickles process has the same shape: run
+forever, do work on a cadence, respect signals, back off on
+errors, prove you're alive. Phase 22 factors that shape into a
+single `ServiceDaemon` class plus a thin adapter that wraps any
+existing :class:`shared.collectors.base.BaseCollector` as a
+supervised service — no collector code is modified.
+
+It also introduces a process-global :class:`ServiceRegistry`
+so the operator CLI (and later phases 24 Services Catalog /
+25 Banker) can discover every long-running piece of the
+platform from a single place. Heartbeats are wired into the
+Phase 21 auditor so `systemctl is-active` is no longer the
+only truth about service liveness.
+
+### Built
+
+**Package — `shared/services/`**
+
+* `daemon.py` — `DaemonConfig`, `DaemonStats`, `ServiceDaemon`.
+  Generic async supervisor loop: signal-aware `run_forever()`,
+  exponential backoff with jitter on consecutive failures (cap
+  = `max_backoff_seconds`), and best-effort heartbeats into
+  `shared.auditor.AuditStore` every `heartbeat_every_seconds`.
+* `collector_service.py` — `CollectorServiceAdapter` wraps any
+  `BaseCollector` instance into a `ServiceDaemon`, plus a free
+  function `run_collector_once` for use from CLIs and tests.
+  Takes an optional async `db_pool_factory`; without one, only
+  `collect()` runs (dry-run mode).
+* `registry.py` — `ServiceDescriptor` + `ServiceRegistry` +
+  `SERVICE_REGISTRY` singleton, seeded with the 9 services we
+  already run (or ship) on the VPS: md-gateway,
+  candle-daemon, catalog, bt-workers, discord-collector,
+  news-rss, telegram-collector, tradingview-monitor, auditor.
+  Each descriptor records its systemd unit name, module path,
+  whether it's currently enabled on the VPS, and an optional
+  factory (populated incrementally in later phases).
+* `launcher.py` — `python -m shared.services.launcher
+  --name NAME` entrypoint used by the systemd template. If a
+  factory is registered for NAME, we call its `run_forever()`.
+  Otherwise we delegate to `python -m <module>` so legacy
+  collectors keep working unchanged.
+* `systemd/tickles-service@.service` — systemd instance
+  template so Phase 24 can stand up new services with
+  `systemctl enable --now tickles-service@<name>.service`
+  without writing a new unit file per service. Not enabled by
+  Phase 22 — shipped as a file on disk.
+
+**Operator CLI — `shared/cli/services_cli.py`**
+
+Six subcommands, all single-line JSON stdout:
+
+* `list [--kind KIND]` — every registered service
+  (md-gateway, candle-daemon, catalog, bt-workers, …).
+* `describe <name>` — full descriptor for one service.
+* `status [--name NAME]` — systemd status for one or all units
+  via `systemctl show` (returns `unknown` off-box).
+* `heartbeats [--service NAME] [--limit N]` — tail heartbeat
+  events from the Phase 21 auditor SQLite store; filter by
+  service.
+* `run-once --name NAME` — run one tick of the named service
+  using its in-process factory. Returns a friendly error if
+  no factory is registered yet.
+* `systemd-units` — list `tickles-*.service` unit files on the
+  current box.
+
+**Tests — `shared/tests/test_services.py`**
+
+19 tests covering: builtin registry seed, descriptor JSON,
+custom registry register/get/`by_kind`; `DaemonConfig`
+validation and auto-adjusted `max_backoff_seconds`;
+`ServiceDaemon.run_once` happy path + exception path;
+`run_forever()` graceful stop; backoff schedule; stats
+JSON-serialisable; `CollectorServiceAdapter` happy paths
+(with + without pool) + interval inheritance from
+`CollectorConfig`; `services_cli` round-trip for `list`
+(+ kind filter), `describe` known/unknown, `heartbeats`
+empty, `run-once` no-factory.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/test_services.py` — 19/19 green
+   locally and on VPS.
+2. Regression: `pytest shared/tests/test_indicators.py
+   shared/tests/test_engines.py shared/tests/test_features.py
+   shared/tests/test_auditor.py shared/tests/test_services.py`
+   — 73/73 green.
+3. `ruff` + `mypy --ignore-missing-imports
+   --explicit-package-bases` clean on the six Phase 22 files.
+4. `python -m shared.cli.services_cli list` reports ≥ 9
+   registered services on VPS.
+5. `python -m shared.cli.services_cli status` reports
+   `active=active` for md-gateway, candle-daemon, catalog,
+   bt-workers on VPS.
+6. Existing services untouched — Phase 17's gateway unit,
+   Phase 13's candle daemon, Phase 16's bt-workers all remain
+   `active (running)` after deployment.
+
+### Rollback
+
+Pure additive. No systemd unit changes applied. Rollback =
+`git revert` and optionally delete
+`/opt/tickles/shared/services/systemd/tickles-service@.service`
+(not installed to `/etc/systemd/system` by Phase 22).
+
+```bash
+cd /opt/tickles
+git revert <phase-22-commit>
+```
+
+---
+
+*End of ROADMAP_V3.md. Phase 23 (Enrichment Pipeline) is
 next.*

@@ -1,0 +1,34 @@
+[Unit]
+# Phase 22 generic Tickles service template.
+#
+# Usage: enable per-service with
+#   systemctl enable --now tickles-service@<name>.service
+# where <name> is the service name registered in
+# shared.services.SERVICE_REGISTRY.
+#
+# This unit is NOT enabled automatically by Phase 22 — it ships
+# as a template so Phase 24 (Services Catalog) can activate it
+# once each service has a factory registered.
+#
+# The template resolves the target module at runtime via the
+# Tickles CLI so the unit file stays identical across services.
+Description=Tickles service: %i
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/opt/tickles/.venv/bin/python -m shared.services.launcher --name %i
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tickles-service-%i
+
+[Install]
+WantedBy=multi-user.target
