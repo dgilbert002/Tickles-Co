@@ -154,7 +154,14 @@ class RedisBus:
         return bool(removed)
 
     async def listen_pattern(self, pattern: str) -> AsyncIterator[Tuple[str, str]]:
-        """Yield ``(channel, payload)`` for every message matching pattern."""
+        """Yield ``(channel, payload)`` for every message matching pattern.
+
+        We swallow cleanup errors deliberately: when the consumer ``break``s
+        out of the ``async for``, Python tears down this generator with
+        ``GeneratorExit`` while the redis connection's transport may already
+        be closed.  Calling ``punsubscribe`` then raises a spurious
+        ``TypeError`` from the asyncio selector — harmless but noisy.
+        """
         pubsub = self.client.pubsub()
         try:
             await pubsub.psubscribe(pattern)
@@ -163,5 +170,15 @@ class RedisBus:
                     continue
                 yield (message["channel"], message["data"])
         finally:
-            await pubsub.punsubscribe(pattern)
-            await pubsub.close()
+            try:
+                await pubsub.punsubscribe(pattern)
+            except Exception:  # noqa: BLE001
+                logger.debug("punsubscribe(%s) cleanup failed", pattern, exc_info=True)
+            close_fn = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
+            if close_fn is not None:
+                try:
+                    result = close_fn()
+                    if result is not None:
+                        await result
+                except Exception:  # noqa: BLE001
+                    logger.debug("pubsub close cleanup failed", exc_info=True)
