@@ -2565,4 +2565,120 @@ Then `git revert` the Phase 30 commit.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 31 (Apex / Quant / Ledger modernised souls) is next.*
+## Phase 31 — Apex / Quant / Ledger modernised souls (2026-04-19)
+
+### Purpose (21-year-old edition)
+
+"Souls" are our **decision-making agents**. The platform already has
+the plumbing — market data, features, backtests, treasury, regime,
+guardrails, events — but somebody has to _reason_ over all of it and
+say "yes / no / wait". That somebody is a soul. In this phase we build
+three modernised souls, wire them to a single audit table, and make
+their verdicts reproducible.
+
+| Soul   | Role          | What it does                                                                                  |
+|--------|---------------|-----------------------------------------------------------------------------------------------|
+| Apex   | Decision      | Aggregates guardrails + active events + regime + treasury + proposal score → approve/reject/defer |
+| Quant  | Research      | Looks at regime/trend/volatility/funding and proposes a hypothesis (direction + size bucket + invalidation) |
+| Ledger | Bookkeeper    | Takes recent fills + open positions and writes a structured journal (never trades)            |
+
+All three souls are **deterministic by default**. No LLM is required
+for Phase 31 — same input JSON yields the same verdict every time,
+which is exactly what Rule 1 (backtests == live) needs. Later phases
+will plug OpenClaw LLM adapters in via the same `SoulPersona.default_llm`
+column.
+
+### Built in this phase
+
+* DB migration `shared/souls/migrations/2026_04_19_phase31_souls.sql`
+  creates three tables + one view under `tickles_shared`:
+  * `public.agent_personas` — stable identity for each soul.
+  * `public.agent_prompts`  — versioned prompt templates (`UNIQUE(persona_id, version)`).
+  * `public.agent_decisions` — append-only audit log of every verdict.
+  * `public.agent_decisions_latest` — `DISTINCT ON (persona_id, correlation_id)` view.
+* `shared/souls/protocol.py` — `SoulPersona`, `SoulPrompt`, `SoulContext`,
+  `SoulDecision` dataclasses + canonical constants (`SOUL_APEX`,
+  `SOUL_QUANT`, `SOUL_LEDGER`, verdict + role + mode sets).
+* `shared/souls/personas/`
+  * `apex.py` — `ApexSoul.decide()`. Order of precedence:
+    guardrails_blockers → high-importance active event → crash regime →
+    treasury rejection → bull/bear/sideways scoring + proposal_score.
+  * `quant.py` — `QuantSoul.decide()`. Scores trend + regime + funding,
+    scales conviction in high-vol, emits `propose` or `observe`.
+  * `ledger.py` — `LedgerSoul.decide()`. Summarises fills → fills count,
+    gross notional, fees, realised pnl, open notional, and a
+    by-symbol breakdown. Always verdict=`journal`.
+* `shared/souls/store.py` — `SoulsStore` with
+  `upsert_persona`, `add_prompt`, `list_personas`, `get_persona`,
+  `list_prompts`, `record_decision`, `list_decisions`,
+  `list_latest_per_correlation`.
+* `shared/souls/memory_pool.py` — `InMemorySoulsPool` for offline
+  tests. Mirrors the PostgreSQL view semantics (latest-per-correlation
+  with id as tiebreak for identical timestamps, same pattern we used
+  in Phase 28/25 in-memory pools).
+* `shared/souls/service.py` — `SoulsService` orchestrator with
+  `seed_personas`, `run_apex`, `run_quant`, `run_ledger`,
+  `decisions`, `latest_decisions`. Each run persists the decision to
+  `agent_decisions` unless the caller passes `persist=False`.
+* `shared/cli/souls_cli.py` — operator CLI:
+  `apply-migration`, `migration-sql`, `seed-personas`, `personas`,
+  `prompts-add`, `prompts`, `run-apex`, `run-quant`, `run-ledger`,
+  `decisions`, `latest`. Accepts `--fields '{...}'` or
+  `--fields @path.json` so CI and operators can replay the exact same
+  context a soul saw.
+* `shared/services/registry.py` — registers a new `souls` service
+  (`kind=worker`, phase tag `31`, `enabled_on_vps=False`). Operators
+  see it alongside regime / guardrails / altdata / events.
+* `shared/tests/test_souls.py` — 32 tests covering migration, each
+  persona's decision logic, deterministic replay, store CRUD, service
+  end-to-end, registry entry, and CLI smoke tests.
+
+### Incidental fix: banker in-memory pool tiebreak
+
+The Phase 25 `InMemoryTradingPool` picked the `max` balance snapshot
+by `ts` only. On Windows, `datetime.now()` can return identical values
+for two rapid calls, which made `test_banker_record_and_latest`
+non-deterministic (observed during the Phase 31 regression). Added
+`(ts, id)` as the sort/`max` key in `banker_balances_latest` fetch
+helpers — same pattern used in Phase 28/31 in-memory pools — to keep
+latest-snapshot semantics correct when timestamps tie.
+
+### How to run locally
+
+```powershell
+python -m shared.cli.souls_cli apply-migration --path-only
+python -m shared.cli.souls_cli seed-personas --in-memory
+python -m shared.cli.souls_cli run-apex --in-memory --correlation-id demo `
+  --fields "{\"regime\":\"bull\",\"treasury_decision\":{\"approved\":true},\"proposal_score\":0.4}"
+python -m shared.cli.souls_cli latest --in-memory
+```
+
+### Success criteria
+
+* ✓ All 32 Phase 31 tests green locally (433 total regression).
+* ✓ `ruff` + `mypy` clean on `shared/souls`, `shared/cli/souls_cli.py`,
+  `shared/tests/test_souls.py`.
+* ✓ `souls` service visible in `ServiceRegistry.list_services()`.
+* ✓ Apex/Quant/Ledger verdicts are byte-deterministic for identical
+  inputs (Rule 1).
+* ✓ `agent_decisions_latest` view returns exactly one row per
+  `(persona_id, correlation_id)` with the correct latest verdict.
+
+### Rollback
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.agent_decisions_latest;
+DROP TABLE IF EXISTS public.agent_decisions;
+DROP TABLE IF EXISTS public.agent_prompts;
+DROP TABLE IF EXISTS public.agent_personas;
+COMMIT;
+```
+
+Then `git revert` the Phase 31 commit. The rest of the system does
+not yet consume soul verdicts (that lands in Phase 32+), so rollback
+is safe.
+
+---
+
+*End of ROADMAP_V3.md. Phase 32 (Scout/Curiosity/Optimiser/RegimeWatcher) is next.*

@@ -290,6 +290,23 @@ def _seed_known_services() -> None:
             tags={"phase": "28"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="souls",
+            kind="worker",
+            module="shared.cli.souls_cli",
+            description=(
+                "Apex / Quant / Ledger souls (Phase 31). Deterministic "
+                "decision agents that persist every verdict to "
+                "agent_decisions. Apex aggregates guardrails/events/regime/"
+                "treasury into approve/reject/defer, Quant proposes trade "
+                "hypotheses, Ledger journals fills and positions. Disabled "
+                "on VPS until Phase 32 wires them into the flow."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "31"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

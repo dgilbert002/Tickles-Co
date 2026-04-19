@@ -36,4 +36,5 @@ __all__ = [
     "guardrails_cli",
     "altdata_cli",
     "events_cli",
+    "souls_cli",
 ]

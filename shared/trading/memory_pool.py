@@ -211,7 +211,7 @@ class InMemoryTradingPool:
             for key, rows in self.balances.items():
                 if key[0] != company_id or not rows:
                     continue
-                latest = max(rows, key=lambda r: r["ts"])
+                latest = max(rows, key=lambda r: (r["ts"], r["id"]))
                 out.append(dict(latest))
             out.sort(key=lambda r: (r["exchange"], r["account_id_external"], r["currency"]))
             return out
@@ -221,7 +221,7 @@ class InMemoryTradingPool:
             rows = list(
                 self.balances.get((company_id, exchange, account_id, currency), [])
             )
-            rows.sort(key=lambda r: r["ts"], reverse=True)
+            rows.sort(key=lambda r: (r["ts"], r["id"]), reverse=True)
             return [dict(r) for r in rows[: int(limit)]]
 
         raise NotImplementedError(f"InMemoryTradingPool.fetch_all: {sql!r}")
@@ -241,7 +241,7 @@ class InMemoryTradingPool:
             rows = self.balances.get((company_id, exchange, account_id, currency))
             if not rows:
                 return None
-            return dict(max(rows, key=lambda r: r["ts"]))
+            return dict(max(rows, key=lambda r: (r["ts"], r["id"])))
 
         raise NotImplementedError(f"InMemoryTradingPool.fetch_one: {sql!r}")
 
