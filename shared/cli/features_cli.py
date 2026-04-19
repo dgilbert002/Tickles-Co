@@ -94,23 +94,33 @@ def _load_candles_from_db(
     except Exception:
         _dbmod = None  # type: ignore[assignment]
 
+    # candles schema (tickles_shared):
+    #   candles(instrument_id, timeframe, source, timestamp, open, high, low,
+    #           close, volume, ...)
+    #   instruments(id, symbol, exchange, ...)
+    # The CLI accepts --symbol / --venue / --timeframe; we resolve
+    # instrument_id via a JOIN and filter candles.source = venue.
+    base_sql = (
+        "SELECT c.timestamp AS ts, c.open, c.high, c.low, c.close, c.volume "
+        "FROM candles c JOIN instruments i ON c.instrument_id = i.id "
+        "WHERE i.symbol = $1 AND i.exchange = $2 "
+        "AND c.source = $2 AND c.timeframe::text = $3"
+    )
+
     async def _fetch_via_pool() -> List[Any]:
         pool = await _dbmod.get_shared_pool()  # type: ignore[union-attr]
-        where = ["symbol = $1", "venue = $2", "timeframe = $3"]
         params: List[Any] = [symbol, venue, timeframe]
+        sql = base_sql
         idx = 4
         if start:
-            where.append(f"ts >= ${idx}")
+            sql += f" AND c.timestamp >= ${idx}"
             params.append(pd.Timestamp(start).to_pydatetime())
             idx += 1
         if end:
-            where.append(f"ts <= ${idx}")
+            sql += f" AND c.timestamp <= ${idx}"
             params.append(pd.Timestamp(end).to_pydatetime())
             idx += 1
-        sql = (
-            "SELECT ts, open, high, low, close, volume "
-            "FROM candles WHERE " + " AND ".join(where) + f" ORDER BY ts DESC LIMIT ${idx}"
-        )
+        sql += f" ORDER BY c.timestamp DESC LIMIT ${idx}"
         params.append(limit)
         return list(await pool.fetch_all(sql, tuple(params)))
 
@@ -122,21 +132,18 @@ def _load_candles_from_db(
             raise RuntimeError(
                 "TICKLES_CANDLES_DSN not set and shared.utils.db not importable"
             )
-        where = ["symbol = $1", "venue = $2", "timeframe = $3"]
         params: List[Any] = [symbol, venue, timeframe]
+        sql = base_sql
         idx = 4
         if start:
-            where.append(f"ts >= ${idx}")
+            sql += f" AND c.timestamp >= ${idx}"
             params.append(pd.Timestamp(start).to_pydatetime())
             idx += 1
         if end:
-            where.append(f"ts <= ${idx}")
+            sql += f" AND c.timestamp <= ${idx}"
             params.append(pd.Timestamp(end).to_pydatetime())
             idx += 1
-        sql = (
-            "SELECT ts, open, high, low, close, volume "
-            "FROM candles WHERE " + " AND ".join(where) + f" ORDER BY ts DESC LIMIT ${idx}"
-        )
+        sql += f" ORDER BY c.timestamp DESC LIMIT ${idx}"
         params.append(limit)
         conn = await asyncpg.connect(dsn)
         try:
