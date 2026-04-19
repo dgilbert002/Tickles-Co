@@ -2281,4 +2281,79 @@ the already-installed `ccxt` package; no new dependency either.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 27 (Regime Service) is next.*
+## Phase 27 — Regime Service
+
+### Purpose
+
+Downstream strategies, agents, and the Treasury need a stable
+*label* for the current market environment. Should I go long at
+full size or should I tighten stops? Am I in a crash or a
+grind-up? Phase 27 answers this deterministically.
+
+The Regime Service looks at recent OHLCV candles for a
+`(universe, exchange, symbol, timeframe)` tuple, classifies the
+environment (bull / bear / sideways / crash / recovery / high_vol
+/ low_vol), and records the result as an append-only
+`regime_states` row. Everything else reads the `regime_current`
+view.
+
+### What was built
+
+1. **DB migration** —
+   `shared/regime/migrations/2026_04_19_phase27_regime.sql`
+   * `public.regime_config`   — per universe/symbol classifier wiring
+   * `public.regime_states`   — append-only classifier output
+   * `public.regime_current`  — `DISTINCT ON` latest row per key
+2. **Classifiers** (pure Python, no numpy/pandas) —
+   * `shared/regime/classifiers/trend.py` — fast/slow SMA + slope.
+   * `shared/regime/classifiers/volatility.py` — stdev of log returns
+     + drawdown.
+   * `shared/regime/classifiers/composite.py` — combines trend and
+     volatility and adds a crash/recovery gate via drawdown.
+3. **Service layer** —
+   `shared/regime/service.py` wires classifiers to the store and
+   supports ad-hoc classification, periodic `tick()` across
+   enabled configs, and read helpers (`current`, `history`).
+4. **Store + in-memory pool** —
+   `shared/regime/store.py` (DB wrapper) +
+   `shared/regime/memory_pool.py` (test double that exposes the
+   same async contract the store expects).
+5. **CLI** — `python -m shared.cli.regime_cli`
+   * `apply-migration` / `migration-sql`
+   * `classifiers`
+   * `config-set` / `config-list`
+   * `classify` (synthetic closes via `--closes` or `--closes-file`)
+   * `current` / `history`
+6. **Service registry** — `regime` entry (worker, phase 27,
+   `enabled_on_vps=False` until a universe config is seeded in
+   Phase 32).
+7. **Tests** — `shared/tests/test_regime.py` (30 tests): migration
+   shape, classifier behaviour on synthetic series, store
+   round-trip, service tick, registry, CLI smoke.
+
+### Success criteria
+
+* 30/30 tests green.
+* `ruff` + `mypy` clean on all new files.
+* Migration applies cleanly on the VPS into `tickles_shared`.
+* `regime_cli classify` produces a label for synthetic inputs.
+* `regime` service visible in `services_catalog` after sync.
+
+### Rollback
+
+Pure additive.
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.regime_current;
+DROP TABLE IF EXISTS public.regime_states;
+DROP TABLE IF EXISTS public.regime_config;
+COMMIT;
+```
+
+Then `git revert` the Phase 27 commit. The service is
+`enabled_on_vps=False`, so no systemd units need to be stopped.
+
+---
+
+*End of ROADMAP_V3.md. Phase 28 (Crash Protection) is next.*

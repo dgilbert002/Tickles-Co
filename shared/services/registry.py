@@ -224,6 +224,23 @@ def _seed_known_services() -> None:
             tags={"phase": "26"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="regime",
+            kind="worker",
+            module="shared.cli.regime_cli",
+            description=(
+                "Regime Service (Phase 27). Classifies market regime "
+                "(bull/bear/sideways/crash/recovery/high_vol/low_vol) per "
+                "universe/exchange/symbol/timeframe and persists signals to "
+                "regime_states. Strategies and Treasury read regime_current. "
+                "Invoked via regime_cli tick; disabled on VPS until a "
+                "universe config is seeded in Phase 32."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "27"},
+        )
+    )
 
 
 def register_builtin_services() -> None:
