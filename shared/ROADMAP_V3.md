@@ -2356,4 +2356,87 @@ Then `git revert` the Phase 27 commit. The service is
 
 ---
 
-*End of ROADMAP_V3.md. Phase 28 (Crash Protection) is next.*
+## Phase 28 - Crash Protection
+
+### Purpose
+
+Rule 1 says "backtests must equal live". Rule 0 says "never blow up the
+account". Phase 28 is the cross-cutting **safety layer** that sits between
+the Regime Service, Banker / Treasury (Phase 25), and the Execution Layer
+(Phase 26), and kills / halts / alerts on dangerous conditions **before**
+new orders are placed.
+
+Concretely, a Protection Rule says things like:
+
+* "If the composite regime for `universe=crypto` is `crash` or `high_vol`
+  on any watched symbol, **halt all new orders** for `tickles`."
+* "If equity drawdown from peak exceeds **15%**, halt new orders."
+* "If realised daily loss is more than **5%** of start-of-day equity,
+  flatten positions."
+* "If notional exposure on `BTC/USDT` exceeds **$500k**, halt new BTC
+  orders."
+* "If the last market tick is older than **10 minutes**, alert."
+
+Rules are persisted, events are append-only, and the latest event per
+scope drives whether the Execution Layer blocks an intent.
+
+### Built
+
+1. **Migration** `shared/guardrails/migrations/2026_04_19_phase28_crash.sql`
+   - `public.crash_protection_rules` (company/universe/exchange/symbol
+     scope, rule_type, action, threshold, params jsonb, severity, enabled).
+   - `public.crash_protection_events` (append-only rule evaluations with
+     status in `{triggered, resolved, overridden}`).
+   - `public.crash_protection_active` view: latest event per
+     (rule_id, company, universe, exchange, symbol).
+2. **Protocol** `shared/guardrails/protocol.py`
+   - `ProtectionRule`, `ProtectionSnapshot` (inputs: equity, positions,
+     regimes, staleness), `ProtectionDecision` (output: triggered /
+     resolved + metric + reason), and enum-like string constants.
+3. **Evaluator** `shared/guardrails/evaluator.py`
+   - Pure function `evaluate(rules, snapshot)` returning decisions. Handles
+     `regime_crash`, `equity_drawdown`, `daily_loss`, `position_notional`,
+     and `stale_data`.
+   - `decisions_block_intent(decisions, scope)` helper for the Execution
+     Layer: returns only decisions whose action halts new orders.
+4. **Store** `shared/guardrails/store.py` (rules CRUD, events insert,
+   active view) + `InMemoryGuardrailsPool` for offline tests.
+5. **Service** `shared/guardrails/service.py`
+   - `GuardrailsService.tick(snapshot)` evaluates + persists decisions.
+   - `is_intent_blocked(scope)` used by the Execution Router as a
+     pre-flight gate.
+6. **CLI** `shared/cli/guardrails_cli.py` with subcommands
+   `apply-migration`, `migration-sql`, `rule-add`, `rule-list`,
+   `rule-toggle`, `evaluate`, `events`, `active`, `check-intent`.
+7. **Service registry** - `crash-protection` entry (worker, phase 28,
+   `enabled_on_vps=False` until Phase 32 seeds rules).
+8. **Tests** `shared/tests/test_guardrails.py` - 28 tests covering
+   migration, evaluator per rule-type, store, service, registry, CLI.
+
+### Success criteria
+
+* All 28 Phase 28 tests green locally (`pytest shared/tests/test_guardrails.py`).
+* `ruff` and `mypy` clean on `shared/guardrails/`.
+* Migration applies cleanly on VPS `tickles_shared`.
+* `guardrails_cli rule-list --in-memory` returns `{"ok": true, "count": 0}`.
+* `crash-protection` visible in `services_catalog` after sync.
+* No regression in 332+ existing tests.
+
+### Rollback
+
+Pure additive.
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.crash_protection_active;
+DROP TABLE IF EXISTS public.crash_protection_events;
+DROP TABLE IF EXISTS public.crash_protection_rules;
+COMMIT;
+```
+
+Then `git revert` the Phase 28 commit. The service is
+`enabled_on_vps=False`, so no systemd units need to be stopped.
+
+---
+
+*End of ROADMAP_V3.md. Phase 29 (Alt-Data Ingestion) is next.*

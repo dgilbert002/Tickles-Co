@@ -241,6 +241,22 @@ def _seed_known_services() -> None:
             tags={"phase": "27"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="crash-protection",
+            kind="worker",
+            module="shared.cli.guardrails_cli",
+            description=(
+                "Crash Protection (Phase 28). Evaluates regime, equity, "
+                "position, daily-loss, and data-staleness rules and writes "
+                "events to crash_protection_events. Treasury/Execution read "
+                "crash_protection_active to gate new orders. Disabled on VPS "
+                "until rules are seeded in Phase 32."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "28"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

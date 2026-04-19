@@ -33,4 +33,5 @@ __all__ = [
     "treasury_cli",
     "execution_cli",
     "regime_cli",
+    "guardrails_cli",
 ]
