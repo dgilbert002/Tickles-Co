@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from .core import INDICATORS, IndicatorSpec, register
 

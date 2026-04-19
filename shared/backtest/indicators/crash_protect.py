@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Dict, Any
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from .core import register, _close, _high, _low, _volume
 # Pass 2 fix: use the canonical SMA-seeded Wilder RSI from core instead of

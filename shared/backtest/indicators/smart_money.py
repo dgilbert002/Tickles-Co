@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Dict, Any
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from .core import register, _close, _high, _low, _volume
 
@@ -47,10 +47,10 @@ def swing_high(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
 
 def swing_low(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     lookback = max(1, int(params.get("lookback", 3)))
-    l = _low(df)
-    ln = l.to_numpy()
-    out = np.zeros(len(l), dtype=np.int8)
-    for i in range(lookback, len(l) - lookback):
+    lo = _low(df)
+    ln = lo.to_numpy()
+    out = np.zeros(len(lo), dtype=np.int8)
+    for i in range(lookback, len(lo) - lookback):
         cur = ln[i]
         if not np.isfinite(cur):
             continue
@@ -58,7 +58,7 @@ def swing_low(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
         right_min = ln[i + 1:i + 1 + lookback].min() if lookback else np.inf
         if cur < left_min and cur < right_min:
             out[i] = 1
-    s = pd.Series(out, index=l.index)
+    s = pd.Series(out, index=lo.index)
     return s.shift(lookback).fillna(0).astype(int)
 
 
@@ -88,15 +88,15 @@ def fair_value_gap_up(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     units (useful for position-sizing); 0 otherwise.
     """
     h = _high(df)
-    l = _low(df)
-    gap = l - h.shift(2)
+    lo = _low(df)
+    gap = lo - h.shift(2)
     return gap.where(gap > 0, 0.0)
 
 
 def fair_value_gap_down(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     h = _high(df)
-    l = _low(df)
-    gap = l.shift(2) - h
+    lo = _low(df)
+    gap = lo.shift(2) - h
     return gap.where(gap > 0, 0.0)
 
 
@@ -116,10 +116,10 @@ def liquidity_sweep_high(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
 
 def liquidity_sweep_low(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     lookback = int(params.get("lookback", 20))
-    l = _low(df)
+    lo = _low(df)
     c = _close(df)
-    prior_low = l.rolling(lookback).min().shift(1)
-    swept = (l < prior_low) & (c > prior_low)
+    prior_low = lo.rolling(lookback).min().shift(1)
+    swept = (lo < prior_low) & (c > prior_low)
     return swept.astype(int)
 
 

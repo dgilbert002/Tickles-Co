@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-from clickhouse_driver import Client
+from clickhouse_driver import Client  # type: ignore[import-not-found]
 
 log = logging.getLogger("tickles.accessible")
 
@@ -62,7 +62,7 @@ _BASE_COLS = (
     "total_trades, run_duration_ms, notes"
 )
 
-_QUERY_BASE = f"SELECT {_BASE_COLS} FROM backtest_runs"
+_QUERY_BASE = f"SELECT {_BASE_COLS} FROM backtest_runs"  # nosec B608
 
 
 def _format_row(row) -> str:
@@ -295,13 +295,15 @@ def top(n: int = 20, sort: str = "sharpe",
     where = [f"total_trades >= {min_trades}"]
     params: dict = {"n": n}
     if symbol:
-        where.append("symbol = %(symbol)s"); params["symbol"] = symbol
+        where.append("symbol = %(symbol)s")
+        params["symbol"] = symbol
     if strategy:
         # Robust JSON extraction; doesn't care about whitespace in notes.
         where.append("JSONExtractString(notes, 'strategy_name') = %(strategy)s")
         params["strategy"] = strategy
+    # where[] fragments are module-local, order_col is allow-listed, values bound via params.
     q = (
-        "SELECT run_id, symbol, exchange, timeframe, indicator_name, params, "
+        "SELECT run_id, symbol, exchange, timeframe, indicator_name, params, "  # nosec B608
         "sharpe_ratio, sortino_ratio, deflated_sharpe, win_rate_pct, "
         "total_return_pct, max_drawdown_pct, total_trades, notes "
         f"FROM backtest_runs WHERE {' AND '.join(where)} "
@@ -321,7 +323,8 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("rebuild")
     sub.add_parser("append")
-    pl = sub.add_parser("lookup"); pl.add_argument("hash_or_id")
+    pl = sub.add_parser("lookup")
+    pl.add_argument("hash_or_id")
     pt = sub.add_parser("top")
     pt.add_argument("--n", type=int, default=20)
     pt.add_argument("--sort", default="sharpe")

@@ -64,7 +64,7 @@ async def _acquire_pool(dsn: Optional[str]) -> Any:
       2. ``shared.utils.db.get_shared_pool()`` — the canonical path.
     """
     if dsn:
-        import asyncpg  # lazy import so the CLI imports cleanly off-box
+        import asyncpg  # type: ignore[import-not-found]  # lazy import so the CLI imports cleanly off-box
 
         class _DsnPool:
             def __init__(self, pool: Any) -> None:

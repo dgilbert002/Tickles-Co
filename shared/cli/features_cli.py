@@ -24,7 +24,7 @@ import logging
 from dataclasses import asdict
 from typing import Any, List, Optional
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from shared.cli._common import (
     EXIT_FAIL,

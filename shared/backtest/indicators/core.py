@@ -30,7 +30,7 @@ from typing import Callable, Dict, Any
 import logging
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 
 log = logging.getLogger("tickles.indicators")
@@ -142,16 +142,16 @@ def rsi(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     avg_gain = np.nan
     avg_loss = np.nan
     g = gain.fillna(0).to_numpy()
-    l = loss.fillna(0).to_numpy()
+    lo = loss.fillna(0).to_numpy()
     for i in range(n):
         if i < period:
             continue
         if np.isnan(avg_gain):
             avg_gain = g[1:period + 1].mean() if i == period else g[i - period + 1:i + 1].mean()
-            avg_loss = l[1:period + 1].mean() if i == period else l[i - period + 1:i + 1].mean()
+            avg_loss = lo[1:period + 1].mean() if i == period else lo[i - period + 1:i + 1].mean()
         else:
             avg_gain = (avg_gain * (period - 1) + g[i]) / period
-            avg_loss = (avg_loss * (period - 1) + l[i]) / period
+            avg_loss = (avg_loss * (period - 1) + lo[i]) / period
         if avg_loss == 0:
             out[i] = 100.0
         else:
@@ -163,9 +163,9 @@ def rsi(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
 def stochastic_k(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     period = int(params.get("period", 14))
     h = _high(df).rolling(period).max()
-    l = _low(df).rolling(period).min()
+    lo = _low(df).rolling(period).min()
     c = _close(df)
-    return 100 * (c - l) / (h - l).replace(0, np.nan)
+    return 100 * (c - lo) / (h - lo).replace(0, np.nan)
 
 
 def macd_line(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
@@ -198,12 +198,12 @@ def roc(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
 # ---------------------------------------------------------------------------
 def atr(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     period = int(params.get("period", 14))
-    h, l, c = _high(df), _low(df), _close(df)
+    h, lo, c = _high(df), _low(df), _close(df)
     prev_close = c.shift(1)
     tr = pd.concat([
-        h - l,
+        h - lo,
         (h - prev_close).abs(),
-        (l - prev_close).abs(),
+        (lo - prev_close).abs(),
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
 
@@ -232,8 +232,8 @@ def obv(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
 def vwap_session(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     """Session VWAP — resets every calendar day (UTC)."""
     c, v = _close(df), _volume(df)
-    h, l = _high(df), _low(df)
-    tp = (h + l + c) / 3.0  # typical price
+    h, lo = _high(df), _low(df)
+    tp = (h + lo + c) / 3.0  # typical price
     pv = tp * v
     # group by UTC date (if dates column missing, compute it)
     if "date" in df.columns:
@@ -251,8 +251,8 @@ def vwap_session(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
 def mfi(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     """Money Flow Index — volume-weighted RSI."""
     period = int(params.get("period", 14))
-    h, l, c, v = _high(df), _low(df), _close(df), _volume(df)
-    tp = (h + l + c) / 3.0
+    h, lo, c, v = _high(df), _low(df), _close(df), _volume(df)
+    tp = (h + lo + c) / 3.0
     mf = tp * v
     positive = mf.where(tp > tp.shift(1), 0.0)
     negative = mf.where(tp < tp.shift(1), 0.0)

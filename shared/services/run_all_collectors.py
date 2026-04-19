@@ -8,8 +8,8 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Any
 
 from dotenv import load_dotenv
 
@@ -23,7 +23,6 @@ from shared.market_data.candle_service import CandleService
 from shared.market_data.gap_detector import GapDetector
 from shared.market_data.retention import RetentionManager
 from shared.collectors.news.rss_collector import RSSCollector
-from shared.collectors.discord.discord_collector import DiscordCollector
 from shared.collectors.telegram.telegram_collector import TelegramCollector
 from shared.collectors.telegram.tradingview_monitor import TradingViewMonitor
 from shared.collectors.base import BaseCollector

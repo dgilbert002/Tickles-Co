@@ -69,7 +69,7 @@ from shared.trading import (
 
 async def _acquire_pool(dsn: Optional[str]) -> Any:
     if dsn:
-        import asyncpg
+        import asyncpg  # type: ignore[import-not-found]
 
         class _DsnPool:
             def __init__(self, pool: Any) -> None:

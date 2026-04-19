@@ -27,7 +27,7 @@ import math
 from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from .core import register
 

@@ -56,7 +56,7 @@ import os
 import socket
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Optional
 
 import redis
 

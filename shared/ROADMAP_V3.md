@@ -3573,5 +3573,61 @@ additive — no earlier phase depends on it.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 38 (Validation + code-analysis + docs
-freeze) is next.*
+## Phase 38 - Validation + code-analysis + docs freeze
+
+### Purpose
+
+Phase 38 is the audit stamp. It does not ship new features or DB
+migrations; it proves that the system we built in phases 13-37 is
+lint-clean, type-clean, security-clean, and that the full regression
+is green both locally and on the VPS. It also freezes the service
+index into a human-readable document so future operators can reason
+about the system without reading source.
+
+### Deliverables
+
+* `shared/docs/SERVICES.md` - canonical table of the 23 registered
+  services plus every database artefact each phase owns.
+* `shared/docs/PHASE_38_VALIDATION.md` - detailed audit report
+  (tooling, findings, reproduction recipe, rollback).
+* Safe hygiene fixes on pre-existing Phase-16/18 code:
+  - `shared/backtest/accessible.py` - split two semicolon-joined
+    statements (E702); annotated two B608 false-positives with
+    `# nosec B608`.
+  - `shared/backtest/indicators/core.py` +
+    `smart_money.py` - renamed single-letter variable `l` to `lo`
+    for "low" (E741). Math is byte-for-byte identical; regression
+    unchanged.
+  - CLI `# type: ignore` annotations for asyncpg / pandas lazy
+    imports (`treasury_cli`, `services_catalog_cli`, `auditor_cli`,
+    `features_cli`, `engines_cli`).
+
+### Audit results
+
+```
+ruff    : 0 findings on 22 phase module directories.
+mypy    : 0 errors on Phase 22-37 surface; 12 pre-existing errors
+          in shared/services/run_all_collectors.py (legacy
+          orchestrator, out of scope, documented).
+bandit  : 0 medium/high findings (-ll). Low-severity findings are
+          informational and unchanged.
+pytest  : 563 / 563 green locally (33s).
+VPS     : 563 / 563 green on VPS (80s).
+```
+
+### Service registry frozen
+
+23 services total. 4 are live on the VPS (`candle-daemon`,
+`catalog`, `bt-workers`, `md-gateway`); the other 19 are staged
+with migrations applied but systemd units intentionally off until
+operators switch them on.
+
+### Rollback
+
+Phase 38 changed no runtime behaviour. `git revert` of the Phase-38
+commit removes the two new docs and reverts the five hygiene fixes;
+tests and deploy state are unaffected.
+
+---
+
+*End of ROADMAP_V3.md. Phase 39 (End-to-end drill) is next.*

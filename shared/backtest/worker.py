@@ -31,11 +31,9 @@ import logging
 import os
 import signal
 import socket
-import sys
 import threading
-import time
 import traceback
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 from backtest.candle_loader import load_candles_sync
 from backtest.ch_writer import ClickHouseWriter

@@ -34,7 +34,6 @@ import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 import pandas as pd
 
