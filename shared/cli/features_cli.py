@@ -74,49 +74,82 @@ def _load_candles_from_db(
     end: Optional[str],
     limit: int,
 ) -> pd.DataFrame:
-    """Best-effort load from the existing candles Postgres table.
+    """Best-effort load from the existing ``tickles_shared.candles`` table.
 
-    Uses asyncpg (already in the venv on VPS). Falls back cleanly if
-    the DB isn't reachable — the operator can pass ``--parquet PATH``
-    instead.
+    Uses the project's own ``DatabasePool`` (``shared.utils.db``) so we
+    pick up the standard ``DB_HOST / DB_PORT / DB_USER / DB_PASSWORD``
+    env config that every other service already uses. Falls back
+    cleanly if the DB isn't reachable — the operator can pass
+    ``--parquet PATH`` instead.
+
+    Falls back to raw asyncpg + ``TICKLES_CANDLES_DSN`` if the project
+    db utilities aren't importable (e.g. running from an unrelated
+    venv).
     """
     import asyncio
     import os
 
     try:
+        from shared.utils import db as _dbmod  # type: ignore[import-not-found]
+    except Exception:
+        _dbmod = None  # type: ignore[assignment]
+
+    async def _fetch_via_pool() -> List[Any]:
+        pool = await _dbmod.get_shared_pool()  # type: ignore[union-attr]
+        where = ["symbol = $1", "venue = $2", "timeframe = $3"]
+        params: List[Any] = [symbol, venue, timeframe]
+        idx = 4
+        if start:
+            where.append(f"ts >= ${idx}")
+            params.append(pd.Timestamp(start).to_pydatetime())
+            idx += 1
+        if end:
+            where.append(f"ts <= ${idx}")
+            params.append(pd.Timestamp(end).to_pydatetime())
+            idx += 1
+        sql = (
+            "SELECT ts, open, high, low, close, volume "
+            "FROM candles WHERE " + " AND ".join(where) + f" ORDER BY ts DESC LIMIT ${idx}"
+        )
+        params.append(limit)
+        return list(await pool.fetch_all(sql, tuple(params)))
+
+    async def _fetch_via_dsn() -> List[Any]:
         import asyncpg  # type: ignore[import-not-found]
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(f"asyncpg not installed: {exc}") from exc
 
-    dsn = os.environ.get(
-        "TICKLES_CANDLES_DSN",
-        "postgresql://paperclip:paperclip@127.0.0.1:54329/tickles_shared",
-    )
-    where = ["symbol = $1", "venue = $2", "timeframe = $3"]
-    params: List[Any] = [symbol, venue, timeframe]
-    idx = 4
-    if start:
-        where.append(f"ts >= ${idx}")
-        params.append(pd.Timestamp(start).to_pydatetime())
-        idx += 1
-    if end:
-        where.append(f"ts <= ${idx}")
-        params.append(pd.Timestamp(end).to_pydatetime())
-        idx += 1
-    sql = (
-        "SELECT ts, open, high, low, close, volume "
-        "FROM candles WHERE " + " AND ".join(where) + f" ORDER BY ts DESC LIMIT ${idx}"
-    )
-    params.append(limit)
-
-    async def _fetch() -> List[Any]:
+        dsn = os.environ.get("TICKLES_CANDLES_DSN")
+        if not dsn:
+            raise RuntimeError(
+                "TICKLES_CANDLES_DSN not set and shared.utils.db not importable"
+            )
+        where = ["symbol = $1", "venue = $2", "timeframe = $3"]
+        params: List[Any] = [symbol, venue, timeframe]
+        idx = 4
+        if start:
+            where.append(f"ts >= ${idx}")
+            params.append(pd.Timestamp(start).to_pydatetime())
+            idx += 1
+        if end:
+            where.append(f"ts <= ${idx}")
+            params.append(pd.Timestamp(end).to_pydatetime())
+            idx += 1
+        sql = (
+            "SELECT ts, open, high, low, close, volume "
+            "FROM candles WHERE " + " AND ".join(where) + f" ORDER BY ts DESC LIMIT ${idx}"
+        )
+        params.append(limit)
         conn = await asyncpg.connect(dsn)
         try:
             return list(await conn.fetch(sql, *params))
         finally:
             await conn.close()
 
-    rows = asyncio.run(_fetch())
+    rows: List[Any]
+    if _dbmod is not None:
+        rows = asyncio.run(_fetch_via_pool())
+    else:  # pragma: no cover
+        rows = asyncio.run(_fetch_via_dsn())
+
     if not rows:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
     df = pd.DataFrame([dict(r) for r in rows])
