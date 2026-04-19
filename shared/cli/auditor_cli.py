@@ -194,7 +194,7 @@ def cmd_run_parity_check(args: argparse.Namespace) -> int:
     df = _synthetic_candles()
     cfg = _default_cfg()
     comp = ParityComparator()
-    tol_kwargs: Dict[str, float] = {}
+    tol_kwargs: Dict[str, Any] = {}
     if getattr(args, "pnl_pct_abs", None) is not None:
         tol_kwargs["pnl_pct_abs"] = float(args.pnl_pct_abs)
     if getattr(args, "sharpe_abs", None) is not None:
@@ -203,7 +203,9 @@ def cmd_run_parity_check(args: argparse.Namespace) -> int:
         tol_kwargs["winrate_abs"] = float(args.winrate_abs)
     if getattr(args, "max_drawdown_abs", None) is not None:
         tol_kwargs["max_drawdown_abs"] = float(args.max_drawdown_abs)
-    tolerances = ParityTolerances(**tol_kwargs) if tol_kwargs else None
+    tolerances: Optional[ParityTolerances] = (
+        ParityTolerances(**tol_kwargs) if tol_kwargs else None
+    )
     inp = ParityCheckInput(
         strategy_id=args.strategy_id,
         candles_df=df,
