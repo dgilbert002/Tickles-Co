@@ -1394,5 +1394,109 @@ Phases 13 – 18 and was not touched.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 20 (Feast Feature Store + Redis online /
-DuckDB offline) is next in the master-plan sequence.*
+## Phase 20 — Feature Store (Feast-style, Redis + DuckDB)
+
+### Purpose
+
+Strategies, agents, and the optimiser all need the same short list
+of engineered features (rolling returns, volatility, microstructure,
+…) computed the same way at train, backtest, and live time. Phase 20
+adds a thin feature-store layer so we never re-derive those values
+at call-site and never accidentally drift between paper and live.
+
+We deliberately do **not** depend on the upstream `feast` package —
+its install footprint is heavy and its Redis / DuckDB drivers are
+more than we need. Instead we implement a tiny Feast-compatible API
+on top of the infra we already run:
+
+  * **online store** = Redis (already on the box, already used by
+    Phase 17 market-data gateway).
+  * **offline store** = DuckDB + parquet files on disk, one
+    partition per (feature_view, entity_key).
+
+If we ever need Feast proper, the primitives (`Entity`, `Feature`,
+`FeatureView`, `FeatureStore`) already mirror its names and
+semantics, so migration is a driver swap, not a rewrite.
+
+### Built
+
+**Package — `shared/features/`**
+
+* `schema.py` — `Entity`, `Feature`, `FeatureView`, `FeatureDtype`
+  dataclasses. `FeatureView.compute(candles, entity_key, params) ->
+  DataFrame` + `validate_output` so every view is self-describing.
+* `registry.py` — process-global `FEATURE_VIEWS` dict +
+  `register_feature_view` / `list_feature_views` / `get_feature_view`.
+* `online_store.py` — `RedisOnlineStore` (HASH-per-entity, TTL per
+  view) + `InMemoryOnlineStore` test double.
+* `offline_store.py` — DuckDB / parquet store. Partition layout is
+  `<root>/<view>/entity=<key>/data.parquet`; `write_batch` appends +
+  dedupes on timestamp, `read_range` does point-in-time queries, and
+  `get_historical_features` joins multiple entity keys.
+* `store.py` — `FeatureStore` façade tying online + offline
+  together; `materialize`, `get_online`, `get_online_many`,
+  `get_historical`.
+* `feature_sets.py` — three starter views, registered on import:
+  `returns_basic` (5 features), `volatility_basic` (4),
+  `microstructure_basic` (4).
+
+**Operator CLI — `shared/cli/features_cli.py`**
+
+Six subcommands, single-line JSON stdout:
+
+* `list` — every registered feature view + entities + features.
+* `describe <name>` — full metadata for one view.
+* `materialize` — pull candles from the Postgres `candles` table
+  (or `--parquet PATH`) and write features to both stores.
+  Flags: `--view`, `--entity`, `--symbol`, `--venue`, `--timeframe`,
+  `--start`, `--end`, `--limit`, `--no-online`, `--no-offline`,
+  `--in-memory`.
+* `online-get --view --entity` — latest online vector.
+* `historical-get --view --entities --start --end --head` — point-
+  in-time range.
+* `partitions --view` — list entity partitions already on disk.
+
+**Tests — `shared/tests/test_features.py`**
+
+18 tests covering: built-in views registered; `validate_output`
+rejects bad columns + bad index; custom views register and resolve;
+online-store round-trip + `read_many` + key shape + deserialise-row
+edge cases; offline-store write/read + dedupe + partitions; high-
+level `FeatureStore.materialize` + `get_online` + `get_historical`;
+unknown view raises; CLI `list` / `describe` / `materialize` /
+`online-get` / `historical-get` / `partitions`.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/` green locally *and* on VPS (159 passing).
+2. `ruff` + `mypy --ignore-missing-imports` clean on the new
+   modules.
+3. `python -m shared.cli.features_cli list` reports ≥ 3 views.
+4. `python -m shared.cli.features_cli describe returns_basic`
+   returns a view with 5 features.
+5. Materialise against a live symbol on VPS and verify both a
+   Redis HASH (`tickles:fv:returns_basic:binance:BTC/USDT`) and a
+   parquet file (`/opt/tickles/var/features/returns_basic/
+   entity=binance_BTC_USDT/data.parquet`) exist afterwards.
+6. Phases 13 – 19 unchanged — indicators still ≥ 250, engines CLI
+   still lists classic/vectorbt/nautilus, systemd units still
+   active(running).
+
+### Rollback
+
+Phase 20 is pure additive code. Rollback = `git revert` + remove
+the feature-store directory if operator wants to reclaim disk:
+
+```bash
+cd /opt/tickles
+git revert <phase-20-commit>
+rm -rf /opt/tickles/var/features   # optional
+redis-cli --scan --pattern 'tickles:fv:*' | xargs -r redis-cli del  # optional
+```
+
+No systemd units were added, no schema migrations were run.
+
+---
+
+*End of ROADMAP_V3.md. Phase 21 (Rule-1 Continuous Auditor) is
+next.*
