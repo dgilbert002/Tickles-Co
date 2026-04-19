@@ -362,6 +362,41 @@ def _seed_known_services() -> None:
             tags={"phase": "34"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="backtest-submitter",
+            kind="api",
+            module="shared.cli.backtest_cli",
+            description=(
+                "Phase 35 Local-to-VPS Backtest Submission. Operator "
+                "CLI that records backtests in "
+                "public.backtest_submissions and (optionally) "
+                "enqueues them into the Phase-16 Redis queue. Runs on "
+                "demand from laptops; there is no always-on systemd "
+                "unit for the submitter itself."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "35"},
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="backtest-runner",
+            kind="worker",
+            module="shared.backtest.worker",
+            description=(
+                "Phase 16 Redis-backed backtest worker, extended in "
+                "Phase 35 to publish lifecycle updates "
+                "(running/completed/failed) back into "
+                "public.backtest_submissions via "
+                "SubmissionWorkerHook. Stays disabled on the VPS "
+                "until the Phase-35 worker hook is wired into the "
+                "deployment."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "35"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

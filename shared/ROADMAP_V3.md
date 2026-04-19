@@ -3134,5 +3134,166 @@ the only consumer of this phase's tables.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 35 (Local-to-VPS Backtest Submission)
-is next.*
+## Phase 35 — Local-to-VPS Backtest Submission
+
+### Purpose (plain English)
+
+Before Phase 35, submitting a backtest to the VPS meant pushing a
+raw envelope into Redis via `shared.backtest.queue.BacktestQueue` and
+*hoping*. There was no durable record that you ever asked for that
+backtest, no way to look up the result from your laptop later, and
+no idempotency — submit the same spec twice and you paid for two
+identical runs. Phase 35 fixes all three in one layer.
+
+The deliverable is a tiny, boring, PostgreSQL-backed **audit and
+status table** (`public.backtest_submissions`) that sits in front of
+the existing Redis queue. Every submission creates a row; the worker
+transitions that row through `submitted → queued → running →
+completed | failed | cancelled`; the local CLI can then query the
+row for the result summary and Clickhouse artefact pointer without
+ever touching Redis directly.
+
+Two design choices worth calling out:
+
+1. **The queue stays the execution transport.** We do *not* rip out
+   Phase 16. The Phase-35 submitter is a thin wrapper that writes to
+   Postgres first, then hands the canonical payload — annotated with
+   the new `submission_id` — to the existing `BacktestQueue`. The
+   worker picks the envelope up exactly as before; the only change
+   is a one-line hook (`SubmissionWorkerHook.on_start / on_complete
+   / on_fail`) that flips the `backtest_submissions` row's status.
+2. **Hash-based idempotency is enforced in the DB, not in Python.**
+   The partial unique index
+   `backtest_submissions_hash_active_idx` covers
+   `(spec_hash) WHERE status IN ('submitted','queued','running','completed')`,
+   so two clients racing the same spec can't both win — one insert
+   hits the index, the submitter reads back the existing row and
+   returns it as-is. Cancelling or failing a run releases the slot
+   for a clean retry.
+
+### What was built
+
+* **Migration** — `shared/backtest_submit/migrations/2026_04_19_phase35_submissions.sql`:
+  * `public.backtest_submissions` (company_id, client_id, spec
+    JSONB, spec_hash, status, queue_job_id, result_summary,
+    artefacts, error, metadata, submitted/queued/started/
+    completed/updated timestamps).
+  * `public.backtest_submissions_active` view (status in
+    submitted/queued/running).
+  * Indexes: `_status_idx`, `_client_idx`, and the idempotent
+    `_hash_active_idx` partial unique index.
+* **Protocol** — `shared/backtest_submit/protocol.py`:
+  * `BacktestSpec` dataclass with `canonical_payload()` (sorted
+    symbols, sorted params) and `hash()` (SHA256 of the canonical
+    JSON) — this is the contract for dedupe.
+  * `BacktestSubmission` with `from_spec(...)`, `is_active`,
+    `is_terminal`, `to_dict()`.
+  * Status constants: `STATUS_SUBMITTED`, `STATUS_QUEUED`,
+    `STATUS_RUNNING`, `STATUS_COMPLETED`, `STATUS_FAILED`,
+    `STATUS_CANCELLED` and the `ACTIVE_STATUSES` /
+    `TERMINAL_STATUSES` tuples.
+* **Store** — `shared/backtest_submit/store.py`
+  (`BacktestSubmissionStore`): async wrappers for
+  `create / get / get_by_hash / mark_queued / mark_running /
+  mark_completed / mark_failed / mark_cancelled / list`. JSONB
+  columns are serialised with `json.dumps(..., default=str)`, and
+  the `_row` helper hydrates rows back into dataclasses (handles
+  both `dict` and `str` JSONB return types from different drivers).
+* **In-memory pool** —
+  `shared/backtest_submit/memory_pool.py`
+  (`InMemoryBacktestSubmitPool`): a pure-Python test double that
+  mimics the partial unique index and the status-lifecycle queries.
+  Lets the CLI `demo` subcommand run without Postgres or Redis.
+* **Submitter** — `shared/backtest_submit/submitter.py`
+  (`BacktestSubmitter` + `QueueProtocol` + `InMemoryQueue`):
+  * `submit(spec, ...)` writes the row, then (if a queue is
+    provided) enqueues a canonical payload with the new
+    `submission_id` baked in.
+  * On queue failure, the row is marked `failed` with a clear error
+    message so the audit trail still exists.
+  * On hash collision, returns the existing row — idempotent, zero
+    Redis traffic.
+* **Worker hook** — `shared/backtest_submit/worker_hook.py`
+  (`SubmissionWorkerHook`): three methods (`on_start`,
+  `on_complete`, `on_fail`, `on_cancel`) that the existing
+  `shared.backtest.worker` process calls at the right moments. All
+  exceptions inside the hook are logged but swallowed so a Postgres
+  hiccup can never kill a running worker.
+* **CLI** — `shared/cli/backtest_cli.py`:
+  * `apply-migration` / `migration-sql` — DB bootstrap helpers.
+  * `submit --spec @file.json [--with-queue]` — the primary command.
+  * `status <id>`, `list [--status X] [--client-id Y]
+    [--active-only]`, `cancel <id>`, and `wait <id>` (polls until
+    terminal, exit code 0 on completed / 2 on failed / 3 on
+    timeout).
+  * `demo` — end-to-end in-memory showcase.
+* **Service registry** — two Phase-35 descriptors added to
+  `shared/services/registry.py`:
+  * `backtest-submitter` (kind=api) — the laptop CLI.
+  * `backtest-runner` (kind=worker) — the Phase-16 worker extended
+    with the submission hook. Both are `enabled_on_vps=False` until
+    the worker-side integration is deployed in a follow-up.
+* **Tests** — `shared/tests/test_backtest_submit.py` (16 tests):
+  migration presence, canonical hashing (symbol/param ordering
+  invariance, param sensitivity), store CRUD + lifecycle
+  transitions, active-only filtering, submitter queue/hook behaviour
+  (including dedupe skipping the second enqueue), worker hook
+  success + failure paths, and CLI smoke tests
+  (`migration-sql`, `apply-migration --path-only`,
+  `submit --in-memory`, `demo`).
+
+### Live demo
+
+```
+$ py -m shared.cli.backtest_cli demo
+[demo] submitting three backtests ...
+  submitted id=1 hash=2565bae1b5a1 status=queued queue_job=mem-000001
+  submitted id=2 hash=b1e6d4321621 status=queued queue_job=mem-000002
+  submitted id=3 hash=a8bedce0bd04 status=queued queue_job=mem-000003
+
+[demo] resubmit of same spec returns id=1 status=queued (idempotent)
+
+[demo] fake worker processing queue ...
+  worker finished id=1  pnl=$  73.45  trades=23   sharpe=0.7
+  worker finished id=2  pnl=$ 196.90  trades=26   sharpe=1.4
+  worker finished id=3  pnl=$  70.35  trades=29   sharpe=2.1
+
+[demo] final statuses:
+  id=1 status=completed strategy=rsi_crossover      pnl=$  73.45 trades=23 sharpe=0.7
+  id=2 status=completed strategy=donchian_breakout  pnl=$ 196.90 trades=26 sharpe=1.4
+  id=3 status=completed strategy=ma_revert          pnl=$  70.35 trades=29 sharpe=2.1
+```
+
+The "resubmit is idempotent" line is the Phase-35 promise in one
+sentence: operators can't accidentally duplicate a run by
+re-pressing enter.
+
+### Success criteria
+
+* 16/16 Phase-35 tests green.
+* Full regression 527/527 green (previous 511 + 16 new).
+* `ruff`, `mypy --explicit-package-bases`, `bandit` all clean on
+  the new code.
+* Service registry reports 21 services, including
+  `backtest-submitter` and `backtest-runner` tagged `phase=35`.
+* `py -m shared.cli.backtest_cli demo` runs end-to-end without
+  Redis or Postgres.
+
+### Rollback
+
+```sql
+BEGIN;
+DROP VIEW IF EXISTS public.backtest_submissions_active;
+DROP TABLE IF EXISTS public.backtest_submissions;
+COMMIT;
+```
+
+Then `git revert` the Phase 35 commit and remove the
+`backtest-submitter` / `backtest-runner` descriptors from
+`shared/services/registry.py`. The Phase-16 `BacktestQueue` is
+untouched, so the existing Redis-only flow keeps working.
+
+---
+
+*End of ROADMAP_V3.md. Phase 36 (Owner Dashboard + Telegram OTP +
+Mobile) is next.*
