@@ -158,12 +158,23 @@ def cmd_sample(args: argparse.Namespace) -> int:
 
 
 def cmd_parity(args: argparse.Namespace) -> int:
-    from shared.backtest.parity import parity_summary
+    from shared.backtest.parity import ParityTolerances, parity_summary
 
     df = _synthetic_ohlcv()
     cfg = _default_cfg()
+    tol = ParityTolerances(
+        num_trades_abs=3,
+        pnl_pct_abs=args.pnl_pct_abs,
+        sharpe_abs=args.sharpe_abs,
+        winrate_abs=args.winrate_abs,
+        max_drawdown_abs=args.max_drawdown_abs,
+    )
     report = parity_summary(
-        df, _sma_cross, cfg, engines=args.engines.split(",") if args.engines else None
+        df,
+        _sma_cross,
+        cfg,
+        engines=args.engines.split(",") if args.engines else None,
+        tolerances=tol,
     )
     emit({"ok": report.to_dict()["ok"], "report": report.to_dict()})
     return EXIT_OK if report.to_dict()["ok"] else EXIT_FAIL
@@ -175,6 +186,10 @@ def _build_sample(p: argparse.ArgumentParser) -> None:
 
 def _build_parity(p: argparse.ArgumentParser) -> None:
     p.add_argument("--engines", default="", help="comma-separated list; default = classic,vectorbt")
+    p.add_argument("--pnl-pct-abs", dest="pnl_pct_abs", type=float, default=5.0)
+    p.add_argument("--sharpe-abs", dest="sharpe_abs", type=float, default=8.0)
+    p.add_argument("--winrate-abs", dest="winrate_abs", type=float, default=15.0)
+    p.add_argument("--max-drawdown-abs", dest="max_drawdown_abs", type=float, default=10.0)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
