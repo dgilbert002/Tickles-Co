@@ -1736,5 +1736,118 @@ git revert <phase-22-commit>
 
 ---
 
-*End of ROADMAP_V3.md. Phase 23 (Enrichment Pipeline) is
-next.*
+## Phase 23 — Enrichment Pipeline
+
+### Purpose
+
+Raw news items (Discord / Telegram / RSS / TradingView) land in
+``public.news_items`` with a headline + content and nothing else.
+Every downstream consumer (symbols, agents, the optimiser) wants
+the *enriched* view: which instruments are we talking about? is
+the sentiment bullish or bearish? is this even worth reading?
+
+Phase 23 ships a deterministic, low-dependency enrichment
+pipeline that fills those fields in without requiring an LLM for
+the baseline case. It's pluggable — stages share a common
+interface so a later phase can swap in a transformer or route
+the long-tail to OpenClaw without touching the orchestration.
+
+### Built
+
+**Package — `shared/enrichment/`**
+
+* `schema.py` — `EnrichmentResult` (the accumulator that flows
+  through the pipeline), `EnrichmentStage` ABC, `SymbolMatch`.
+* `pipeline.py` — `Pipeline` runner with duplicate-stage-name
+  guard and per-stage timing/error capture. `build_default_pipeline()`
+  wires language → symbols → sentiment → relevance in that
+  order.
+* `stages/language.py` — ASCII-ratio + English-stopword heuristic
+  returning `en | non_en | unknown`. No native deps.
+* `stages/symbol_resolver.py` — three-pass regex resolver
+  (pair form `BTC/USDT`, ticker form `$BTC`, bare-word `BTC`).
+  Consumes a preloaded instrument list (shape mirrors the
+  `instruments` table) or falls back to a compiled-in whitelist
+  of 11 liquid majors. Matches are deduped per (symbol, exchange).
+* `stages/sentiment.py` — keyword-based scorer with curated
+  bullish/bearish vocab, simple negation handling, multi-word
+  phrase support. Score is in `[-1, +1]`, label at `±0.1`.
+* `stages/relevance.py` — composite score using symbol count,
+  action verbs (long/short/buy/sell/TP/SL), numeric tokens,
+  length, language, and sentiment polarity.
+* `news_enricher.py` — `NewsEnricher` DB worker. Reads pending
+  rows from `public.news_items` (via the new
+  `news_items_pending_enrichment` view), runs the pipeline,
+  writes back `sentiment` + `instruments` + `enrichment` jsonb
+  + `enriched_at`. Uses `shared.utils.db.get_shared_pool` if
+  available, else falls back to `TICKLES_SHARED_DSN`.
+
+**DB migration — `shared/enrichment/migrations/2026_04_19_phase23_enrichment.sql`**
+
+Adds two columns + two indices + one view. Idempotent
+(`IF NOT EXISTS` throughout). Rollback is a single `ALTER
+TABLE ... DROP COLUMN` pair.
+
+**Operator CLI — `shared/cli/enrichment_cli.py`**
+
+Six subcommands, single-line JSON stdout:
+
+* `stages` — list every registered stage.
+* `enrich-text --headline --content` — ad-hoc pipeline run, no
+  DB touch. Perfect for tuning the vocab lists.
+* `pending-count [--dsn]` — how many rows still need enriching?
+* `enrich-batch --limit N` — fetch + enrich + write back.
+* `dry-run --limit N` — fetch + enrich, do NOT write.
+* `apply-migration` — print the SQL path + a ready-to-paste
+  psql command.
+
+**Tests — `shared/tests/test_enrichment.py`**
+
+24 tests covering: schema JSON-roundtrip + empty/full summaries;
+each stage (English / non-English / unknown language; pair /
+ticker / bare-word / custom-instruments / no-false-positive symbol
+resolution; bullish / bearish / neutral / negated sentiment;
+high- and low-relevance inputs); `Pipeline` duplicate-name guard,
+all-stages happy path, exception swallowing + error capture;
+`enrich_text_once` convenience; CLI `stages` / `enrich-text` /
+`apply-migration`.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/test_enrichment.py` — 24/24 green
+   locally and on VPS.
+2. Regression across Phases 18–23 — 97/97 green.
+3. `ruff` + `mypy --ignore-missing-imports
+   --explicit-package-bases` clean on all 10 Phase 23 source
+   files.
+4. `python -m shared.cli.enrichment_cli stages` returns 4
+   registered stages in the expected order.
+5. `python -m shared.cli.enrichment_cli enrich-text
+   --headline "BTC long" --content "BTC/USDT pumping"` returns
+   a summary with `BTC/USDT` in symbols and positive sentiment.
+6. Migration applies cleanly on VPS (`psql -f
+   2026_04_19_phase23_enrichment.sql`) and `\d news_items`
+   shows the new `enrichment` + `enriched_at` columns.
+7. Existing Phase 13–22 services untouched.
+
+### Rollback
+
+Pure additive. Code rollback = `git revert`. DB rollback:
+
+```sql
+BEGIN;
+DROP VIEW IF EXISTS public.news_items_pending_enrichment;
+DROP INDEX IF EXISTS idx_news_enrichment_gin;
+DROP INDEX IF EXISTS idx_news_enriched_at;
+ALTER TABLE public.news_items DROP COLUMN IF EXISTS enriched_at;
+ALTER TABLE public.news_items DROP COLUMN IF EXISTS enrichment;
+COMMIT;
+```
+
+No systemd units were added by Phase 23 — the Phase 22
+`tickles-service@.service` template can wrap `NewsEnricher`
+in a later phase once we decide the cadence.
+
+---
+
+*End of ROADMAP_V3.md. Phase 24 (Services Catalog) is next.*
