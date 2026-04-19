@@ -3630,4 +3630,99 @@ tests and deploy state are unaffected.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 39 (End-to-end drill) is next.*
+## Phase 39 - End-to-end drill
+
+> Single-command go/no-go for the entire Phase 13-37 system.
+
+### Why
+
+After Phase 38 froze the docs, we needed one repeatable command an
+operator (or CI) can run that exercises every phase end-to-end and
+returns a single pass / fail. Without that, regressions can hide
+inside one CLI for weeks before someone notices. The drill is read-
+only, in-memory, and intentionally does NOT touch live exchanges,
+live PostgreSQL schemas owned by other phases, or live Telegram
+traffic.
+
+### What was built
+
+* `shared/cli/drill_cli.py` - the harness. Two subcommands:
+  * `list` - prints the 19 steps the drill will run.
+  * `run [--out file.json] [--stop-on-fail]` - executes them and
+    emits a JSON report.
+* `shared/docs/PHASE_39_DRILL.md` - the operator's guide (table of
+  steps, how to run, rollback).
+* `shared/docs/PHASE_39_DRILL.json` - last local report.
+* `shared/docs/PHASE_39_DRILL_VPS.json` - last VPS report.
+
+### Coverage (19 steps)
+
+| Phase | Step                          | Kind   |
+|-------|-------------------------------|--------|
+| 14    | market_data_layout            | python |
+| 18    | indicators_registry           | python |
+| 19    | backtest_engines_registry     | python |
+| 21    | auditor_store_import          | python |
+| 22    | services_registry_snapshot    | python |
+| 23    | enrichment_default_pipeline   | python |
+| 25    | treasury_pure_size            | cli    |
+| 26    | execution_paper_simulate      | cli    |
+| 27    | regime_classifiers            | python |
+| 28    | guardrails_rule_kinds         | python |
+| 29    | altdata_sources               | cli    |
+| 30    | events_kinds                  | cli    |
+| 31-32 | souls_personas                | python |
+| 33    | arb_demo                      | cli    |
+| 33    | copy_demo                     | cli    |
+| 34    | strategy_demo                 | cli    |
+| 35    | backtest_submit_demo          | cli    |
+| 36    | dashboard_import              | python |
+| 37    | mcp_demo                      | cli    |
+
+### Live results
+
+```
+Local Win11 : 19 / 19 passed in ~21s
+VPS         : 19 / 19 passed in ~31s
+```
+
+Tangibles surfaced by the drill on the live system:
+
+* Phase 18 - 260 indicators registered, categories `crash_protection,
+  momentum, pattern, performance, smart_money, statistical, trend,
+  volatility, volume`.
+* Phase 19 - engines `classic, vectorbt, nautilus`.
+* Phase 22 - 23 services registered across 18 phases; 4 enabled on
+  VPS (`candle-daemon, catalog, bt-workers, md-gateway`).
+* Phase 27 - classifiers `composite, trend, volatility`; regimes
+  `bear, bull, crash, high_vol, low_vol, recovery, sideways,
+  unknown`.
+* Phase 28 - rule kinds `daily_loss, equity_drawdown,
+  position_notional, regime_crash, stale_data`; actions `alert,
+  flatten_positions, halt_new_orders`.
+* Phase 31-32 - all 7 souls present.
+* Phase 33 - arb scanner streams live CCXT quotes from
+  binance / coinbase / kraken / bybit / bitfinex.
+* Phase 35 - submission queue + worker hook completes 3 in-memory
+  backtests with PnL / trades / sharpe.
+* Phase 37 - JSON-RPC MCP server logs 4 invocations across 7 tools.
+
+### How to run
+
+```bash
+python -m shared.cli.drill_cli list
+python -m shared.cli.drill_cli run --out shared/docs/PHASE_39_DRILL.json
+```
+
+Exit code is `0` iff every step succeeded - safe for use as a
+pre-deploy gate.
+
+### Rollback
+
+Phase 39 is purely additive - no DB migration, no service registry
+entry, no systemd unit. Delete the four new files (`drill_cli.py`
+plus the three docs) and the system is back to the Phase-38 baseline.
+
+---
+
+*End of ROADMAP_V3.md. Phases 13-39 are now complete and frozen.*
