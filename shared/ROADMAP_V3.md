@@ -3452,4 +3452,126 @@ untouched — the dashboard is strictly additive.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 37 (MCP stack) is next.*
+## Phase 37 — MCP stack
+
+### What we built
+
+A Model Context Protocol (MCP) server that exposes Tickles
+capabilities as standardised tools to LLM-native agents (Paperclip,
+OpenClaw, Claude Desktop, etc.). MCP is JSON-RPC 2.0; we implemented
+the subset we actually need and kept the surface small and
+well-typed so new tools are trivial to add.
+
+Think of it like a "USB-C port for the trading house": any agent that
+speaks MCP can now call `services.list`, `backtest.submit`,
+`dashboard.snapshot`, etc., without having to know anything about our
+internal modules or databases.
+
+### Deliverables
+
+* `shared/mcp/migrations/2026_04_19_phase37_mcp.sql` creates:
+  * `public.mcp_tools` — declarative catalogue of exposed tools with
+    `input_schema`, `read_only`, `enabled` flags. Operators can toggle
+    tools on/off without redeploy.
+  * `public.mcp_invocations` — append-only audit log: every tool call
+    records caller, transport, params, result/error, latency_ms.
+  * `public.mcp_invocations_recent` view (last 500).
+* `shared/mcp/protocol.py` — JSON-RPC 2.0 dataclasses (`JsonRpcRequest`,
+  `JsonRpcResponse`, `rpc_error`), `McpTool`, `McpResource`,
+  `McpInvocation`. Defines standard error codes
+  (`METHOD_NOT_FOUND`, `TOOL_NOT_FOUND`, `TOOL_DISABLED`,
+  `TOOL_FAILED`). Protocol version pinned to `2024-11-05`.
+* `shared/mcp/store.py` — async `ToolCatalogStore` (upsert, list,
+  enable/disable) and `InvocationStore` (append-only record, recent
+  query). Accepts any asyncpg-shaped pool.
+* `shared/mcp/memory_pool.py` — `InMemoryMcpPool` so tests run
+  without Postgres.
+* `shared/mcp/registry.py` — in-process `ToolRegistry` plus factory
+  builders for seven built-in tools:
+    - `ping` — heartbeat.
+    - `services.list` — wraps the in-process ServiceRegistry.
+    - `strategy.intents.recent` — wraps Phase-34 intents.
+    - `backtest.submit` — wraps Phase-35 submitter.
+    - `backtest.status` — wraps Phase-35 store.
+    - `dashboard.snapshot` — wraps Phase-36 snapshot builder.
+    - `regime.current` — wraps Phase-27 regime service.
+* `shared/mcp/server.py` — `McpServer` JSON-RPC dispatcher. Handles
+  `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`,
+  `resources/read`. Wraps every `tools/call` in try/finally so the
+  invocation store always gets a row (success or failure).
+* `shared/mcp/transports/stdio.py` — `run_stdio` reads newline-
+  delimited JSON from stdin and writes responses to stdout. Matches
+  how Claude Desktop spawns local MCP servers.
+* `shared/mcp/transports/http.py` — `build_http_app` creates an
+  `aiohttp` app with optional bearer-token auth middleware. Single
+  endpoint `POST /mcp` plus `GET /healthz`.
+* `shared/cli/mcp_cli.py` — subcommands:
+    - `apply-migration` / `migration-sql`
+    - `tools-list`
+    - `tools-call <name> --args JSON`
+    - `serve-stdio`
+    - `serve-http --host --port --token`
+    - `invocations --dsn --limit`
+    - `demo [--verbose]`
+* `shared/services/registry.py` — new `mcp-server` descriptor
+  (`kind=api`, `tags={phase: 37}`, `enabled_on_vps=False`).
+* `shared/tests/test_mcp.py` — 16 tests covering migration, stores,
+  registry, JSON-RPC dispatcher (success / error / notification /
+  unknown tool / method not found / invalid params), stdio
+  round trip, HTTP transport with and without bearer auth, CLI
+  `demo` smoke test.
+
+### Live demo
+
+```
+$ py -m shared.cli.mcp_cli tools-list
+{"count": 7, "tools": [
+  "backtest.status", "backtest.submit",
+  "dashboard.snapshot", "ping", "regime.current",
+  "services.list", "strategy.intents.recent"
+]}
+
+$ py -m shared.cli.mcp_cli demo
+{
+  "transcript_steps": 6,
+  "invocations_logged": 4,
+  "tools_registered": [
+    "backtest.status", "backtest.submit",
+    "dashboard.snapshot", "ping", "regime.current",
+    "services.list", "strategy.intents.recent"
+  ]
+}
+```
+
+The `demo` runs the full JSON-RPC sequence against an in-memory pool:
+`initialize` -> `tools/list` -> four `tools/call` invocations. Every
+call writes a row into `mcp_invocations`.
+
+### Success criteria
+
+* 16/16 Phase-37 tests green.
+* Full regression 563/563 green (previous 547 + 16 new).
+* `ruff`, `mypy --follow-imports=silent --explicit-package-bases`,
+  `bandit` all clean on Phase-37 surface.
+* Service registry reports 23 services, including `mcp-server`
+  tagged `phase=37`.
+* `py -m shared.cli.mcp_cli demo` runs end-to-end without Postgres.
+
+### Rollback
+
+```sql
+BEGIN;
+DROP VIEW IF EXISTS public.mcp_invocations_recent;
+DROP TABLE IF EXISTS public.mcp_invocations;
+DROP TABLE IF EXISTS public.mcp_tools;
+COMMIT;
+```
+
+Then `git revert` the Phase 37 commit and remove the `mcp-server`
+descriptor from `shared/services/registry.py`. Phase 37 is strictly
+additive — no earlier phase depends on it.
+
+---
+
+*End of ROADMAP_V3.md. Phase 38 (Validation + code-analysis + docs
+freeze) is next.*

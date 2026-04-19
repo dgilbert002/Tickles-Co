@@ -417,6 +417,25 @@ def _seed_known_services() -> None:
         )
     )
 
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="mcp-server",
+            kind="api",
+            module="shared.cli.mcp_cli",
+            description=(
+                "Phase 37 MCP stack. JSON-RPC 2.0 server that exposes "
+                "Tickles tools (services.list, strategy.intents.recent, "
+                "backtest.submit, backtest.status, dashboard.snapshot, "
+                "regime.current, ping) to MCP-capable LLM clients "
+                "over stdio or HTTP. Invocations are audited in "
+                "public.mcp_invocations. Disabled on VPS until the "
+                "systemd unit + auth wiring are staged."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "37"},
+        )
+    )
+
 
 def register_builtin_services() -> None:
     """Idempotent registration of the built-in services."""
