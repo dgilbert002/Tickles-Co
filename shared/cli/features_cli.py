@@ -76,42 +76,50 @@ def _load_candles_from_db(
 ) -> pd.DataFrame:
     """Best-effort load from the existing candles Postgres table.
 
-    Falls back cleanly if the service isn't reachable from the CLI
-    host — the operator can instead pass ``--parquet PATH``.
+    Uses asyncpg (already in the venv on VPS). Falls back cleanly if
+    the DB isn't reachable — the operator can pass ``--parquet PATH``
+    instead.
     """
-    try:
-        import psycopg2  # type: ignore[import-not-found]
-        import psycopg2.extras  # type: ignore[import-not-found]
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(f"psycopg2 not installed: {exc}") from exc
-
+    import asyncio
     import os
+
+    try:
+        import asyncpg  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(f"asyncpg not installed: {exc}") from exc
 
     dsn = os.environ.get(
         "TICKLES_CANDLES_DSN",
         "postgresql://paperclip:paperclip@127.0.0.1:54329/tickles_shared",
     )
-    where = ["symbol = %s", "venue = %s", "timeframe = %s"]
+    where = ["symbol = $1", "venue = $2", "timeframe = $3"]
     params: List[Any] = [symbol, venue, timeframe]
+    idx = 4
     if start:
-        where.append("ts >= %s")
+        where.append(f"ts >= ${idx}")
         params.append(pd.Timestamp(start).to_pydatetime())
+        idx += 1
     if end:
-        where.append("ts <= %s")
+        where.append(f"ts <= ${idx}")
         params.append(pd.Timestamp(end).to_pydatetime())
+        idx += 1
     sql = (
         "SELECT ts, open, high, low, close, volume "
-        "FROM candles WHERE " + " AND ".join(where) + " ORDER BY ts DESC LIMIT %s"
+        "FROM candles WHERE " + " AND ".join(where) + f" ORDER BY ts DESC LIMIT ${idx}"
     )
     params.append(limit)
 
-    with psycopg2.connect(dsn) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
+    async def _fetch() -> List[Any]:
+        conn = await asyncpg.connect(dsn)
+        try:
+            return list(await conn.fetch(sql, *params))
+        finally:
+            await conn.close()
+
+    rows = asyncio.run(_fetch())
     if not rows:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame([dict(r) for r in rows])
     df = df.sort_values("ts")
     df = df.set_index(pd.DatetimeIndex(df["ts"], name="ts")).drop(columns=["ts"])
     for c in ["open", "high", "low", "close", "volume"]:
