@@ -2134,4 +2134,151 @@ wires live balance collection.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 26 (Execution Layer on NautilusTrader) is next.*
+## Phase 26 — Execution Layer (paper / ccxt / nautilus)
+
+### What it is (21-year-old explanation)
+
+Phase 25 gave the system a deal-desk that said "yes, place 0.014 BTC
+long on Bybit". Phase 26 is what **actually places the order**.
+
+We never want the rest of the stack to care whether an order is a
+paper trade (for forward-testing), a real ccxt order, or a high-speed
+NautilusTrader order. So Phase 26 introduces an abstraction:
+
+1. **ExecutionAdapter** protocol — tiny async interface with
+   `submit`, `cancel`, `poll_updates`.
+2. **ExecutionRouter** — the single entry point every strategy /
+   agent / CLI calls. It picks an adapter, persists everything to the
+   DB, and returns an `OrderSnapshot`.
+3. **Three built-in adapters**:
+   * `paper` — deterministic in-memory fills (uses MarketTick input,
+     respects slippage / maker-taker fees). Same math as backtest —
+     critical for Rule 1 parity.
+   * `ccxt` — thin wrapper over the CCXT sync client running in a
+     worker thread via `asyncio.to_thread`. Works with every venue
+     we already collect from.
+   * `nautilus` — scaffolded stub. Returns a clean `STATUS_REJECTED`
+     update until NautilusTrader is actually wired (keeps the
+     catalog / CLI / router symmetric without forcing a heavyweight
+     dep on operators).
+
+Everything the adapter emits lands in Postgres (`tickles_shared`):
+orders, order events, fills, and position snapshots.
+
+### What was built
+
+**DB migration — `shared/execution/migrations/2026_04_19_phase26_execution.sql`**
+
+* `public.orders` — one row per submitted ExecutionIntent with the
+  adapter's best-known status. `UNIQUE (adapter, client_order_id)`
+  is the idempotency key for retries.
+* `public.order_events` — append-only log of every adapter update
+  (submitted → accepted → fill → cancel / reject).
+* `public.fills` — immutable record of every filled slice with
+  price, quantity, fee, liquidity.
+* `public.position_snapshots` — append-only snapshots keyed by
+  `(company, adapter, exchange, account, symbol)`.
+* `public.positions_current` — `DISTINCT ON (...)` view that returns
+  the newest position snapshot per key.
+
+**Core modules — `shared/execution/`**
+
+* `protocol.py` — `ExecutionAdapter` protocol, `ExecutionIntent`,
+  `OrderUpdate`, `OrderSnapshot`, `MarketTick`, plus all status /
+  event / order-type constants. `ensure_client_order_id(...)`
+  mixes a process-local counter and `id(self)` so two intents
+  constructed in the same nanosecond still produce distinct IDs.
+* `paper.py` — `PaperExecutionAdapter` with deterministic
+  market / limit / stop / stop-limit fill semantics and fee model.
+  `touch(tick)` lets forward-testing drivers replay ticks against
+  resting limit/stop orders.
+* `ccxt_adapter.py` — `CcxtExecutionAdapter`. Submit translates into
+  `client.create_order(...)` on a threadpool; poll_updates calls
+  `fetch_order`. Defaults to sandbox mode.
+* `nautilus_adapter.py` — safe stub; returns rejection updates with
+  a clear message pointing to the install instructions.
+* `store.py` — `ExecutionStore` (async DB wrapper) with all DDL-free
+  SQL statements, plus `FillRow` and `PositionSnapshotRow`
+  dataclasses.
+* `router.py` — `ExecutionRouter` owns persistence; idempotent on
+  `(adapter, client_order_id)`; maintains average fill price and
+  cumulative fees as fills come in; writes position snapshots
+  automatically on every fill.
+* `memory_pool.py` — `InMemoryExecutionPool` duck-typing
+  `DatabasePool` for tests and CLI `--in-memory` flag.
+* `__init__.py` — public exports + `default_adapters()` factory +
+  `MIGRATION_PATH` + `read_migration_sql`.
+
+**Registry**
+
+* `shared/services/registry.py` — registers new `executor` service
+  (`kind="worker"`, `module="shared.cli.execution_cli"`,
+  `enabled_on_vps=False`, `tags={"phase": "26"}`).
+  Services catalog (Phase 24) picks this up automatically.
+
+**CLI — `shared/cli/execution_cli.py`**
+
+* `apply-migration` / `migration-sql` — DB migration helpers.
+* `adapters` — list the adapter names + availability.
+* `submit` — submit an ExecutionIntent via any adapter (paper by
+  default). Accepts `--market-last/bid/ask` for paper fills.
+* `cancel` — cancel a known client_order_id via the given adapter.
+* `orders` / `fills` / `positions` — query views for a company.
+* `paper-simulate` — fully offline submit → tick → fill round-trip
+  using the in-memory pool; handy for docs and tests.
+
+Routed via `shared/cli/__init__.py`.
+
+**Tests — `shared/tests/test_execution.py`**
+
+30 tests covering: migration file presence + key DDL tokens;
+client_order_id determinism / uniqueness; PaperExecutionAdapter
+market long/short at ask/bid, reject without tick, slippage math,
+reject zero qty, limit-accept-then-fill-on-touch, limit immediate
+fill when market already crossed, stop trigger on last-breach,
+cancel idempotency + unknown rejection, submit idempotency;
+NautilusExecutionAdapter stub rejection; ExecutionRouter paper
+persistence, cancel path, idempotency, rejection event logging,
+open-orders filter, latest-position view, fill ordering,
+unknown-cancel raises; `default_adapters` returns all three;
+`executor` service registration; CLI smokes on `migration-sql`,
+`adapters`, `--help`, and full `paper-simulate` round-trip.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/test_execution.py` — 30/30 green.
+2. Full regression: `pytest shared/tests` — 302/302 green.
+3. `ruff` and `mypy --ignore-missing-imports
+   --explicit-package-bases` clean on all Phase 26 source files.
+4. Migration applies cleanly on VPS; `\d orders`, `\d fills`,
+   `\d order_events`, `\d position_snapshots`, and
+   `\d positions_current` all present.
+5. `python -m shared.cli.execution_cli adapters` returns
+   `paper / ccxt / nautilus` on VPS.
+6. `python -m shared.cli.execution_cli paper-simulate ...` returns
+   `order.status=filled` and at least one fill / position row.
+7. Services catalog (Phase 24) sees the `executor` service after
+   `services_catalog_cli sync`.
+8. All Phase 13-25 services untouched.
+
+### Rollback
+
+Pure additive. Code rollback = `git revert`. DB rollback:
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.positions_current;
+DROP TABLE IF EXISTS public.position_snapshots;
+DROP TABLE IF EXISTS public.fills;
+DROP TABLE IF EXISTS public.order_events;
+DROP TABLE IF EXISTS public.orders;
+COMMIT;
+```
+
+The `nautilus` adapter is wired but defaults to safe rejection; no
+real nautilus dependency is introduced. The `ccxt` adapter re-uses
+the already-installed `ccxt` package; no new dependency either.
+
+---
+
+*End of ROADMAP_V3.md. Phase 27 (Regime Service) is next.*

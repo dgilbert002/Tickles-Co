@@ -209,6 +209,21 @@ def _seed_known_services() -> None:
             tags={"phase": "25"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="executor",
+            kind="worker",
+            module="shared.cli.execution_cli",
+            description=(
+                "Execution Layer (Phase 26). Routes approved Treasury decisions "
+                "through paper/ccxt/nautilus adapters and persists every order, "
+                "fill, and position snapshot. Disabled on VPS until live "
+                "strategy wiring lands in Phase 31+."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "26"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

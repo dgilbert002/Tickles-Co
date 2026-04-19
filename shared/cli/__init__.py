@@ -31,4 +31,5 @@ __all__ = [
     "enrichment_cli",
     "services_catalog_cli",
     "treasury_cli",
+    "execution_cli",
 ]
