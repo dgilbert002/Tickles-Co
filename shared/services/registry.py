@@ -196,6 +196,19 @@ def _seed_known_services() -> None:
             tags={"phase": "21"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="banker",
+            kind="worker",
+            module="shared.cli.treasury_cli",
+            description=(
+                "Balance/equity snapshot recorder + Treasury decision logger. "
+                "Phase 25 — invoked via treasury_cli balances-record / evaluate."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "25"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

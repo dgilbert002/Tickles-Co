@@ -1982,4 +1982,156 @@ No systemd units were added or modified by Phase 24.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 25 (Banker + Treasury + Capabilities) is next.*
+## Phase 25 — Banker + Treasury + Capabilities
+
+### What it is (21-year-old explanation)
+
+Phase 25 gives the system a **rule-book, a cash-register, and a
+deal-desk** for every trade the platform wants to place.
+
+* **Capabilities** = the rule-book. For each *company / strategy /
+  agent / venue* we store exactly what is allowed: max notional USD,
+  max leverage, daily-loss cap, open-position cap, allowed /
+  blocked venues, symbols, directions, order types, market hours.
+  Before *any* trade leaves the box, it is checked against these
+  rules. Stored in `public.capabilities`.
+* **Banker** = the cash-register. Every time we learn a new account
+  balance / equity / margin (from collectors, ccxt, manual input)
+  we append an immutable snapshot to `public.banker_balances`. A
+  view `public.banker_balances_latest` gives the newest per
+  `(company, exchange, account, currency)`. Changes to leverage
+  are audited in `public.leverage_history`.
+* **Sizer** = the pure math of "how big should this trade be?". A
+  single function `size_intent(...)` takes market snapshot +
+  account snapshot + strategy config + capabilities and returns a
+  deterministic `SizedIntent` (notional, qty, expected entry, fees,
+  slippage, spread cost, overnight cost, SL/TP). This function is
+  the **same in backtest and live** — it is the mechanical core of
+  Rule 1 (backtests ≡ live).
+* **Treasury** = the deal-desk that stitches it together.
+  `Treasury.evaluate(intent)` runs the capability check, pulls
+  the latest banker snapshot, calls the sizer, and then writes one
+  row to `public.treasury_decisions` with the verdict, reasons, and
+  numbers. Every trade intent from every strategy must pass through
+  here first.
+
+### What was built
+
+**DB migration — `shared/trading/migrations/2026_04_19_phase25_banker_treasury.sql`**
+
+Creates four tables + one view in the `tickles_shared` DB:
+
+* `public.capabilities` — one row per `(company, scope_kind,
+  scope_id)` with numeric caps, allow/deny lists, order-type list,
+  trading-hours JSON, plus metadata.
+* `public.banker_balances` — append-only snapshot log. Indexed by
+  `(company_id, exchange, account_id_external, currency, ts DESC)`.
+* `public.banker_balances_latest` — view of the newest snapshot
+  per `(company, exchange, account, currency)`.
+* `public.leverage_history` — audit trail of every leverage
+  change request, applied value, and reason.
+* `public.treasury_decisions` — immutable log of every Treasury
+  verdict (approved / rejected), capability ids that matched, the
+  final sized notional, and the available capital at the time.
+
+**Core modules — `shared/trading/`**
+
+* `capabilities.py` — `TradeIntent`, `Capability`, `CapabilityCheck`,
+  `CapabilityChecker`, `CapabilityStore`, `default_capability`.
+  Pure evaluation logic: match scopes, merge policies, apply
+  allow/deny/numeric caps, return an auditable `CapabilityCheck`.
+* `sizer.py` — `MarketSnapshot`, `AccountSnapshot`,
+  `StrategyConfig`, `SizedIntent`, `size_intent(...)`. Deterministic
+  function — no I/O, no randomness. Same math in live and backtest.
+* `banker.py` — `BalanceSnapshot` model + `Banker` async DB wrapper
+  (`record_snapshot`, `record_many`, `latest_snapshot`,
+  `latest_for_company`, `list_recent`, `available_capital_usd`,
+  `purge_company`).
+* `treasury.py` — `TreasuryDecision` + `Treasury` class. Orchestrates
+  checker + banker + sizer, persists decisions, also exposes
+  `evaluate_pure(...)` for testing without a DB.
+* `memory_pool.py` — in-memory duck-typed async pool used by tests
+  (`InMemoryTradingPool`).
+* `__init__.py` — public exports + `MIGRATION_PATH` +
+  `read_migration_sql`.
+
+**Registry**
+
+* `shared/services/registry.py` — new `banker` service descriptor
+  (`kind="worker"`, `module="shared.cli.treasury_cli"`,
+  `enabled_on_vps=False` until live wiring, `tags={"phase": "25"}`).
+  Phase 24 services catalog picks this up automatically.
+
+**CLI — `shared/cli/treasury_cli.py`**
+
+Operator commands:
+
+* `apply-migration` / `migration-sql` — DB migration.
+* `caps-list` / `caps-get` / `caps-upsert` / `caps-delete` /
+  `caps-seed-default` — manage capabilities.
+* `balances-record` / `balances-latest` / `balances-one` /
+  `balances-history` — banker snapshots.
+* `evaluate` — end-to-end `Treasury.evaluate` on a JSON intent.
+* `pure-size` — offline sizing (no DB) for diagnostics.
+
+Routed via `shared/cli/__init__.py`.
+
+**Tests — `shared/tests/test_trading.py`**
+
+36 tests covering: migration file presence + key DDL tokens;
+`TradeIntent.hash` determinism; `Capability.applies_to` matching
+and validation; `CapabilityChecker` denials (blocked symbol /
+venue / direction / order type / notional / leverage / daily loss
+/ open positions) and approvals with capped notional; `Sizer`
+(requested notional, risk-based, fraction-of-capital, cap by
+capabilities, cap by venue min, qty rounding, fees, slippage,
+spread cost, SL/TP derivation, determinism); `Banker` record +
+latest + history + company latest + `available_capital_usd`;
+`CapabilityStore` upsert/list/delete round-trip + idempotency;
+`Treasury.evaluate` happy path persists a decision, denied path
+persists a rejection with reasons, no-snapshot path rejects,
+`persist=False` dry-run; CLI smoke on `migration-sql` and
+`--help`; and a registry check that the `banker` service is
+registered.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/test_trading.py` — 36/36 green.
+2. Full regression: `pytest shared/tests` — 272/272 green.
+3. `ruff check` and `mypy --ignore-missing-imports
+   --explicit-package-bases` clean on all Phase 25 source files.
+4. Migration applies cleanly on VPS; `\d capabilities`,
+   `\d banker_balances`, `\d treasury_decisions`,
+   `\d leverage_history` all present; view
+   `banker_balances_latest` resolves.
+5. `python -m shared.cli.treasury_cli caps-seed-default
+   --company-id tickles` creates a row visible via
+   `caps-list --company-id tickles`.
+6. `python -m shared.cli.treasury_cli balances-record ...` followed
+   by `balances-latest` shows the newest snapshot.
+7. `python -m shared.cli.treasury_cli evaluate ...` returns a
+   JSON verdict and writes one row to `treasury_decisions`.
+8. Phase 24 services catalog sees the `banker` service after `sync`.
+9. All prior phases (13–24) untouched — no service or DB regression.
+
+### Rollback
+
+Pure additive. Code rollback = `git revert`. DB rollback:
+
+```sql
+BEGIN;
+DROP TABLE IF EXISTS public.treasury_decisions;
+DROP TABLE IF EXISTS public.leverage_history;
+DROP VIEW  IF EXISTS public.banker_balances_latest;
+DROP TABLE IF EXISTS public.banker_balances;
+DROP TABLE IF EXISTS public.capabilities;
+COMMIT;
+```
+
+No systemd units were added or modified by Phase 25; the `banker`
+service is registered but `enabled_on_vps=False` until Phase 26
+wires live balance collection.
+
+---
+
+*End of ROADMAP_V3.md. Phase 26 (Execution Layer on NautilusTrader) is next.*
