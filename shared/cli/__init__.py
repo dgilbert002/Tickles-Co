@@ -26,4 +26,5 @@ __all__ = [
     "indicators_cli",
     "engines_cli",
     "features_cli",
+    "auditor_cli",
 ]

@@ -1498,5 +1498,128 @@ No systemd units were added, no schema migrations were run.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 21 (Rule-1 Continuous Auditor) is
+## Phase 21 — Rule-1 Continuous Auditor
+
+### Purpose
+
+Rule 1 of the trading house is: **backtests must equal live**. If
+the engine behaves one way under historical data and a different
+way in production, every plan we build on top of it is wrong.
+Phase 21 is the watchdog that proves, on a rolling basis, that
+the invariant still holds — and that shouts immediately when it
+doesn't.
+
+The auditor has three comparators:
+
+  1. **Parity comparator** — re-runs the same strategy on the
+     same candles across the registered engines (Phase 19) and
+     compares PnL / Sharpe / winrate / max-drawdown against a
+     source-of-truth engine (default: `classic`).
+  2. **Live-vs-backtest comparator** — takes a real executed
+     trade (from Phase 26 onwards) and the backtest trade that
+     "should" have been its twin and diffs entry/exit/fees/
+     slippage/pnl.
+  3. **Fee/slippage comparator** — checks that the assumed
+     fee-bps and slippage-bps the strategies plan against match
+     what the exchange actually charged.
+
+Every audit event is persisted to a local SQLite DB and tagged
+with severity (`ok` / `warn` / `breach` / `critical`). Operators
+can tail events, roll them up into a rolling summary, or run the
+auditor forever as a systemd service.
+
+### Built
+
+**Package — `shared/auditor/`**
+
+* `schema.py` — `AuditEventType` (enum: parity_check,
+  live_vs_backtest, fee_slippage, coverage, heartbeat),
+  `AuditSeverity` (enum: ok/warn/breach/critical),
+  `AuditRecord` (dataclass with `to_json` + `to_row`) and
+  `DivergenceSummary` (rolling stats dataclass).
+* `storage.py` — SQLite-backed `AuditStore`. Default path
+  `/opt/tickles/var/audit/rule1.sqlite3` on Linux, override via
+  `TICKLES_AUDIT_DIR` env var. Indexes on
+  `(event_type, ts_unix)`, `(severity, ts_unix)`, and
+  `(subject, ts_unix)` for cheap tail queries.
+  Methods: `record`, `record_many`, `list_recent`, `summary`,
+  `purge_older_than`, `replay`.
+* `comparator.py` —
+    * `ParityComparator` (wraps `shared.backtest.parity.parity_summary`),
+    * `LiveVsBacktestComparator` + tolerances dataclass,
+    * `FeeSlippageComparator`.
+* `auditor.py` — `ContinuousAuditor` + `AuditJob` dataclass.
+  Runs each job on its own cadence, emits `HEARTBEAT` every N
+  seconds and a `COVERAGE` event per `tick()` so operators can
+  prove the auditor is alive even during quiet markets.
+  `run_forever()` is a blocking loop suitable for systemd.
+
+**Operator CLI — `shared/cli/auditor_cli.py`**
+
+Eight subcommands, single-line JSON stdout:
+
+* `status` — last heartbeat + rolling summary at a glance.
+* `summary [--window SEC]` — detailed rollup.
+* `events [--limit N] [--severity ...] [--event-type ...]` —
+  tail recent events.
+* `run-parity-check --strategy-id --engines classic,vectorbt
+  [--pnl-pct-abs --sharpe-abs --winrate-abs
+  --max-drawdown-abs]` — one-shot parity check against a
+  synthetic SMA-cross + candle feed. Tolerances configurable;
+  default `sharpe_abs=8.0` because synthetic data has extreme
+  Sharpe ratios.
+* `simulate-live-trade` — feed a fabricated `(live, backtest)`
+  trade pair through `LiveVsBacktestComparator`; used to
+  smoke-test the Phase 26 integration hook before the live
+  execution layer is online.
+* `tick` — one pass of `ContinuousAuditor` against the built-in
+  synthetic job. Emits at least one parity record + one coverage
+  event + one heartbeat.
+* `run` — blocking, suitable for systemd. Runs forever.
+* `purge-older --days N` — delete events older than N days.
+
+**Tests — `shared/tests/test_auditor.py`**
+
+14 tests covering: `AuditRecord.to_json` roundtrip, `AuditStore`
+(record, list, summary, purge, severity + event-type filters),
+`ParityComparator` (happy path + breach path via tight
+tolerance), `LiveVsBacktestComparator` (pass + drift fail),
+`FeeSlippageComparator` (pass + fee drift + slippage drift),
+`ContinuousAuditor.tick()` coverage+heartbeat, and CLI
+round-trip for `status` / `summary` / `events` /
+`run-parity-check` / `tick` / `purge-older`.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/test_auditor.py` — 14/14 green locally
+   and on VPS.
+2. `ruff` + `mypy --ignore-missing-imports --explicit-package-bases`
+   clean on the new modules.
+3. `python -m shared.cli.auditor_cli status` returns
+   `{"ok": true, ...}` on a fresh box.
+4. `python -m shared.cli.auditor_cli run-parity-check
+   --engines classic,vectorbt` returns `"ok": true` against the
+   synthetic feed under the default tolerances.
+5. A regression re-run of Phase 18/19/20 test files still
+   passes — Phase 21 is strictly additive.
+
+### Rollback
+
+Pure additive code. No schema migrations on the shared Postgres.
+The SQLite DB lives under `/opt/tickles/var/audit/` and can be
+deleted safely.
+
+```bash
+cd /opt/tickles
+git revert <phase-21-commit>
+rm -rf /opt/tickles/var/audit   # optional
+```
+
+If the auditor is run as a systemd unit in a later phase, also
+`systemctl disable --now tickles-auditor.service` before
+reverting.
+
+---
+
+*End of ROADMAP_V3.md. Phase 22 (Collectors-as-Services) is
 next.*
