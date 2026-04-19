@@ -2505,4 +2505,64 @@ Then `git revert` the Phase 29 commit. The ingestor service is
 
 ---
 
-*End of ROADMAP_V3.md. Phase 30 (Events Calendar + windows) is next.*
+## Phase 30 - Events Calendar + windows
+
+### Purpose
+
+Some price moves are not market moves — they're **events**. CPI prints,
+NFP, FOMC, earnings, exchange maintenance, funding rollovers, halvings.
+Strategies and guardrails need a machine-readable calendar so they can
+widen spreads, pause new entries, or fire extra protection rules while
+a window is open. Phase 30 builds that calendar.
+
+### Built
+
+1. **Migration** `shared/events/migrations/2026_04_19_phase30_events.sql`
+   - `public.events_calendar` (kind, provider, name, event_time,
+     window_before / after minutes, scope: universe / exchange /
+     symbol / country, importance 1-3, payload/metadata JSONB).
+     Uniqueness on ``(provider, dedupe_key)`` for idempotent upserts.
+   - `public.events_active` view: rows whose window contains ``NOW()``.
+   - `public.events_upcoming` view: future events ordered by time.
+2. **Protocol** `shared/events/protocol.py`
+   - `EventRecord`, `EventWindow` dataclasses; canonical `KIND_*` and
+     `IMPORTANCE_*` constants; `build_dedupe_key()` for stable upserts.
+3. **Store** `shared/events/store.py`
+   - `EventsStore.upsert_event` (`ON CONFLICT DO UPDATE` on mutable
+     fields), `delete_event`, `list_events` (kind / provider / scope /
+     importance / time range), `list_active`, `list_upcoming`.
+4. **Service** `shared/events/service.py`
+   - `EventsCalendarService` with `upsert` / `upsert_many` /
+     `active_at` / `upcoming` / `active_windows` / `any_active` (scope
+     + importance filter — used by Guardrails/Treasury as a gate).
+5. **In-memory pool** `shared/events/memory_pool.py` for offline tests.
+6. **CLI** `shared/cli/events_cli.py` (`apply-migration`, `migration-sql`,
+   `kinds`, `add`, `list`, `active`, `upcoming`, `delete`).
+7. **Service registry** — `events-calendar` entry (worker, phase 30,
+   `enabled_on_vps=False` until a loader is wired in Phase 32).
+8. **Tests** `shared/tests/test_events.py` — 20 tests.
+
+### Success criteria
+
+* All 20 Phase 30 tests green locally.
+* `ruff` and `mypy` clean.
+* Migration applies cleanly on VPS `tickles_shared`.
+* `events_calendar`, `events_active`, `events_upcoming` visible.
+* `events-calendar` visible in `services_catalog`.
+* No regression.
+
+### Rollback
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.events_upcoming;
+DROP VIEW  IF EXISTS public.events_active;
+DROP TABLE IF EXISTS public.events_calendar;
+COMMIT;
+```
+
+Then `git revert` the Phase 30 commit.
+
+---
+
+*End of ROADMAP_V3.md. Phase 31 (Apex / Quant / Ledger modernised souls) is next.*

@@ -35,4 +35,5 @@ __all__ = [
     "regime_cli",
     "guardrails_cli",
     "altdata_cli",
+    "events_cli",
 ]

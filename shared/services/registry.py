@@ -243,6 +243,23 @@ def _seed_known_services() -> None:
     )
     SERVICE_REGISTRY.register(
         ServiceDescriptor(
+            name="events-calendar",
+            kind="worker",
+            module="shared.cli.events_cli",
+            description=(
+                "Events Calendar (Phase 30). Manages scheduled events "
+                "(macro releases, earnings, maintenance windows, funding "
+                "rolls, halvings) and derives active trading windows. "
+                "Guardrails and Treasury consume events_active via "
+                "EventsCalendarService.any_active(). Disabled on VPS "
+                "until an event loader is wired in Phase 32."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "30"},
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
             name="altdata-ingestor",
             kind="worker",
             module="shared.cli.altdata_cli",
