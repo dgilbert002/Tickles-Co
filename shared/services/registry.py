@@ -243,6 +243,22 @@ def _seed_known_services() -> None:
     )
     SERVICE_REGISTRY.register(
         ServiceDescriptor(
+            name="altdata-ingestor",
+            kind="worker",
+            module="shared.cli.altdata_cli",
+            description=(
+                "Alt-Data Ingestor (Phase 29). Pulls funding rates, open "
+                "interest, social / on-chain / macro metrics from pluggable "
+                "sources and persists them to alt_data_items (latest view: "
+                "alt_data_latest). Disabled on VPS until sources are "
+                "configured in Phase 32."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "29"},
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
             name="crash-protection",
             kind="worker",
             module="shared.cli.guardrails_cli",

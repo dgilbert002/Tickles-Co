@@ -2439,4 +2439,70 @@ Then `git revert` the Phase 28 commit. The service is
 
 ---
 
-*End of ROADMAP_V3.md. Phase 29 (Alt-Data Ingestion) is next.*
+## Phase 29 - Alt-Data Ingestion
+
+### Purpose
+
+Price is one input. **Alt-data** - funding rates, open interest, social
+sentiment, on-chain flows, macro releases - is how strategies find
+edges the average trader misses. Phase 29 builds the uniform landing
+surface for all of this: a single table, a single source protocol, and
+a single ingestor service.
+
+### Built
+
+1. **Migration** `shared/altdata/migrations/2026_04_19_phase29_altdata.sql`
+   - `public.alt_data_items` with ``UNIQUE(source, provider, scope_key,
+     metric, as_of)`` so re-runs never double-insert.
+   - `public.alt_data_latest` view (latest row per
+     `(scope_key, metric)`).
+2. **Protocol** `shared/altdata/protocol.py` (`AltDataItem`,
+   `AltDataSource`, canonical source/metric constants).
+3. **Built-in sources** `shared/altdata/sources/`
+   - `StaticAltDataSource` — fixed list, used by tests.
+   - `ManualAltDataSource` — push + drain queue, used by CLI/API.
+   - `CcxtFundingRateSource` — async wrapper for `ccxt.fetch_funding_rate`
+     across a symbol list.
+   - `CcxtOpenInterestSource` — emits both contracts and USD metrics
+     from `ccxt.fetch_open_interest`.
+4. **Store** `shared/altdata/store.py` — `AltDataStore` with
+   `insert_item` (`ON CONFLICT DO NOTHING`), `list_items`, `list_latest`.
+   `InMemoryAltDataPool` in `memory_pool.py` for offline testing.
+5. **Ingestor** `shared/altdata/service.py` — `AltDataIngestor.tick()`
+   fans out across sources, normalises naive datetimes to UTC, and
+   returns an `IngestReport` (attempted / inserted / skipped per
+   source, plus errors).
+6. **CLI** `shared/cli/altdata_cli.py` with `apply-migration`,
+   `migration-sql`, `sources`, `push`, `ingest`, `latest`, `items`.
+7. **Service registry** - `altdata-ingestor` entry (worker, phase 29,
+   `enabled_on_vps=False` until sources are seeded in Phase 32).
+8. **Tests** `shared/tests/test_altdata.py` — 21 tests covering
+   migration, store dedupe, latest view, ingestor, CCXT source
+   adapters (with fake exchanges), CLI smoke, and registry.
+
+### Success criteria
+
+* All 21 Phase 29 tests green locally.
+* `ruff` and `mypy` clean.
+* Migration applies cleanly on VPS `tickles_shared`.
+* `alt_data_items` + `alt_data_latest` visible.
+* `altdata-ingestor` visible in `services_catalog`.
+* No regression in 360+ existing tests.
+
+### Rollback
+
+Pure additive.
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.alt_data_latest;
+DROP TABLE IF EXISTS public.alt_data_items;
+COMMIT;
+```
+
+Then `git revert` the Phase 29 commit. The ingestor service is
+`enabled_on_vps=False`, so no systemd units need to be stopped.
+
+---
+
+*End of ROADMAP_V3.md. Phase 30 (Events Calendar + windows) is next.*

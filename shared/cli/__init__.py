@@ -34,4 +34,5 @@ __all__ = [
     "execution_cli",
     "regime_cli",
     "guardrails_cli",
+    "altdata_cli",
 ]
