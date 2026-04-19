@@ -1015,5 +1015,139 @@ DELETE FROM candles WHERE timeframe IN ('5m','15m','30m','1h','4h','1d','1w')
 
 ---
 
-*End of ROADMAP_V3.md. Phase 17 (Market Data Gateway real — CCXT Pro
-WebSocket + Redis fan-out) starts next in the master-plan sequence.*
+## 12. Phase 17 — Market Data Gateway (CCXT Pro WebSocket + Redis fan-out)
+
+### What this phase does (the 21-year-old version)
+
+Up until now, all "live" market data on the box has come from the
+*polled* 1-minute candle daemon — it asks each exchange "what was the
+last minute?" once a minute and writes the answer to Postgres. That's
+fine for candles, but it's blind to ticks, trade prints, top-of-book
+spreads, perp marks and funding. It also can't react inside a minute.
+
+Phase 17 introduces the **Market Data Gateway**: one durable process per
+box that holds a single CCXT Pro WebSocket per exchange, multiplexes
+many `(symbol, channel)` subscriptions onto it, and **fans out every
+parsed message on Redis pub/sub channels** (`md.<exchange>.<symbol>.<channel>`).
+
+Why one gateway? Because if every agent opened its own ws to Binance
+we'd hit rate limits, multiply disconnect bugs, and lose auditability.
+The gateway becomes the **only** ws talker on the box.
+
+### What we built
+
+**Python package — `shared/gateway/`**
+
+* `schema.py` — pydantic models (`Tick`, `Trade`, `L1Book`, `MarkPrice`,
+  `GatewayStats`, `SubscriptionRequest`, `SubscriptionKey`) and the
+  channel-naming helpers (`channel_for`, `safe_symbol`).
+* `subscriptions.py` — `SubscriptionRegistry`: an asyncio-locked,
+  ref-counted registry. 47 agents asking for BTC/USDT trades opens
+  exactly **one** stream; the last unsubscribe closes it.
+* `redis_bus.py` — `RedisBus`: thin async wrapper around `redis.asyncio`
+  that owns publishing, lag-tracking, stats publication, and the
+  desired-state hash (`md:subscriptions`). All redis I/O is here so
+  unit tests can mock it cleanly.
+* `ccxt_pro_source.py` — `ExchangeSource`: per-exchange ccxt.pro client
+  manager. Owns one client and a task per `(symbol, channel)` running
+  `watch_ticker` / `watch_trades` / `watch_order_book` /
+  `watch_mark_price`. Reconnects with exponential backoff + jitter
+  (cap = 30 s). `parse_message()` is exposed as a pure function so we
+  can unit-test the message conversion without ccxt.
+* `gateway.py` — `Gateway` orchestrator: glues registry + sources + bus.
+  Maintains counters for `messages_in`, `messages_published`,
+  `publish_errors`, `reconnects`. Exposes `subscribe`, `unsubscribe`,
+  `stats`, `registry_snapshot`, `sources_snapshot`. A background task
+  publishes `GatewayStats` JSON to `md:gateway:stats` every 5 s.
+* `daemon.py` — `tickles-md-gateway.service` entrypoint. Runs a
+  desired-state reconcile loop: reads the `md:subscriptions` hash,
+  diffs against current, calls `subscribe`/`unsubscribe`. SIGINT/SIGTERM
+  shut everything down cleanly. CLI talks to Redis only — never to the
+  daemon directly. This is intentional: the daemon can crash and
+  restart and pick up the right subscriptions purely from Redis state.
+
+**Operator CLI — `shared/cli/gateway_cli.py` (rewritten)**
+
+Phase 13 stubs replaced with real commands:
+
+* `status` — systemd state for `tickles-md-gateway.service`,
+  `tickles-candle-daemon.service`, `tickles-catalog.service`,
+  `tickles-bt-workers.service`.
+* `services` — list of units this CLI manages (now includes
+  `tickles-md-gateway.service`).
+* `subscribe --venue binance --symbol BTC/USDT --channels tick,trade,l1
+  [--requested-by agent-name]` — writes desired-state to Redis.
+* `unsubscribe --venue binance --symbol BTC/USDT --channels tick` —
+  removes desired-state.
+* `list` — dumps the current desired-state hash with attribution.
+* `stats` — reads `md:gateway:stats` plus per-pair lag keys. Returns
+  `EXIT_FAIL` if the daemon hasn't published yet (so monitors can
+  alert).
+* `peek --venue binance --symbol BTC/USDT --channel trade --count 5
+  [--timeout 10]` — subscribes to the redis pattern and prints the
+  next N messages. Useful for sanity-checking that the gateway is
+  actually fanning data out.
+* `replay` remains a Phase-13-style stub but now lands in Phase 18 (it
+  belongs with the indicator/feature back-replay path).
+
+**Systemd unit — `systemd/tickles-md-gateway.service`**
+
+Restart-on-failure with `RequiresRedis-server.service`. Reads
+`/opt/tickles/.env`. Runs `python -m shared.gateway.daemon`.
+
+**Tests — `shared/tests/test_gateway.py`**
+
+Sixteen unit tests covering schema / channel naming, registry ref
+counting, the pure `parse_message` for ticker/trades/L1, an
+`ExchangeSource` driven against a fake ccxt client (success path +
+reconnect-on-error), and an end-to-end `Gateway` against a `_FakeBus`
++ `_FakeSource` (ref-counted activate/deactivate, message publish,
+counters). All use `asyncio.run()` to match the existing test style —
+no `pytest-asyncio` dependency added.
+
+`shared/tests/test_cli_scaffolding.py` updated for the new gateway
+subcommand surface and the `replay`-now-lands-in-18 stub.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/` green locally and on the VPS — old +
+   sufficiency + candles + assets + scaffolding + new gateway tests
+   all pass.
+2. `ruff` + `mypy` clean on the new `shared/gateway/*` and the
+   rewritten `shared/cli/gateway_cli.py`.
+3. `tickles-md-gateway.service` starts on the VPS and stays
+   `active(running)`. `journalctl` shows the reconcile loop.
+4. `gateway_cli stats` returns a non-null `GatewayStats` payload after
+   the daemon's first 5-second tick.
+5. `gateway_cli subscribe --venue binance --symbol BTC/USDT --channels tick`
+   followed by a 10-second wait and `gateway_cli peek --venue binance
+   --symbol BTC/USDT --channel tick --count 3` returns at least 3
+   real ticker messages from Binance.
+6. `messages_published_total` in `stats` is non-zero after the test
+   subscription has run for a few seconds.
+7. The legacy `tickles-candle-daemon` is **not touched** and remains
+   `active(running)` throughout.
+
+### Rollback
+
+Phase 17 introduces no DDL and no destructive change. Roll back with:
+
+```bash
+sudo systemctl stop tickles-md-gateway.service
+sudo systemctl disable tickles-md-gateway.service
+sudo rm /etc/systemd/system/tickles-md-gateway.service
+sudo systemctl daemon-reload
+redis-cli del md:gateway:stats md:subscriptions
+redis-cli --scan --pattern 'md:gateway:lag:*' | xargs -r redis-cli del
+git revert <commit>   # or git reset --hard <prior-commit>
+```
+
+The Phase-13 stubbed `gateway_cli` is preserved in git history; the
+desired-state hash is the only mutable artefact, and dropping it has
+no effect on any other component.
+
+---
+
+*End of ROADMAP_V3.md. Phase 18 (Full Indicator Library — 250+
+indicators wired to the Phase 17 firehose) starts next in the
+master-plan sequence.*

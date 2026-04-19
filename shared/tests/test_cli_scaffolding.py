@@ -30,7 +30,8 @@ from shared.cli import (
 
 
 CLIS = [
-    ("gateway_cli", gateway_cli, {"status", "services", "subscribe", "unsubscribe", "replay"}),
+    ("gateway_cli", gateway_cli,
+     {"status", "services", "subscribe", "unsubscribe", "list", "stats", "peek", "replay"}),
     ("validator_cli", validator_cli, {"status", "windows", "pair", "check"}),
     ("forward_test_cli", forward_test_cli, {"status", "start", "stop", "results"}),
     ("assets_cli", assets_cli, {"stats", "list-venues", "list-assets", "resolve", "spread", "load"}),
@@ -104,14 +105,19 @@ def test_stateless_commands_emit_json(module: str, sub: str) -> None:
 
 
 @pytest.mark.parametrize("module,sub", [
-    ("shared.cli.gateway_cli", "subscribe"),
+    ("shared.cli.gateway_cli", "replay"),
     ("shared.cli.validator_cli", "pair"),
     ("shared.cli.forward_test_cli", "start"),
 ])
 def test_stub_commands_report_lands_in_phase(module: str, sub: str) -> None:
-    """Phase-13 stubs must identify themselves clearly and exit with code 2."""
+    """Stubs must identify themselves clearly and exit with code 2."""
     args_for_sub = {
-        "subscribe": ["--venue", "binance", "--symbol", "BTC/USDT"],
+        "replay": [
+            "--venue", "binance",
+            "--symbol", "BTC/USDT",
+            "--from", "2026-04-18T00:00:00Z",
+            "--to", "2026-04-18T01:00:00Z",
+        ],
         "pair": ["--trade-id", "1"],
         "start": ["--strategy-id", "1", "--symbol", "BTC/USDT"],
     }

@@ -1,0 +1,22 @@
+[Unit]
+Description=Tickles Market Data Gateway (CCXT Pro WebSocket -> Redis fan-out, Phase 17)
+After=network-online.target redis-server.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/opt/tickles/.venv/bin/python -m shared.gateway.daemon --redis-url redis://127.0.0.1:6379/0 --poll-interval 5 --log-level INFO
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tickles-md-gateway
+
+[Install]
+WantedBy=multi-user.target
