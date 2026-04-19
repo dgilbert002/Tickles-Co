@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Tickles Owner Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #12181f;
+      --panel-2: #1a2029;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --border: #30363d;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif; }
+    header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.2px; }
+    header .muted { color: var(--muted); font-size: 12px; }
+    main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .card h2 { margin: 0 0 12px 0; font-size: 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; }
+    .kpi { font-size: 28px; font-weight: 700; }
+    .kpi .sub { font-size: 13px; color: var(--muted); margin-left: 8px; font-weight: 400; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 500; }
+    tbody tr:hover { background: var(--panel-2); }
+    .scroll { overflow-x: auto; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
+    .pill.ok { border-color: var(--accent); color: var(--accent); }
+    .pill.warn { border-color: var(--warn); color: var(--warn); }
+    .pill.bad { border-color: var(--bad); color: var(--bad); }
+    .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .input { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 14px; }
+    .btn { background: var(--accent); color: #0b0f14; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+    .loader { color: var(--muted); font-style: italic; font-size: 13px; }
+    .notes { background: var(--panel-2); padding: 8px 12px; border-left: 3px solid var(--warn); border-radius: 4px; font-size: 12px; color: var(--muted); margin-top: 12px; }
+    .notes code { color: var(--warn); }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Tickles Owner Dashboard</h1>
+  <div class="row">
+    <span class="muted" id="generated">—</span>
+    <button class="btn secondary" id="logout">Log out</button>
+  </div>
+</header>
+
+<main>
+
+<div id="login" class="card" style="max-width: 420px; margin: 60px auto;">
+  <h2>Sign in</h2>
+  <p style="color: var(--muted); font-size: 13px; margin-top: 0;">
+    Enter your Telegram chat ID. We'll send a 6-digit code to that
+    chat. The code expires in 5 minutes.
+  </p>
+  <div class="row" style="margin-bottom: 10px;">
+    <input id="chatId" class="input" placeholder="chat_id" style="flex:1" />
+    <button id="requestOtp" class="btn">Send code</button>
+  </div>
+  <div id="otpStage" class="hidden">
+    <div class="row">
+      <input id="otpCode" class="input" placeholder="6-digit code" style="flex:1" maxlength="6" inputmode="numeric" />
+      <button id="verifyOtp" class="btn">Verify</button>
+    </div>
+  </div>
+  <p id="authMsg" class="muted" style="font-size: 12px; margin: 10px 0 0 0;"></p>
+</div>
+
+<div id="app" class="hidden">
+
+<div class="grid">
+
+  <div class="card">
+    <h2>Services</h2>
+    <div class="kpi"><span id="svcTotal">—</span><span class="sub">registered</span></div>
+    <div class="scroll" style="max-height: 260px; overflow-y: auto; margin-top: 8px;">
+      <table>
+        <thead><tr><th>Name</th><th>Kind</th><th>Phase</th><th>On VPS</th></tr></thead>
+        <tbody id="svcRows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Backtest submissions</h2>
+    <div class="kpi"><span id="subActive">—</span><span class="sub">active</span></div>
+    <div class="scroll" style="max-height: 260px; overflow-y: auto; margin-top: 8px;">
+      <table>
+        <thead><tr><th>ID</th><th>Strategy</th><th>Status</th><th>Client</th></tr></thead>
+        <tbody id="subRows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Latest strategy intents</h2>
+    <div class="scroll" style="max-height: 260px; overflow-y: auto;">
+      <table>
+        <thead><tr><th>Strategy</th><th>Symbol</th><th>Side</th><th>Notional</th></tr></thead>
+        <tbody id="intRows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Regime &amp; guardrails</h2>
+    <div id="regimeBox" class="muted" style="font-size: 13px;">—</div>
+    <div id="guardBox" style="margin-top: 12px;"></div>
+  </div>
+
+</div>
+
+<div id="notesBox" class="hidden"></div>
+
+</div>
+</main>
+
+<script>
+const state = { token: localStorage.getItem("tickles_token") || null };
+
+function setToken(t) {
+  state.token = t;
+  if (t) localStorage.setItem("tickles_token", t);
+  else localStorage.removeItem("tickles_token");
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  if (state.token) headers["Authorization"] = "Bearer " + state.token;
+  const resp = await fetch(path, Object.assign({ headers }, opts));
+  const text = await resp.text();
+  let body; try { body = JSON.parse(text); } catch { body = { raw: text }; }
+  if (!resp.ok) throw { status: resp.status, body };
+  return body;
+}
+
+function setMsg(t, kind) {
+  const el = document.getElementById("authMsg");
+  el.textContent = t;
+  el.style.color = kind === "bad" ? "var(--bad)" : "var(--muted)";
+}
+
+document.getElementById("requestOtp").addEventListener("click", async () => {
+  const chat = document.getElementById("chatId").value.trim();
+  if (!chat) return setMsg("enter a chat id", "bad");
+  setMsg("sending code…");
+  try {
+    await api("/api/auth/request-otp", { method: "POST", body: JSON.stringify({ chat_id: chat }) });
+    document.getElementById("otpStage").classList.remove("hidden");
+    setMsg("code sent to your Telegram chat (check logs in dev mode)");
+  } catch (e) { setMsg("error: " + (e.body?.error || e.status), "bad"); }
+});
+
+document.getElementById("verifyOtp").addEventListener("click", async () => {
+  const chat = document.getElementById("chatId").value.trim();
+  const code = document.getElementById("otpCode").value.trim();
+  setMsg("verifying…");
+  try {
+    const res = await api("/api/auth/verify-otp", { method: "POST", body: JSON.stringify({ chat_id: chat, code }) });
+    setToken(res.token);
+    document.getElementById("login").classList.add("hidden");
+    document.getElementById("app").classList.remove("hidden");
+    refresh();
+  } catch (e) { setMsg("error: " + (e.body?.error || e.status), "bad"); }
+});
+
+document.getElementById("logout").addEventListener("click", async () => {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch {}
+  setToken(null);
+  document.getElementById("app").classList.add("hidden");
+  document.getElementById("login").classList.remove("hidden");
+});
+
+function pill(s, kind) {
+  const cls = kind ? `pill ${kind}` : "pill";
+  return `<span class="${cls}">${s}</span>`;
+}
+
+async function refresh() {
+  try {
+    const snap = await api("/api/snapshot");
+    document.getElementById("generated").textContent = "updated " + new Date(snap.generated_at).toLocaleTimeString();
+
+    document.getElementById("svcTotal").textContent = snap.services_total;
+    document.getElementById("svcRows").innerHTML = (snap.services || [])
+      .map(s => `<tr><td>${s.name}</td><td>${s.kind}</td><td>${s.phase}</td><td>${pill(s.enabled_on_vps ? "yes" : "no", s.enabled_on_vps ? "ok" : "")}</td></tr>`)
+      .join("");
+
+    document.getElementById("subActive").textContent = snap.submissions_active;
+    document.getElementById("subRows").innerHTML = (snap.submissions_recent || [])
+      .slice(0, 20)
+      .map(s => `<tr><td>${s.id}</td><td>${s.spec?.strategy || "—"}</td><td>${pill(s.status, s.status === "completed" ? "ok" : s.status === "failed" ? "bad" : "")}</td><td>${s.client_id || "—"}</td></tr>`)
+      .join("");
+
+    document.getElementById("intRows").innerHTML = (snap.latest_intents || [])
+      .slice(0, 20)
+      .map(i => `<tr><td>${i.strategy_name || "—"}</td><td>${i.symbol || "—"}</td><td>${i.side || "—"}</td><td>$${Number(i.notional_usd || 0).toFixed(2)}</td></tr>`)
+      .join("");
+
+    const reg = snap.regime_current;
+    document.getElementById("regimeBox").textContent = reg
+      ? `regime=${reg.regime}  confidence=${reg.confidence}`
+      : "no regime data";
+
+    const guards = snap.guardrails_active || [];
+    document.getElementById("guardBox").innerHTML = guards.length === 0
+      ? '<span class="pill ok">no active guardrail triggers</span>'
+      : guards.map(g => pill(g.rule_name || "rule", "warn")).join(" ");
+
+    const notes = snap.notes || [];
+    const nb = document.getElementById("notesBox");
+    if (notes.length === 0) {
+      nb.classList.add("hidden");
+      nb.innerHTML = "";
+    } else {
+      nb.classList.remove("hidden");
+      nb.className = "notes";
+      nb.innerHTML = "<strong>Notes:</strong> " + notes.map(n => `<code>${n}</code>`).join(", ");
+    }
+  } catch (e) {
+    if (e.status === 401) {
+      setToken(null);
+      document.getElementById("app").classList.add("hidden");
+      document.getElementById("login").classList.remove("hidden");
+      setMsg("session expired, please sign in again", "bad");
+    }
+  }
+}
+
+if (state.token) {
+  document.getElementById("login").classList.add("hidden");
+  document.getElementById("app").classList.remove("hidden");
+  refresh();
+  setInterval(refresh, 15000);
+} else {
+  setInterval(() => {}, 15000);
+}
+</script>
+</body>
+</html>

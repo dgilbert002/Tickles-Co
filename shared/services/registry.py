@@ -397,6 +397,25 @@ def _seed_known_services() -> None:
             tags={"phase": "35"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="dashboard",
+            kind="api",
+            module="shared.cli.dashboard_cli",
+            description=(
+                "Phase 36 Owner Dashboard. aiohttp server that "
+                "serves a mobile-friendly HTML SPA and a small "
+                "read-only JSON API backed by the Phase-34 strategy "
+                "intents, Phase-35 backtest submissions, Phase-27 "
+                "regime, and Phase-28 guardrails stores. Auth is "
+                "Telegram-OTP based; sessions are SHA256-hashed in "
+                "public.dashboard_sessions. Disabled on VPS until "
+                "the systemd unit + tailscale ingress are wired."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "36"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

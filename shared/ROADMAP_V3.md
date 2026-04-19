@@ -3295,5 +3295,161 @@ untouched, so the existing Redis-only flow keeps working.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 36 (Owner Dashboard + Telegram OTP +
-Mobile) is next.*
+## Phase 36 — Owner Dashboard + Telegram OTP + Mobile
+
+### Purpose (plain English)
+
+Before Phase 36 there was no way to look at the system from a phone
+or laptop without opening an SSH tunnel and running CLIs. Phase 36
+gives the owner a tiny, mobile-friendly **read-only** dashboard —
+services, backtest submissions, strategy intents, regime,
+guardrails — guarded by a Telegram-OTP login flow.
+
+The design is boring on purpose:
+
+1. **Telegram OTP, not passwords.** Passwords on a single-user
+   owner-facing dashboard are strictly worse than "prove you can
+   read this Telegram chat". An allowlisted `chat_id` requests an
+   OTP, the Telegram Bot API delivers a 6-digit code, the owner
+   echoes it back, and a session token is issued.
+2. **Hashes in the database, raw secrets only in-flight.** Every
+   OTP is stored as a SHA256 hex; every session token is stored the
+   same way. If the DB is ever dumped, nobody can replay the
+   codes/tokens. The raw OTP is only in the outgoing Telegram
+   message; the raw session token is only in the response to
+   `verify-otp` and in the browser's `localStorage`.
+3. **Read-only API.** The dashboard cannot submit a backtest, place
+   a trade, or change a rule. All mutating operations remain CLI-
+   only. That keeps the blast radius of a stolen session token
+   small.
+
+### What was built
+
+* **Migration** — `shared/dashboard/migrations/2026_04_19_phase36_dashboard.sql`:
+  * `public.dashboard_users` — allowlisted chat IDs.
+  * `public.dashboard_otps` — hashed codes with expiry + single-use
+    marker.
+  * `public.dashboard_sessions` + `public.dashboard_sessions_active`
+    view — hashed session tokens with expiry and revocation.
+* **Protocol** — `shared/dashboard/protocol.py`:
+  `DashboardUser`, `DashboardOtp`, `DashboardSession`,
+  `OtpIssueResult`, `SessionIssueResult`, `DashboardSnapshot`.
+* **Store** — `shared/dashboard/store.py`:
+  `DashboardUserStore`, `DashboardOtpStore`,
+  `DashboardSessionStore`, `hash_secret()`, plus an `InMemoryDashboardPool`
+  in `memory_pool.py` that mirrors the partial-unique-index and
+  expiry semantics for tests.
+* **Telegram transport** — `shared/dashboard/telegram.py`:
+  `TelegramSender` protocol, `NullTelegramSender` (writes codes to
+  a local JSONL log — dev only), `TelegramBotSender` (uses
+  `https://api.telegram.org/bot{token}/sendMessage` via stdlib
+  `urllib`), `sender_from_env()` auto-picks based on
+  `TICKLES_TELEGRAM_BOT_TOKEN`.
+* **Auth** — `shared/dashboard/auth.py`:
+  * `DashboardAuth.issue_otp(chat_id)` generates a `secrets.randbelow`-
+    based 6-digit code, hashes it, stores the row, delivers the
+    raw code through the transport, and returns the raw code + TTL
+    to the caller **once**.
+  * `DashboardAuth.verify_otp(chat_id, code)` looks up the matching
+    un-consumed, un-expired row, consumes it, and issues a
+    `secrets.token_urlsafe(32)` session token.
+  * `DashboardAuth.authenticate_token(token)` resolves the token to
+    an active session + user, touches `last_seen_at`.
+  * Explicit exception classes with `http_status` attributes:
+    `UnknownChat (404)`, `DisabledUser (403)`, `InvalidOtp (401)`,
+    `InvalidSession (401)`, `OtpDeliveryFailed (502)`.
+* **Snapshot** — `shared/dashboard/snapshot.py` + `providers.py`:
+  `SnapshotBuilder` aggregates data from `ServicesProvider`,
+  `SubmissionsProvider`, `IntentsProvider`, `RegimeProvider`,
+  `GuardrailsProvider`. Any provider can be missing; the snapshot
+  returns partial data + a `notes` array explaining which sources
+  were unavailable. Concrete providers: `RegistryServicesProvider`
+  (wraps `SERVICE_REGISTRY`), `SubmissionsStoreProvider` (wraps the
+  Phase-35 store), `IntentsSqlProvider` (queries
+  `strategy_intents_latest`).
+* **HTTP server** — `shared/dashboard/server.py` (aiohttp 3.x):
+  * Middleware enforces bearer-token auth on every `/api/*` path
+    except `/api/auth/request-otp` and `/api/auth/verify-otp`.
+  * Endpoints: `GET /` (static SPA), `GET /healthz`,
+    `POST /api/auth/request-otp`, `POST /api/auth/verify-otp`,
+    `POST /api/auth/logout`, `GET /api/snapshot`,
+    `GET /api/services`.
+  * Dev flag `expose_otp=True` echoes the raw OTP in the response
+    (used by the demo / tests, never on the VPS).
+* **Static SPA** — `shared/dashboard/web/index.html`:
+  Single self-contained HTML+CSS+JS page. Dark theme, mobile-first
+  (`max-width: 1200px`, 1-column on phones, 2-column ≥ 720 px).
+  Login screen → chat_id + OTP input; main screen → services KPI
+  card, submissions KPI card, latest intents table, regime +
+  guardrails status. Polls `/api/snapshot` every 15 s. Session
+  token persisted in `localStorage`; automatic logout on 401.
+* **CLI** — `shared/cli/dashboard_cli.py`:
+  `apply-migration`, `migration-sql`, `user-add`, `user-list`,
+  `user-disable`, `request-otp`, `verify-otp`, `sessions`,
+  `revoke-sessions`, `serve`, `demo`.
+* **Service registry** — `dashboard` descriptor (kind=api,
+  phase=36, enabled_on_vps=False).
+* **Tests** — `shared/tests/test_dashboard.py` (20 tests): migration
+  presence, hashing stability, user-store CRUD + set_enabled, OTP
+  lifecycle (happy path, unknown chat, disabled user, wrong code,
+  consumed code, expired code), session revocation (individual +
+  all-for-chat), snapshot builder with mixed providers (services
+  only, services + submissions, with notes), HTTP auth middleware
+  (valid bearer, missing bearer, logout revokes, healthz public,
+  unknown-chat returns 404), and CLI smoke tests
+  (`migration-sql`, `demo`).
+
+### Live demo
+
+```
+$ py -m shared.cli.dashboard_cli demo
+[demo] enrolled user chat_id=12345 (display=Owner Demo)
+[demo] issued OTP code=497025 expires_at=2026-04-19T07:46:51+00:00
+[demo] telegram transport delivered=True (NullTelegramSender)
+[demo] verified OTP, issued session id=1 token=xSTIp2s28uVFvk...
+[demo] token authenticates user=12345 role=owner session_id=1
+
+[demo] snapshot summary:
+  services registered : 22
+  submissions active  : 0
+  latest intents      : 0
+  notes               : ['intents: provider not wired']
+
+[demo] first 5 services from the registry:
+  - backtest-submitter     kind=api        phase=35  vps=False
+  - dashboard              kind=api        phase=36  vps=False
+  - auditor                kind=auditor    phase=21  vps=False
+  - catalog                kind=catalog    phase=14  vps=True
+  - candle-daemon          kind=collector  phase=13  vps=True
+```
+
+### Success criteria
+
+* 20/20 Phase-36 tests green.
+* Full regression 547/547 green (previous 527 + 20 new).
+* `ruff`, `mypy --explicit-package-bases --follow-imports=silent`,
+  `bandit` all clean (Telegram HTTPS call has a scoped
+  `# nosec B310`).
+* Service registry reports 22 services, including the new
+  `dashboard` descriptor tagged `phase=36`.
+* `py -m shared.cli.dashboard_cli demo` runs end-to-end without
+  Telegram or Postgres.
+
+### Rollback
+
+```sql
+BEGIN;
+DROP VIEW IF EXISTS public.dashboard_sessions_active;
+DROP TABLE IF EXISTS public.dashboard_sessions;
+DROP TABLE IF EXISTS public.dashboard_otps;
+DROP TABLE IF EXISTS public.dashboard_users;
+COMMIT;
+```
+
+Then `git revert` the Phase 36 commit and remove the `dashboard`
+descriptor from `shared/services/registry.py`. All other phases are
+untouched — the dashboard is strictly additive.
+
+---
+
+*End of ROADMAP_V3.md. Phase 37 (MCP stack) is next.*
