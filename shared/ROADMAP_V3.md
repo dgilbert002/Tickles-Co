@@ -2992,4 +2992,147 @@ from the CLI; every other service continues unchanged.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 34 (Strategy Composer) is next.*
+## Phase 34 — Strategy Composer
+
+### Why this phase
+
+Phases 31-33 left us with a lot of *signals* — Apex / Quant / Ledger /
+Scout / Curiosity / Optimiser / RegimeWatcher verdicts (the "souls"),
+arbitrage opportunities, and copy-trade mirrored fills — but nothing
+that stitches them together into one canonical trade stream. Phase 34
+introduces the **Strategy Composer**: a single orchestrator that
+
+1. pulls candidate trades from every upstream producer,
+2. dedupes and ranks them,
+3. persists every candidate (kept or dropped) into an audit trail,
+4. optionally runs them through a **gate** (Treasury + Guardrails
+   wiring lands in a later phase),
+5. optionally hands survivors to a **submit** callable (the Phase 26
+   `ExecutionRouter`).
+
+Everything is audit-logged — the composer never loses a proposal,
+which is critical for the Rule-1 "backtests must equal live" story.
+
+### What got built
+
+* **Migration** — `shared/strategies/migrations/2026_04_19_phase34_strategies.sql`
+  creates three objects in `public`:
+  * `strategy_descriptors` — the registry of producers (arb / copy /
+    souls / custom), each with an optional priority and config JSON.
+  * `strategy_intents` — append-only audit trail of every proposed
+    intent, its status, decision reason, and (once submitted) the
+    `order_id` it produced.
+  * `strategy_intents_latest` — view that returns the latest row per
+    `(strategy_name, symbol, side)` so dashboards can render a clean
+    "current plan" view without hunting through history.
+  * Belt-and-braces partial unique index on
+    `(strategy_name, source_ref)` where `source_ref IS NOT NULL` —
+    prevents accidental double-recording even if a producer re-emits.
+* **Protocol** — `shared/strategies/protocol.py` defines
+  `StrategyDescriptor`, `StrategyIntent`, `CompositionResult` plus
+  kind / status constants (`KIND_ARB/COPY/SOULS/CUSTOM`,
+  `STATUS_PENDING/APPROVED/REJECTED/SUBMITTED/FILLED/SKIPPED/DUPLICATE/FAILED`).
+* **Store + in-memory pool** — `shared/strategies/store.py` wraps
+  the tables with async helpers (`upsert_descriptor`,
+  `list_descriptors`, `record_intent` (idempotent),
+  `update_intent_status`, `list_intents`, `list_latest`) and
+  `shared/strategies/memory_pool.py` mimics the same semantics for
+  tests (including the partial unique index).
+* **Producers** — `shared/strategies/producers/`:
+  * `base.py` — the `BaseProducer` protocol.
+  * `arb_producer.py` — reads `arb_opportunities` and emits a buy-leg
+    + sell-leg per opportunity, correlated by a shared
+    `arb_opportunities.id=…` ref.
+  * `copy_producer.py` — reads pending `copy_trades` and turns each
+    into an intent (notional-weighted priority).
+  * `souls_producer.py` — reads approved/proposed soul verdicts and
+    lifts the payload (`symbol`, `side`, `size_base`, …) into intents.
+* **Composer** — `shared/strategies/composer.py`
+  (`StrategyComposer` + `ComposerConfig` + `GateDecision`). A
+  single `tick()` does: gather → dedupe → rank → persist → gate →
+  submit → update-status. Every side-effect is optional so tests
+  can pass deterministic stubs, and Phase 35+ can wire real gates.
+* **Service** — `shared/strategies/service.py` is a thin wrapper
+  (`StrategyComposerService`) that owns the composer and exposes
+  `tick()` for a future daemon.
+* **Service registry** — `shared/services/registry.py` gains a
+  `strategy-composer` worker entry with `enabled_on_vps=False`.
+* **CLI** — `shared/cli/strategy_cli.py` with:
+  * `apply-migration` / `migration-sql` — DB helpers.
+  * `descriptor-add` / `descriptors` — register producers.
+  * `tick` — run one composition pass (default: arb producer).
+  * `intents` / `latest` — inspect the audit trail.
+  * `demo` — **live** CCXT demo that chains the Phase 33 arb scanner
+    straight into the composer (public endpoints only) and prints
+    every proposed / approved / submitted leg.
+* **Tests** — `shared/tests/test_strategies.py` (18 tests) covers
+  migration, store CRUD, partial unique dedupe, composer dedupe +
+  ranking, gate approve/reject paths, submit wiring, and a CLI smoke
+  test. Full `pytest shared/tests` → **511 passed** (up from 493).
+* **Linters** — `ruff check` clean; `mypy --explicit-package-bases`
+  clean on all new files.
+
+### Live demo snapshot (real CCXT, no keys)
+
+```
+py -m shared.cli.strategy_cli demo --symbols BTC/USDT ETH/USDT SOL/USDT \
+  DOGE/USDT --min-net-bps -50 --gate --show 8
+
+[demo] scanning ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'DOGE/USDT'] on
+       ['binance', 'kraken', 'coinbase', 'bybit'] ...
+[demo] arb opportunities found: 8
+
+== composition result ==
+  proposed=16  approved=16  rejected=0  duplicate=0  submitted=0
+  [approved] arb-scanner  ETH/USDT  buy  size=0.020900  notional=$48.54
+                          venue=bybit    priority=-17.80
+  [approved] arb-scanner  ETH/USDT  sell size=0.020900  notional=$48.56
+                          venue=binance  priority=-17.80
+  [approved] arb-scanner  BTC/USDT  buy  size=0.132839  notional=$10000.00
+                          venue=bybit    priority=-19.12
+  …
+```
+
+16 intents (8 opportunities × buy + sell legs) flowed through: live
+CCXT quotes → arb scanner → producer → composer → gate stub →
+`strategy_intents` audit rows.
+
+### Success criteria
+
+* ✓ Migration idempotent (`IF NOT EXISTS`), rollback block included,
+  partial unique index via `CREATE UNIQUE INDEX …WHERE source_ref IS
+  NOT NULL`.
+* ✓ Composer is a pure orchestrator — all execution semantics live
+  in gate/submit callables so the Rule-1 parity path stays
+  deterministic.
+* ✓ Dedupe at two layers: in-memory (same tick) + DB partial unique
+  index (across ticks); composer turns DB conflicts into `duplicate`
+  status rather than exceptions.
+* ✓ Every state transition is recorded: `pending → approved →
+  submitted`, `pending → rejected`, `pending → duplicate`,
+  `approved → failed`.
+* ✓ Regression: `pytest shared/tests → 511 passed` (493 + 18 new).
+* ✓ `ruff` + `mypy --explicit-package-bases` clean on all new files.
+* ✓ Registry lists `strategy-composer` with `phase=34` and
+  `enabled_on_vps=False`.
+* ✓ Live demo succeeds on real endpoints (captured above).
+
+### Rollback
+
+```sql
+BEGIN;
+DROP VIEW IF EXISTS public.strategy_intents_latest;
+DROP TABLE IF EXISTS public.strategy_intents;
+DROP TABLE IF EXISTS public.strategy_descriptors;
+COMMIT;
+```
+
+Then `git revert` the Phase 34 commit and remove the
+`strategy-composer` descriptor from `shared/services/registry.py`.
+Phase 33 producers continue to work independently — the composer is
+the only consumer of this phase's tables.
+
+---
+
+*End of ROADMAP_V3.md. Phase 35 (Local-to-VPS Backtest Submission)
+is next.*

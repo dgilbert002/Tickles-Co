@@ -343,6 +343,25 @@ def _seed_known_services() -> None:
             tags={"phase": "33"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="strategy-composer",
+            kind="worker",
+            module="shared.cli.strategy_cli",
+            description=(
+                "Strategy Composer (Phase 34). Aggregates candidate "
+                "intents from every registered producer (arb scanner, "
+                "copy-trader, soul verdicts, custom) into "
+                "strategy_intents, dedupes by (strategy_name, "
+                "source_ref), optionally runs them through a gate "
+                "(Treasury/Guardrails in later phases) and hands "
+                "survivors to the ExecutionRouter. Disabled on VPS "
+                "until producers + gates are fully wired."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "34"},
+        )
+    )
 
 
 def register_builtin_services() -> None:
