@@ -1148,6 +1148,147 @@ no effect on any other component.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 18 (Full Indicator Library — 250+
-indicators wired to the Phase 17 firehose) starts next in the
-master-plan sequence.*
+## Phase 18 — Full Indicator Library (250+)
+
+### Purpose
+
+The Trading House needs a *big, discoverable* indicator catalog so the
+scout / composer / optimiser can actually explore a meaningful search
+space. Phase 13 left us with 23 hand-rolled indicators in
+`shared/backtest/indicators/core.py` (+ `smart_money.py` +
+`crash_protect.py`). Phase 18 takes that to **260 registered
+indicators** while keeping the existing `IndicatorSpec` contract
+unchanged, so no downstream code has to move.
+
+### Strategy (why this shape)
+
+We **don't** re-write every TA function from scratch:
+
+1. Reuse our existing `register(name, fn, defaults, param_ranges,
+   category, direction, description, asset_class)` contract — it's
+   already audited, already plugged into the indicator catalog writer,
+   and already used by the backtest engine.
+2. Add a **pandas-ta bridge** that wraps ~70 pandas-ta functions,
+   registering *one spec per output column* for multi-output
+   indicators (MACD = line/signal/hist; BBANDS = lower/mid/upper/bw/%b;
+   KDJ = k/d/j; etc.). pandas-ta is MIT-licensed and pure-python, so it
+   inherits our "installable, no compiled deps" posture.
+3. Add an **extras module** of pure-pandas indicators we want *even
+   if* pandas-ta disappears later — Yang-Zhang volatility, rolling
+   Sharpe/Sortino/Calmar, Hurst, VWAP session, streak counters, wick
+   fractions, close-position-in-range, and so on.
+4. Silent-degrade: both bridge and extras are imported in
+   `shared/backtest/indicators/__init__.py` inside a try/except, so if
+   `pandas_ta` ever regresses we still ship the core 70 indicators.
+
+### Built (summary)
+
+**Indicator modules**
+
+* `shared/backtest/indicators/pandas_ta_bridge.py` — 190 registrations
+  prefixed `pta_*`, covering:
+  * 22 moving averages (DEMA, TEMA, HMA, ALMA, KAMA, ZLMA, VIDYA,
+    VWMA, Fibonacci-WMA, Holt-Winters, Jurik, McGinley, Super
+    Smoother, TRIMA, T3, SWMA, sine-WMA, Pascal-WMA, Wilder RMA,
+    midpoint, midprice, HT Trendline).
+  * Supertrend (line + direction), PSAR (long / short / AF).
+  * ADX / DMP / DMN, Aroon (up / down / osc), Vortex (+/-),
+    Ichimoku (5 lines).
+  * 28 momentum oscillators (APO, BIAS, BRAR, CFO, CG, CMO, Coppock,
+    CTI, ER, Fisher, Inertia, Momentum, PGO, PPO, PSL, PVO, QQE, ROC,
+    RSX, Connors-RSI, Slope, SMI, StochRSI, TRIX, TSI, UO, Williams
+    %R, Elder-Ray).
+  * CCI, KDJ, KST.
+  * 15 volatility (ATR-TS, Choppiness, HL2, HLC3, kurtosis, Mass
+    Index, NATR, pdist, RVI, Elder Thermometer, true range, Ulcer,
+    variance, entropy, z-score). Bollinger (5 cols), Keltner (3),
+    Donchian (3), AccelerationBands (3).
+  * 14 volume (AD, ADOSC, AOBV, CMF, EFI, EOM, KVO, NVI, PVI, PVol,
+    PVR, PVT, TSV, VHM).
+  * Statistical (linreg, MAD, median, quantile, skew, stdev).
+  * Performance (log_return, percent_return, drawdown).
+  * Candle pattern scaffolding (Doji, Inside, candle color, HA
+    open/close).
+  * Direction helpers (increasing / decreasing).
+  * MACD (3), Stoch (3), Alligator (3), AMAT (2), AO, BOP,
+    Chandelier Exit (3), CKSP (2), DPO, EBSW, HILO (3), MAMA (2),
+    TTM Trend, VHF, Aberration (4), TOS-stdev bands (5), Elder-Ray
+    Bear, Squeeze (3), PPO (3 cols), SMI (3 cols), QQE (4 cols),
+    Fisher signal, StochRSI k/d, TSI signal, BRAR br, DM (+/-).
+* `shared/backtest/indicators/extras.py` — 47 hand-rolled indicators
+  prefixed `ext_*`, covering statistical (z-score, percentile rank,
+  rolling skew/kurt, close/volume correlation, Hurst), volatility
+  (true range, ATR%, Garman-Klass, Yang-Zhang, high-low range & %,
+  close position in range), returns/performance (log return, pct
+  return, cumulative, drawdown, max DD, rolling Sharpe / Sortino /
+  Calmar), trend/momentum (SMMA/RMA, MA envelopes, price>SMA,
+  EMA slope, close slope, gain ratio), volume (volume z-score,
+  volume ratio, dollar volume, session VWAP, accumulation %), pattern
+  (bullish / bearish streaks, gap %, body %, upper/lower wick %,
+  inside / outside bars), and range helpers (rolling high/low, age of
+  high/low, distance to high/low).
+* `shared/backtest/indicators/__init__.py` — now also imports the
+  bridge + extras and calls `register_all()` inside try/except so the
+  system keeps working even if a dependency is missing.
+
+**Operator CLI — `shared/cli/indicators_cli.py`**
+
+Follows the same single-line-JSON pattern as every other Phase 13+
+CLI:
+
+* `count` — total + `{by_category}` + `{by_direction}` counts.
+* `list [--category X] [--direction Y]` — enumerate specs.
+* `categories` — indicator names grouped by category.
+* `describe <name>` — full spec (defaults, param ranges, description,
+  category, direction, asset class). Returns `EXIT_FAIL` if unknown.
+* `search <substr>` — case-insensitive substring match across name +
+  description.
+
+**Tests — `shared/tests/test_indicators.py`**
+
+Eleven new tests: registry size ≥ 250, presence of core basics,
+presence of bridge + extras prefixes, synthetic OHLCV execution for
+a sample of core / extras / bridge indicators, spec field sanity
+(categories must be in a whitelist, every fn callable), and three
+CLI smoke tests (`count`, `describe rsi`, unknown-indicator failure,
+`python -m shared.cli.indicators_cli --help` exits 0).
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/` stays green locally *and* on the VPS (130
+   passing including the 11 new Phase 18 tests).
+2. `ruff` + `mypy --ignore-missing-imports` both clean on the new /
+   modified files.
+3. `python -m shared.cli.indicators_cli count` returns `total >= 250`
+   both locally and on the VPS.
+4. Existing Phases 13 – 17 behaviour untouched:
+   * Systemd services still `active(running)`:
+     `tickles-candle-daemon`, `tickles-md-gateway`, `tickles-bt-workers`.
+   * Gateway CLI (`shared.cli.gateway_cli stats`) continues to
+     publish live stats.
+   * Candles CLI smoke tests still pass (no schema changes).
+5. `pandas_ta` installed in the VPS system Python (`/usr/bin/python3`)
+   so the workers can import the bridge when a strategy asks for a
+   `pta_*` indicator.
+
+### Rollback
+
+Phase 18 has **no** database migrations, no systemd units and no
+mutable external state:
+
+```bash
+# 1. revert the commit (or git reset --hard)
+cd /opt/tickles
+git revert <phase-18-commit>
+
+# 2. optionally remove pandas_ta if we want an "absolutely clean" box
+sudo /usr/bin/python3 -m pip uninstall -y pandas_ta
+```
+
+No data loss, no restart sequencing: the backtest workers just drop
+back to the original 23-indicator registry automatically.
+
+---
+
+*End of ROADMAP_V3.md. Phase 19 (Backtest Engine 2.0 — VectorBT +
+Nautilus parity layer) is next in the master-plan sequence.*

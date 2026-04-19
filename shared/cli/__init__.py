@@ -23,4 +23,5 @@ __all__ = [
     "assets_cli",
     "sufficiency_cli",
     "candles_cli",
+    "indicators_cli",
 ]

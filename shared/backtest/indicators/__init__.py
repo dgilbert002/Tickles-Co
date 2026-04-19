@@ -20,6 +20,20 @@ from . import crash_protect  # noqa: F401
 
 from .core import INDICATORS, IndicatorSpec
 
+# Phase 18 — wire the pandas_ta bridge and the hand-rolled extras.
+# Both modules are no-ops if their dependencies are missing.
+try:
+    from . import extras as _extras_mod
+    _extras_mod.register_all()
+except Exception:  # noqa: BLE001 — indicators are best-effort additions
+    pass
+
+try:
+    from . import pandas_ta_bridge as _pta_mod
+    _pta_mod.register_all()
+except Exception:  # noqa: BLE001 — bridge is optional (pandas_ta may be absent)
+    pass
+
 
 def get(name: str) -> IndicatorSpec:
     """Look up an indicator spec by name. Raises KeyError if unknown."""
