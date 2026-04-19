@@ -276,7 +276,7 @@ def test_services_cli_describe_unknown() -> None:
 def test_services_cli_heartbeats_empty() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         env = os.environ.copy()
-        env["TICKLES_AUDIT_DIR"] = tmp
+        env["TICKLES_AUDIT_DB"] = os.path.join(tmp, "rule1.sqlite3")
         proc = subprocess.run(
             [sys.executable, "-m", "shared.cli.services_cli", "heartbeats"],
             capture_output=True,
