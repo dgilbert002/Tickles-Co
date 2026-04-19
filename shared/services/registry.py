@@ -309,6 +309,40 @@ def _seed_known_services() -> None:
             tags={"phase": "31-32"},
         )
     )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="arb-scanner",
+            kind="worker",
+            module="shared.cli.arb_cli",
+            description=(
+                "Arbitrage Scanner (Phase 33). Polls N venues for "
+                "top-of-book quotes and emits opportunities (stored in "
+                "arb_opportunities) when the net spread after fees clears "
+                "min_net_bps. Supports offline quote-books for tests and "
+                "live CCXT public tickers for production. Disabled on VPS "
+                "until Phase 34 wires the composer to the ExecutionRouter."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "33"},
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="copy-trader",
+            kind="worker",
+            module="shared.cli.copy_cli",
+            description=(
+                "Copy-Trader (Phase 33). Polls registered leader sources "
+                "(ccxt_account / wallet / feed / static) for new fills, "
+                "applies per-source sizing rules (ratio / fixed_notional / "
+                "replicate) with whitelist/blacklist/max_notional caps, and "
+                "persists mirrored trades to copy_trades. Disabled on VPS "
+                "until Phase 34 wires the composer to the ExecutionRouter."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "33"},
+        )
+    )
 
 
 def register_builtin_services() -> None:

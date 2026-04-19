@@ -2812,4 +2812,184 @@ feature is lost.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 33 (Arb + Copy-Trader) is next.*
+## Phase 33 — Arb + Copy-Trader
+
+### Why this phase exists
+
+Every strategy so far has been either an indicator- or agent-driven
+"alpha" (Phases 18, 31–32). Phase 33 adds two **market-structure**
+strategies that generate their own alpha without needing a price
+prediction:
+
+1. **Arbitrage scanner** — watches top-of-book quotes across N venues
+   and emits opportunities when the best bid on one venue exceeds the
+   best ask on another by more than ``min_net_bps`` **after fees**.
+   Think "buy BTC at $75 410 on binance, simultaneously sell at
+   $75 421 on coinbase, pocket the gap". In liquid majors the net
+   gap after 36+ bps of fees is usually negative; in alts and
+   thinner books it can be meaningful.
+
+2. **Copy-trader** — watches a registered *source* (another account,
+   a public wallet, a signal feed) for new fills and mirrors them
+   onto our own book with a per-source sizing rule (ratio / fixed
+   notional USD / replicate) plus whitelist/blacklist and a
+   max-notional cap.
+
+Both systems only *detect and record* opportunities in this phase.
+They don't place orders — that's wired in Phase 34 when the strategy
+composer promotes opportunities to intents and routes them through
+the Phase 26 ExecutionRouter (which itself runs through Treasury,
+Guardrails, and the Rule-1 auditor).
+
+### What got built
+
+**Migrations** — two new SQL files, both idempotent with explicit
+rollback:
+
+* `shared/arb/migrations/2026_04_19_phase33_arb.sql` — `public.arb_venues`
+  (with a `CREATE UNIQUE INDEX` over `(name, kind, COALESCE(company_id,''))`)
+  and `public.arb_opportunities` (append-only, with `CHECK (net_bps >= 0)`).
+* `shared/copy/migrations/2026_04_19_phase33_copy.sql` — `public.copy_sources`
+  (same coalesce-index pattern for unique tuples) and `public.copy_trades`
+  with a plain `UNIQUE (source_id, source_fill_id)` so re-polling a
+  source is naturally idempotent.
+
+**Arb module** — `shared/arb/`:
+
+* `protocol.py` — `ArbVenue`, `ArbQuote`, `ArbOpportunity` dataclasses.
+* `fetchers.py` — `OfflineQuoteFetcher` (dict stub for tests), `CcxtQuoteFetcher`
+  (live public tickers via `ccxt.async_support`, venue failures are
+  silently dropped per scan — the scanner continues with whatever
+  venues succeeded).
+* `scanner.py` — pure deterministic evaluator. For each ordered
+  `(buy_venue, sell_venue)` pair where `buy != sell`: compute
+  `gross_bps = (sell_bid − buy_ask) / buy_ask × 10 000`, subtract
+  fees (both takers by default), and emit an opportunity if
+  `net_bps ≥ min_net_bps`. `size_base` is capped by the shallower
+  side of the book **and** by `max_size_usd`.
+* `store.py` — async wrapper around the two tables: `upsert_venue`,
+  `list_venues`, `record_opportunity`, `list_opportunities`.
+* `memory_pool.py` — in-memory pool that mirrors PostgreSQL's
+  semantics for tests.
+* `service.py` — `ArbService.scan_symbols()` runs one tick across
+  N symbols, sorts opportunities by `(-net_bps, symbol)`, and
+  optionally persists.
+
+**Copy module** — `shared/copy/`:
+
+* `protocol.py` — `CopySource`, `SourceFill`, `CopyTrade` dataclasses
+  + constants for source kinds (`ccxt_account` / `wallet` / `feed` /
+  `static`) and sizing modes.
+* `mapper.py` — `CopyMapper.map(source, fill)` → `MappingResult`.
+  Enforces `enabled`, whitelist / blacklist, positive price/qty,
+  sizing mode, and max-notional cap. When a fill is skipped, the
+  mapper still emits a `CopyTrade(status='skipped', skip_reason=…)`
+  so the audit trail captures *why* the fill was ignored.
+* `sources.py` — `BaseCopySource` protocol, `StaticCopySource` (list),
+  `CcxtCopySource` (wraps `fetch_my_trades` — requires API keys, so
+  returns `[]` gracefully if no exchange is configured; the public
+  `demo` subcommand uses a different, public-tape-based path).
+* `store.py` — `upsert_source`, `list_sources`, `get_source`,
+  `touch_source`, `record_trade` (idempotent on
+  `(source_id, source_fill_id)`), `list_trades`.
+* `memory_pool.py` — in-memory pool for tests.
+* `service.py` — `CopyService.tick_one(source)` fetches fills from
+  the source since its `last_checked_at`, maps each one, persists
+  the result, and touches the watermark so the next tick doesn't
+  re-process the same fills.
+
+**CLIs** — `shared/cli/arb_cli.py` and `shared/cli/copy_cli.py`:
+
+* Shared pattern with `souls_cli`: `apply-migration` / `migration-sql`
+  for DB bootstrap, `venue-add`/`venues` (arb) and `source-add`/
+  `sources` (copy) for config, `scan`/`tick`/`opportunities`/`trades`
+  for runtime queries.
+* `arb_cli demo` — human-friendly live table. Fetches public tickers
+  from binance/kraken/coinbase/bybit for the requested symbols,
+  prints each venue's bid/ask with a `*` on the best side, shows the
+  gross `gap-vs-best-ask` in bps, then runs the scanner deterministically
+  over the same snapshot and prints any opportunities. Adaptive
+  decimal precision handles tiny-price coins (PEPE, SHIB, DOGE).
+* `copy_cli demo` — live copy-trader illustration. Pulls Binance's
+  public trade tape for a symbol (`fetch_trades`), treats each
+  anonymous public trade as if it came from a registered leader,
+  runs `CopyService.tick_one()` with a configurable sizing rule
+  (`--size-mode ratio|fixed_notional_usd|replicate`,
+  `--size-value`, `--max-notional-usd`), and prints the mirrored
+  trades it *would* have produced. No orders are ever sent.
+
+**Registry** — `shared/services/registry.py`: two new descriptors,
+`arb-scanner` and `copy-trader`, both `kind="worker"`, `phase="33"`,
+`enabled_on_vps=False`. They'll flip on in Phase 34 alongside the
+strategy composer.
+
+### Tangible live output from the demos
+
+Run against real public endpoints, no keys:
+
+```
+$ py -m shared.cli.arb_cli demo --symbols BTC/USDT ETH/USDT SOL/USDT
+== BTC/USDT ==
+  binance   bid 75410.0000   ask 75410.0100 *  gap-vs-best-ask  -0.00bps
+  kraken    bid 75415.5000   ask 75420.0000    gap-vs-best-ask  +0.73bps
+  coinbase  bid 75421.6100 * ask 75432.8100    gap-vs-best-ask  +1.54bps
+  bybit     bid 75412.2000   ask 75412.3000    gap-vs-best-ask  +0.29bps
+```
+
+Gross gaps are real (up to ~1.5 bps across majors right now) but
+below the 36 bps of taker fees needed to clear a cross-venue round
+trip, so no persisted opportunities — exactly the behaviour we want.
+
+```
+$ py -m shared.cli.copy_cli demo --symbol ETH/USDT \
+    --size-mode fixed_notional_usd --size-value 50 --limit 10
+== source: public-tape-leader (fixed_notional_usd, 50.0, cap=None) ==
+  fills fetched : 10  trades kept : 10  trades skipped : 0
+  sell 0.649000 ETH @ 2328.55 → mapped 0.021473 ETH = $50.0000
+  sell 0.004300 ETH @ 2328.55 → mapped 0.021473 ETH = $50.0000
+  …
+```
+
+Every real public fill — no matter whether the source traded 0.004
+or 3 ETH — becomes exactly \$50 notional on our mirrored book.
+Ratio mode + cap works the same way (owner tested on BTC with 5%
+ratio and a \$500 cap).
+
+### Success criteria
+
+* ✓ Both migrations idempotent (`IF NOT EXISTS`); rollback block
+  at the bottom of each file; `COALESCE`-based uniqueness done
+  via `CREATE UNIQUE INDEX` (PostgreSQL won't accept that inside
+  inline `UNIQUE` constraints — same lesson as Phase 32).
+* ✓ Scanner is a pure function — same quotes ⇒ same opportunities,
+  same order (`(-net_bps, symbol)`).
+* ✓ Mapper is a pure function — every decision recorded, skipped
+  ones included, with an actionable `skip_reason`.
+* ✓ Source watermarks prevent re-polling the same fills; unique
+  constraint on `copy_trades(source_id, source_fill_id)` gives a
+  belt-and-braces layer of idempotency.
+* ✓ Regression: `pytest shared/tests → 493 passed` (459 + 34 new).
+* ✓ `ruff` + `mypy --explicit-package-bases` clean on all new files.
+* ✓ Registry correctly lists `arb-scanner` and `copy-trader` with
+  `phase=33` and `enabled_on_vps=False`.
+* ✓ Live demos succeed on real endpoints (captured in phase notes).
+
+### Rollback
+
+```sql
+BEGIN;
+DROP TABLE IF EXISTS public.copy_trades;
+DROP TABLE IF EXISTS public.copy_sources;
+DROP TABLE IF EXISTS public.arb_opportunities;
+DROP TABLE IF EXISTS public.arb_venues;
+COMMIT;
+```
+
+Then `git revert` the Phase 33 commit. Nothing else in the stack
+depends on these tables yet — Phase 34 will be the first consumer.
+Deleting the Phase 33 registry entries just removes the descriptors
+from the CLI; every other service continues unchanged.
+
+---
+
+*End of ROADMAP_V3.md. Phase 34 (Strategy Composer) is next.*
