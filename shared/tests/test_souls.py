@@ -1,40 +1,59 @@
-"""Phase 31 — Apex / Quant / Ledger souls tests."""
+"""Phase 31 — Apex / Quant / Ledger souls tests (Phase 32 adds Scout / Curiosity / Optimiser / RegimeWatcher)."""
 from __future__ import annotations
 
 import asyncio
 import io
 import json
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from typing import Any, List
 
 from shared.cli import souls_cli
 from shared.services.registry import SERVICE_REGISTRY, register_builtin_services
 from shared.souls import (
     ApexSoul,
+    CuriositySoul,
     InMemorySoulsPool,
     LedgerSoul,
     MIGRATION_PATH,
+    MIGRATION_PATH_PHASE32,
     MODE_DETERMINISTIC,
+    OptimiserCandidate,
+    OptimiserSoul,
+    OptimiserStore,
     QuantSoul,
+    RegimeTransition,
+    RegimeTransitionStore,
+    RegimeWatcherSoul,
     ROLE_DECISION,
     ROLE_RESEARCH,
+    ScoutCandidate,
+    ScoutSoul,
+    ScoutStore,
     SOUL_APEX,
+    SOUL_CURIOSITY,
     SOUL_LEDGER,
     SOUL_NAMES,
+    SOUL_OPTIMISER,
     SOUL_QUANT,
+    SOUL_REGIME_WATCHER,
+    SOUL_SCOUT,
     SoulContext,
     SoulPersona,
     SoulPrompt,
     SoulsService,
     SoulsStore,
+    VERDICT_ALERT,
     VERDICT_APPROVE,
     VERDICT_DEFER,
+    VERDICT_EXPLORE,
     VERDICT_JOURNAL,
     VERDICT_OBSERVE,
     VERDICT_PROPOSE,
     VERDICT_REJECT,
     VERDICTS,
     read_migration_sql,
+    read_migration_sql_phase32,
 )
 
 
@@ -74,9 +93,13 @@ def test_migration_exists_with_expected_objects() -> None:
 
 
 def test_soul_names_are_canonical() -> None:
-    assert SOUL_NAMES == {SOUL_APEX, SOUL_QUANT, SOUL_LEDGER}
+    assert SOUL_NAMES == {
+        SOUL_APEX, SOUL_QUANT, SOUL_LEDGER,
+        SOUL_SCOUT, SOUL_CURIOSITY, SOUL_OPTIMISER, SOUL_REGIME_WATCHER,
+    }
     for v in (VERDICT_APPROVE, VERDICT_REJECT, VERDICT_PROPOSE,
-              VERDICT_JOURNAL, VERDICT_OBSERVE, VERDICT_DEFER):
+              VERDICT_JOURNAL, VERDICT_OBSERVE, VERDICT_DEFER,
+              VERDICT_EXPLORE, VERDICT_ALERT):
         assert v in VERDICTS
 
 
@@ -399,7 +422,7 @@ def test_souls_service_is_registered() -> None:
     register_builtin_services()
     assert "souls" in SERVICE_REGISTRY
     desc = SERVICE_REGISTRY.get("souls")
-    assert desc.tags.get("phase") == "31"
+    assert desc.tags.get("phase") in {"31", "31-32"}
 
 
 # ---------------------------------------------------------------------------
@@ -485,3 +508,401 @@ def test_cli_latest_empty_in_memory() -> None:
     data = _run_cli(["latest", "--in-memory"])
     assert data["ok"] is True
     assert data["count"] == 0
+
+
+# ===========================================================================
+# Phase 32 — Scout / Curiosity / Optimiser / RegimeWatcher
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Migration (phase 32)
+# ---------------------------------------------------------------------------
+
+
+def test_phase32_migration_exists_with_expected_objects() -> None:
+    assert MIGRATION_PATH_PHASE32.exists()
+    sql = read_migration_sql_phase32()
+    for obj in (
+        "public.scout_candidates",
+        "public.optimiser_candidates",
+        "public.regime_transitions",
+    ):
+        assert obj in sql
+
+
+# ---------------------------------------------------------------------------
+# Scout soul
+# ---------------------------------------------------------------------------
+
+
+def test_scout_proposes_above_threshold_and_orders_by_score() -> None:
+    scout = ScoutSoul(min_score=0.2, max_proposals=5)
+    ctx = _ctx(
+        observations=[
+            {"symbol": "AAA/USDT", "exchange": "binance",
+             "volume_usd": 5e8, "volatility": 0.1,
+             "social_mentions": 5000, "funding_rate": 0.0},
+            {"symbol": "BBB/USDT", "exchange": "binance",
+             "volume_usd": 1e6, "volatility": 0.01,
+             "social_mentions": 10, "funding_rate": 0.0},
+            {"symbol": "CCC/USDT", "exchange": "binance",
+             "volume_usd": 8e8, "volatility": 0.15,
+             "social_mentions": 8000, "funding_rate": 0.0},
+        ],
+        existing_symbols=["DDD/USDT"],
+    )
+    d = scout.decide(ctx)
+    assert d.verdict == VERDICT_PROPOSE
+    proposals = d.outputs["proposals"]
+    assert [p["symbol"] for p in proposals] == ["CCC/USDT", "AAA/USDT"]
+    assert proposals[0]["score"] >= proposals[1]["score"]
+
+
+def test_scout_filters_existing_symbols() -> None:
+    scout = ScoutSoul(min_score=0.05)
+    d = scout.decide(_ctx(
+        observations=[{"symbol": "BTC/USDT", "exchange": "binance",
+                       "volume_usd": 1e9, "volatility": 0.1,
+                       "social_mentions": 1000, "funding_rate": 0.0}],
+        existing_symbols=["BTC/USDT"],
+    ))
+    assert d.verdict == VERDICT_OBSERVE
+    assert d.outputs["proposals"] == []
+
+
+def test_scout_observes_when_nothing_qualifies() -> None:
+    d = ScoutSoul(min_score=0.9).decide(_ctx(observations=[
+        {"symbol": "XYZ/USDT", "exchange": "x",
+         "volume_usd": 1, "volatility": 0, "social_mentions": 0},
+    ]))
+    assert d.verdict == VERDICT_OBSERVE
+
+
+def test_scout_is_deterministic() -> None:
+    scout = ScoutSoul()
+    obs = [
+        {"symbol": "AAA/USDT", "exchange": "x",
+         "volume_usd": 5e8, "volatility": 0.1,
+         "social_mentions": 500, "funding_rate": 0.0},
+    ]
+    a = scout.decide(_ctx(observations=obs))
+    b = scout.decide(_ctx(observations=obs))
+    assert a.to_dict() == b.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Curiosity soul
+# ---------------------------------------------------------------------------
+
+
+def test_curiosity_explores_untried_first() -> None:
+    c = CuriositySoul()
+    d = c.decide(_ctx(
+        history=[{"key": "a", "success": True}, {"key": "a", "success": False}],
+        candidates=[
+            {"key": "a", "prior": 0.5, "params": {"x": 1}},
+            {"key": "b", "prior": 0.5, "params": {"x": 2}},
+        ],
+    ))
+    assert d.verdict == VERDICT_EXPLORE
+    keys = [p["key"] for p in d.outputs["picks"]]
+    assert keys[0] == "b"
+
+
+def test_curiosity_observes_when_empty() -> None:
+    c = CuriositySoul()
+    d = c.decide(_ctx(candidates=[]))
+    assert d.verdict == VERDICT_OBSERVE
+
+
+def test_curiosity_respects_novelty_floor() -> None:
+    c = CuriositySoul(novelty_floor=0.99)
+    d = c.decide(_ctx(candidates=[{"key": "a", "prior": 0.01}],
+                      history=[{"key": "a"}] * 50))
+    assert d.verdict == VERDICT_OBSERVE
+
+
+# ---------------------------------------------------------------------------
+# Optimiser soul
+# ---------------------------------------------------------------------------
+
+
+def test_optimiser_proposes_first_untried_in_grid() -> None:
+    opt = OptimiserSoul()
+    d = opt.decide(_ctx(
+        strategy="s1",
+        space={"a": [1, 2], "b": [10, 20]},
+        history=[],
+    ))
+    assert d.verdict == VERDICT_PROPOSE
+    assert d.outputs["params"] == {"a": 1, "b": 10}
+
+
+def test_optimiser_skips_tried_and_returns_neighbour_when_grid_exhausted() -> None:
+    opt = OptimiserSoul()
+    space = {"a": [1, 2, 3]}
+    history = [
+        {"params": {"a": 1}, "score": 0.1},
+        {"params": {"a": 2}, "score": 0.9},
+        {"params": {"a": 3}, "score": 0.5},
+    ]
+    d = opt.decide(_ctx(strategy="s1", space=space, history=history))
+    assert d.verdict == VERDICT_OBSERVE
+
+
+def test_optimiser_advances_through_grid() -> None:
+    opt = OptimiserSoul()
+    space = {"a": [1, 2], "b": [10, 20]}
+    history = [{"params": {"a": 1, "b": 10}, "score": 0.5}]
+    d = opt.decide(_ctx(strategy="s1", space=space, history=history))
+    assert d.verdict == VERDICT_PROPOSE
+    assert d.outputs["params"] != {"a": 1, "b": 10}
+
+
+def test_optimiser_honours_budget() -> None:
+    opt = OptimiserSoul(max_total_trials=1)
+    d = opt.decide(_ctx(
+        strategy="s1", space={"a": [1, 2, 3]},
+        history=[{"params": {"a": 1}, "score": 0.5}],
+    ))
+    assert d.verdict == VERDICT_OBSERVE
+    assert "budget" in (d.rationale or "")
+
+
+# ---------------------------------------------------------------------------
+# RegimeWatcher soul
+# ---------------------------------------------------------------------------
+
+
+def test_regime_watcher_alerts_on_transition() -> None:
+    rw = RegimeWatcherSoul()
+    t0 = datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc)
+    d = rw.decide(_ctx(observations=[
+        {"ts": t0.isoformat(), "regime": "bull", "confidence": 0.7},
+        {"ts": (t0 + timedelta(hours=1)).isoformat(),
+         "regime": "crash", "confidence": 0.9},
+    ]))
+    assert d.verdict == VERDICT_ALERT
+    latest = d.outputs["latest"]
+    assert latest["from_regime"] == "bull"
+    assert latest["to_regime"] == "crash"
+    assert latest["crash"] is True
+    assert d.outputs["severity"] == "high"
+
+
+def test_regime_watcher_observes_when_no_transition() -> None:
+    rw = RegimeWatcherSoul()
+    t0 = datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc)
+    d = rw.decide(_ctx(observations=[
+        {"ts": t0.isoformat(), "regime": "bull"},
+        {"ts": (t0 + timedelta(hours=1)).isoformat(), "regime": "bull"},
+    ]))
+    assert d.verdict == VERDICT_OBSERVE
+
+
+def test_regime_watcher_observes_when_insufficient_data() -> None:
+    d = RegimeWatcherSoul().decide(_ctx(observations=[]))
+    assert d.verdict == VERDICT_OBSERVE
+
+
+# ---------------------------------------------------------------------------
+# Service — Phase 32 wiring
+# ---------------------------------------------------------------------------
+
+
+def test_service_seed_includes_phase32_personas() -> None:
+    pool = InMemorySoulsPool()
+    svc = SoulsService(SoulsStore(pool))
+
+    async def go() -> None:
+        ids = await svc.seed_personas()
+        assert set(ids.keys()) == SOUL_NAMES
+        assert SOUL_SCOUT in ids and SOUL_CURIOSITY in ids
+        assert SOUL_OPTIMISER in ids and SOUL_REGIME_WATCHER in ids
+
+    _run(go())
+
+
+def test_service_runs_all_phase32_souls() -> None:
+    pool = InMemorySoulsPool()
+    svc = SoulsService(SoulsStore(pool))
+
+    async def go() -> None:
+        ctx_scout = SoulContext(
+            correlation_id="p32",
+            fields={"observations": [
+                {"symbol": "AAA/USDT", "exchange": "x",
+                 "volume_usd": 1e9, "volatility": 0.1,
+                 "social_mentions": 5000, "funding_rate": 0.0},
+            ]},
+        )
+        ctx_cur = SoulContext(
+            correlation_id="p32",
+            fields={"candidates": [{"key": "a", "prior": 0.6}]},
+        )
+        ctx_opt = SoulContext(
+            correlation_id="p32",
+            fields={"strategy": "s1", "space": {"a": [1, 2]}, "history": []},
+        )
+        t0 = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        ctx_rw = SoulContext(
+            correlation_id="p32",
+            fields={"observations": [
+                {"ts": t0.isoformat(), "regime": "bull"},
+                {"ts": (t0 + timedelta(hours=1)).isoformat(), "regime": "bear"},
+            ]},
+        )
+        ds = await svc.run_scout(ctx_scout)
+        dc = await svc.run_curiosity(ctx_cur)
+        do = await svc.run_optimiser(ctx_opt)
+        dr = await svc.run_regime_watcher(ctx_rw)
+        assert ds.verdict == VERDICT_PROPOSE
+        assert dc.verdict == VERDICT_EXPLORE
+        assert do.verdict == VERDICT_PROPOSE
+        assert dr.verdict == VERDICT_ALERT
+
+        rows = await svc.decisions(correlation_id="p32")
+        assert len(rows) == 4
+        assert {r.verdict for r in rows} == {
+            VERDICT_PROPOSE, VERDICT_EXPLORE, VERDICT_ALERT,
+        }
+
+    _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Stores — Phase 32
+# ---------------------------------------------------------------------------
+
+
+def test_scout_store_upsert_is_idempotent() -> None:
+    pool = InMemorySoulsPool()
+    store = ScoutStore(pool)
+
+    async def go() -> None:
+        a = await store.upsert(ScoutCandidate(
+            id=None, exchange="binance", symbol="AAA/USDT",
+            score=0.5, universe="crypto", company_id="tickles",
+            reason="volume", correlation_id="c1",
+        ))
+        b = await store.upsert(ScoutCandidate(
+            id=None, exchange="binance", symbol="AAA/USDT",
+            score=0.75, universe="crypto", company_id="tickles",
+            reason="volume+mentions", correlation_id="c2",
+        ))
+        assert a == b
+        rows = await store.list()
+        assert len(rows) == 1
+        assert rows[0].score == 0.75
+        assert rows[0].reason == "volume+mentions"
+
+    _run(go())
+
+
+def test_optimiser_store_insert_and_filter() -> None:
+    pool = InMemorySoulsPool()
+    store = OptimiserStore(pool)
+
+    async def go() -> None:
+        for i, st in enumerate(["pending", "running", "done"]):
+            await store.insert(OptimiserCandidate(
+                id=None, strategy="s1", params={"a": i}, status=st,
+            ))
+        rows = await store.list(status="pending")
+        assert len(rows) == 1
+        assert rows[0].params == {"a": 0}
+        all_rows = await store.list(strategy="s1")
+        assert len(all_rows) == 3
+
+    _run(go())
+
+
+def test_regime_transition_store_insert_and_list() -> None:
+    pool = InMemorySoulsPool()
+    store = RegimeTransitionStore(pool)
+    t0 = datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc)
+
+    async def go() -> None:
+        await store.insert(RegimeTransition(
+            id=None, exchange="binance", symbol="BTC/USDT",
+            timeframe="1h", from_regime="bull", to_regime="bear",
+            transitioned_at=t0, confidence=0.8,
+        ))
+        await store.insert(RegimeTransition(
+            id=None, exchange="binance", symbol="BTC/USDT",
+            timeframe="1h", from_regime="bear", to_regime="crash",
+            transitioned_at=t0 + timedelta(hours=1), confidence=0.9,
+        ))
+        rows = await store.list(symbol="BTC/USDT")
+        assert len(rows) == 2
+        assert rows[0].to_regime == "crash"
+
+    _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 CLI
+# ---------------------------------------------------------------------------
+
+
+def test_cli_phase32_migration_path() -> None:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = souls_cli.main(["apply-migration", "--phase", "32",
+                               "--path-only"])
+    assert code == 0
+    assert buf.getvalue().strip() == str(MIGRATION_PATH_PHASE32)
+
+
+def test_cli_phase32_migration_sql() -> None:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = souls_cli.main(["migration-sql", "--phase", "32"])
+    assert code == 0
+    assert "scout_candidates" in buf.getvalue()
+
+
+def test_cli_run_scout_in_memory() -> None:
+    fields = json.dumps({"observations": [
+        {"symbol": "AAA/USDT", "exchange": "x",
+         "volume_usd": 1e9, "volatility": 0.1,
+         "social_mentions": 5000, "funding_rate": 0.0},
+    ]})
+    data = _run_cli([
+        "run-scout", "--in-memory",
+        "--correlation-id", "cli-scout", "--fields", fields,
+    ])
+    assert data["decision"]["verdict"] == VERDICT_PROPOSE
+    assert data["decision"]["persona_name"] == SOUL_SCOUT
+
+
+def test_cli_run_curiosity_in_memory() -> None:
+    fields = json.dumps({"candidates": [{"key": "a", "prior": 0.5}]})
+    data = _run_cli([
+        "run-curiosity", "--in-memory",
+        "--correlation-id", "cli-cur", "--fields", fields,
+    ])
+    assert data["decision"]["verdict"] == VERDICT_EXPLORE
+
+
+def test_cli_run_optimiser_in_memory() -> None:
+    fields = json.dumps({"strategy": "s1", "space": {"a": [1, 2]}})
+    data = _run_cli([
+        "run-optimiser", "--in-memory",
+        "--correlation-id", "cli-opt", "--fields", fields,
+    ])
+    assert data["decision"]["verdict"] == VERDICT_PROPOSE
+
+
+def test_cli_run_regime_watcher_in_memory() -> None:
+    t0 = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    fields = json.dumps({"observations": [
+        {"ts": t0.isoformat(), "regime": "bull"},
+        {"ts": (t0 + timedelta(hours=1)).isoformat(), "regime": "bear"},
+    ]})
+    data = _run_cli([
+        "run-regime-watcher", "--in-memory",
+        "--correlation-id", "cli-rw", "--fields", fields,
+    ])
+    assert data["decision"]["verdict"] == VERDICT_ALERT

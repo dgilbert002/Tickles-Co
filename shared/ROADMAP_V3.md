@@ -2681,4 +2681,135 @@ is safe.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 32 (Scout/Curiosity/Optimiser/RegimeWatcher) is next.*
+## Phase 32 — Scout / Curiosity / Optimiser / RegimeWatcher (2026-04-19)
+
+### Purpose
+
+Phase 32 adds four more deterministic "soul" personas on top of the
+Phase 31 framework. Together they give the system the ability to
+**expand** (Scout finds new symbols), **explore** (Curiosity picks
+which experiments to try next), **tune** (Optimiser proposes parameter
+sweeps), and **watch** (RegimeWatcher screams when market conditions
+change). They all share the Phase 31 `agent_personas` /
+`agent_decisions` tables, and add three helper tables for their
+specific outputs.
+
+### What we built
+
+**Migration** — `shared/souls/migrations/2026_04_19_phase32_scout.sql`:
+
+* `public.scout_candidates` — proposed new symbols; deduped by
+  `UNIQUE (exchange, symbol, COALESCE(universe,''), COALESCE(company_id,''))`
+  with `status` (`proposed`/`accepted`/`rejected`).
+* `public.optimiser_candidates` — parameter trials per strategy, with
+  `score` and `status` (`pending`/`running`/`done`/`failed`).
+* `public.regime_transitions` — durable history of regime changes keyed
+  by `(exchange, symbol, timeframe, transitioned_at)`.
+
+All tables have indexes matching the dominant query patterns and a
+single `BEGIN/COMMIT` rollback block in the SQL footer.
+
+**Protocol extensions** — `shared/souls/protocol.py`:
+
+* New canonical names `SOUL_SCOUT`, `SOUL_CURIOSITY`, `SOUL_OPTIMISER`,
+  `SOUL_REGIME_WATCHER`.
+* New roles `ROLE_SCOUT`, `ROLE_EXPLORER`, `ROLE_OPTIMISER`,
+  `ROLE_REGIME_WATCHER`.
+* New verdicts `VERDICT_EXPLORE` (curiosity), `VERDICT_ALERT`
+  (regime-watcher). `SOUL_NAMES` and `VERDICTS` constants updated.
+
+**Personas** — `shared/souls/personas/`:
+
+* `scout.py::ScoutSoul` — normalises volume / volatility / mentions /
+  funding for each candidate symbol, drops anything already in
+  `existing_symbols`, sorts deterministically by `(-score, symbol)`,
+  and emits `propose` if anything beats `min_score` else `observe`.
+* `curiosity.py::CuriositySoul` — UCB1-ish score
+  `0.7·novelty + 0.2·Laplace(hit_rate) + 0.1·prior`. Emits `explore`
+  with the top picks above `novelty_floor`, else `observe`.
+* `optimiser.py::OptimiserSoul` — first walks the sorted grid of
+  `space` looking for the first untried combo. If every combo is
+  tried, falls back to a step-±1 neighbour of the best-scoring
+  history entry. Emits `propose` with `params` or `observe` when
+  the budget is exhausted.
+* `regime_watcher.py::RegimeWatcherSoul` — chronologically walks
+  observations, records each regime change, and emits `alert` on the
+  latest transition with severity `high` (crash), `medium` (bear),
+  else `low`.
+
+**Stores** — `shared/souls/store_phase32.py`:
+
+* `ScoutCandidate`, `ScoutStore.upsert/list` — idempotent upsert
+  (same row on conflict), list filter on `status`.
+* `OptimiserCandidate`, `OptimiserStore.insert/list` — insert + filter
+  on `strategy` / `status`.
+* `RegimeTransition`, `RegimeTransitionStore.insert/list` — insert +
+  filter on `exchange` / `symbol`, sorted by `transitioned_at DESC`.
+
+**In-memory pool** — `shared/souls/memory_pool.py` was extended to
+understand all three new tables with the same deduplication and sort
+semantics as PostgreSQL (keyed by the composite scout uniqueness
+tuple, `created_at DESC` for optimiser/scout, `transitioned_at DESC`
+for regime transitions). This is what lets every test run without a
+live database.
+
+**Service wiring** — `shared/souls/service.py`:
+
+* `SoulsConfig.enabled_personas` now lists all seven souls.
+* `seed_personas()` upserts seven personas (idempotent).
+* Four new methods `run_scout`, `run_curiosity`, `run_optimiser`,
+  `run_regime_watcher` — each one calls the corresponding soul's
+  deterministic `decide`, optionally persists to `agent_decisions`,
+  and returns the dataclass decision.
+
+**CLI** — `shared/cli/souls_cli.py`:
+
+* `apply-migration` / `migration-sql` gain `--phase {31,32}` so
+  operators can print either migration.
+* Four new subcommands `run-scout`, `run-curiosity`, `run-optimiser`,
+  `run-regime-watcher` mirroring the existing `run-apex/quant/ledger`
+  plumbing (`--in-memory`, `--fields @file.json`, `--no-persist`).
+
+**Registry** — `shared/services/registry.py`: the `souls` service
+description was updated to mention all seven personas, and its tag is
+now `phase = "31-32"`. It remains `enabled_on_vps=False` until Phase 34
+(Strategy Composer) wires verdicts into the execution flow.
+
+### Success criteria
+
+* ✓ Migration SQL idempotent (uses `IF NOT EXISTS`); rollback block
+  present at the bottom of the file.
+* ✓ All four souls are pure functions — same fields ⇒ same verdict,
+  bit-for-bit (tested via `_deterministic` checks for Scout and
+  verified by identical dict comparison across two `decide` calls).
+* ✓ Verdicts persist to `agent_decisions` through the existing
+  Phase 31 store — Phase 32 does **not** add a second verdict table.
+* ✓ Helper tables are *optional* sidecars — the souls run fine without
+  touching them (Phase 32 store calls only happen when the strategy
+  composer in a later phase decides to materialise the outputs).
+* ✓ Full regression passes locally: `pytest shared/tests → 459 passed`
+  (58 souls tests: 32 Phase 31 + 26 Phase 32).
+* ✓ `ruff` and `mypy --explicit-package-bases` pass on all new files.
+* ✓ No previously-green test breaks; `test_souls_service_is_registered`
+  was updated to accept either phase tag (`31` or `31-32`).
+
+### Rollback
+
+```sql
+BEGIN;
+DROP TABLE IF EXISTS public.regime_transitions;
+DROP TABLE IF EXISTS public.optimiser_candidates;
+DROP TABLE IF EXISTS public.scout_candidates;
+COMMIT;
+```
+
+Then `git revert` the Phase 32 commit. Phase 31 tables are untouched,
+so Apex/Quant/Ledger continue to function exactly as before. The
+Phase 32 souls are wired as optional — if you revert the commit the
+service registry will drop back to the three-persona description and
+the CLI loses its four new subcommands, but no data or downstream
+feature is lost.
+
+---
+
+*End of ROADMAP_V3.md. Phase 33 (Arb + Copy-Trader) is next.*

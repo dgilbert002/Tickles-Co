@@ -12,9 +12,15 @@ class InMemorySoulsPool:
         self.personas: List[Dict[str, Any]] = []
         self.prompts: List[Dict[str, Any]] = []
         self.decisions: List[Dict[str, Any]] = []
+        self.scout_candidates: List[Dict[str, Any]] = []
+        self.optimiser_candidates: List[Dict[str, Any]] = []
+        self.regime_transitions: List[Dict[str, Any]] = []
         self._p_seq = itertools.count(1)
         self._pr_seq = itertools.count(1)
         self._d_seq = itertools.count(1)
+        self._sc_seq = itertools.count(1)
+        self._op_seq = itertools.count(1)
+        self._rt_seq = itertools.count(1)
 
     @staticmethod
     def _loads(val: Any) -> Any:
@@ -93,6 +99,66 @@ class InMemorySoulsPool:
             })
             return {"id": pid}
 
+        if sql.startswith("INSERT INTO public.scout_candidates"):
+            (company_id, universe, exchange, symbol, score, reason,
+             status, correlation_id, metadata) = params
+            uv = universe or ""
+            cv = company_id or ""
+            for row in self.scout_candidates:
+                if (row["exchange"] == exchange
+                        and row["symbol"] == symbol
+                        and (row.get("universe") or "") == uv
+                        and (row.get("company_id") or "") == cv):
+                    row.update({
+                        "score": float(score), "reason": reason,
+                        "status": status,
+                        "correlation_id": correlation_id,
+                        "metadata": self._loads(metadata),
+                    })
+                    return {"id": row["id"]}
+            rid = next(self._sc_seq)
+            self.scout_candidates.append({
+                "id": rid, "company_id": company_id, "universe": universe,
+                "exchange": exchange, "symbol": symbol,
+                "score": float(score), "reason": reason, "status": status,
+                "correlation_id": correlation_id,
+                "metadata": self._loads(metadata),
+                "created_at": self._now(),
+            })
+            return {"id": rid}
+
+        if sql.startswith("INSERT INTO public.optimiser_candidates"):
+            (strategy, company_id, params_json, score, status,
+             correlation_id, metadata) = params
+            rid = next(self._op_seq)
+            now = self._now()
+            self.optimiser_candidates.append({
+                "id": rid, "strategy": strategy,
+                "company_id": company_id,
+                "params": self._loads(params_json),
+                "score": None if score is None else float(score),
+                "status": status,
+                "correlation_id": correlation_id,
+                "metadata": self._loads(metadata),
+                "created_at": now, "updated_at": now,
+            })
+            return {"id": rid}
+
+        if sql.startswith("INSERT INTO public.regime_transitions"):
+            (universe, exchange, symbol, timeframe, from_regime,
+             to_regime, transitioned_at, confidence, metadata) = params
+            rid = next(self._rt_seq)
+            self.regime_transitions.append({
+                "id": rid, "universe": universe, "exchange": exchange,
+                "symbol": symbol, "timeframe": timeframe,
+                "from_regime": from_regime, "to_regime": to_regime,
+                "transitioned_at": transitioned_at,
+                "confidence": float(confidence),
+                "metadata": self._loads(metadata),
+                "created_at": self._now(),
+            })
+            return {"id": rid}
+
         if sql.startswith("INSERT INTO public.agent_decisions"):
             (
                 persona_id, company_id, correlation_id, mode, verdict,
@@ -158,6 +224,41 @@ class InMemorySoulsPool:
             out.sort(key=lambda r: r["decided_at"], reverse=True)
             limit = int(params[p_idx])
             return [dict(r) for r in out[:limit]]
+
+        if sql.startswith("SELECT * FROM public.scout_candidates"):
+            rows = list(self.scout_candidates)
+            p_idx = 0
+            if "status = $" in sql:
+                val = params[p_idx]
+                p_idx += 1
+                rows = [r for r in rows if r.get("status") == val]
+            limit = int(params[p_idx])
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+            return [dict(r) for r in rows[:limit]]
+
+        if sql.startswith("SELECT * FROM public.optimiser_candidates"):
+            rows = list(self.optimiser_candidates)
+            p_idx = 0
+            for field_name in ("strategy", "status"):
+                if f"{field_name} = $" in sql:
+                    val = params[p_idx]
+                    p_idx += 1
+                    rows = [r for r in rows if r.get(field_name) == val]
+            limit = int(params[p_idx])
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+            return [dict(r) for r in rows[:limit]]
+
+        if sql.startswith("SELECT * FROM public.regime_transitions"):
+            rows = list(self.regime_transitions)
+            p_idx = 0
+            for field_name in ("exchange", "symbol"):
+                if f"{field_name} = $" in sql:
+                    val = params[p_idx]
+                    p_idx += 1
+                    rows = [r for r in rows if r.get(field_name) == val]
+            limit = int(params[p_idx])
+            rows.sort(key=lambda r: r["transitioned_at"], reverse=True)
+            return [dict(r) for r in rows[:limit]]
 
         if sql.startswith("SELECT * FROM public.agent_decisions"):
             rows = list(self.decisions)

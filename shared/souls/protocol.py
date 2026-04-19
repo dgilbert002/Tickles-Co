@@ -15,8 +15,15 @@ from typing import Any, Dict, List, Optional
 SOUL_APEX = "apex"
 SOUL_QUANT = "quant"
 SOUL_LEDGER = "ledger"
+SOUL_SCOUT = "scout"
+SOUL_CURIOSITY = "curiosity"
+SOUL_OPTIMISER = "optimiser"
+SOUL_REGIME_WATCHER = "regime_watcher"
 
-SOUL_NAMES = {SOUL_APEX, SOUL_QUANT, SOUL_LEDGER}
+SOUL_NAMES = {
+    SOUL_APEX, SOUL_QUANT, SOUL_LEDGER,
+    SOUL_SCOUT, SOUL_CURIOSITY, SOUL_OPTIMISER, SOUL_REGIME_WATCHER,
+}
 
 # Modes
 MODE_DETERMINISTIC = "deterministic"
@@ -27,6 +34,10 @@ MODE_HYBRID = "hybrid"
 ROLE_DECISION = "decision"
 ROLE_RESEARCH = "research"
 ROLE_BOOKKEEPER = "bookkeeper"
+ROLE_SCOUT = "scout"
+ROLE_EXPLORER = "explorer"
+ROLE_OPTIMISER = "optimiser"
+ROLE_REGIME_WATCHER = "regime_watcher"
 
 # Verdicts (per role)
 VERDICT_APPROVE = "approve"
@@ -35,10 +46,13 @@ VERDICT_PROPOSE = "propose"
 VERDICT_JOURNAL = "journal"
 VERDICT_OBSERVE = "observe"
 VERDICT_DEFER = "defer"
+VERDICT_EXPLORE = "explore"
+VERDICT_ALERT = "alert"
 
 VERDICTS = {
     VERDICT_APPROVE, VERDICT_REJECT, VERDICT_PROPOSE,
     VERDICT_JOURNAL, VERDICT_OBSERVE, VERDICT_DEFER,
+    VERDICT_EXPLORE, VERDICT_ALERT,
 }
 
 
@@ -115,6 +129,10 @@ __all__ = [
     "SOUL_APEX",
     "SOUL_QUANT",
     "SOUL_LEDGER",
+    "SOUL_SCOUT",
+    "SOUL_CURIOSITY",
+    "SOUL_OPTIMISER",
+    "SOUL_REGIME_WATCHER",
     "SOUL_NAMES",
     "MODE_DETERMINISTIC",
     "MODE_LLM",
@@ -122,11 +140,17 @@ __all__ = [
     "ROLE_DECISION",
     "ROLE_RESEARCH",
     "ROLE_BOOKKEEPER",
+    "ROLE_SCOUT",
+    "ROLE_EXPLORER",
+    "ROLE_OPTIMISER",
+    "ROLE_REGIME_WATCHER",
     "VERDICT_APPROVE",
     "VERDICT_REJECT",
     "VERDICT_PROPOSE",
     "VERDICT_JOURNAL",
     "VERDICT_OBSERVE",
     "VERDICT_DEFER",
+    "VERDICT_EXPLORE",
+    "VERDICT_ALERT",
     "VERDICTS",
 ]

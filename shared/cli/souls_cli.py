@@ -29,11 +29,13 @@ from typing import Any, Dict, List, Optional, Sequence
 from shared.souls import (
     InMemorySoulsPool,
     MIGRATION_PATH,
+    MIGRATION_PATH_PHASE32,
     SoulContext,
     SoulPrompt,
     SoulsService,
     SoulsStore,
     read_migration_sql,
+    read_migration_sql_phase32,
 )
 
 LOG = logging.getLogger("tickles.cli.souls")
@@ -100,20 +102,26 @@ def _parse_fields(value: Optional[str]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _handle_migration_sql(_args: argparse.Namespace) -> int:
-    print(read_migration_sql())
+def _handle_migration_sql(args: argparse.Namespace) -> int:
+    phase = getattr(args, "phase", 31)
+    if phase == 32:
+        print(read_migration_sql_phase32())
+    else:
+        print(read_migration_sql())
     return 0
 
 
 def _handle_apply_migration(args: argparse.Namespace) -> int:
+    phase = getattr(args, "phase", 31)
+    path = MIGRATION_PATH_PHASE32 if phase == 32 else MIGRATION_PATH
     if args.path_only:
-        print(str(MIGRATION_PATH))
+        print(str(path))
         return 0
     _dump({
-        "migration_path": str(MIGRATION_PATH),
+        "migration_path": str(path),
         "apply_with": (
             "psql -h 127.0.0.1 -U admin -d tickles_shared "
-            f"-f {MIGRATION_PATH}"
+            f"-f {path}"
         ),
         "ok": True,
     })
@@ -185,6 +193,14 @@ async def _run_soul(args: argparse.Namespace, which: str) -> int:
         decision = await svc.run_quant(ctx, persist=persist)
     elif which == "ledger":
         decision = await svc.run_ledger(ctx, persist=persist)
+    elif which == "scout":
+        decision = await svc.run_scout(ctx, persist=persist)
+    elif which == "curiosity":
+        decision = await svc.run_curiosity(ctx, persist=persist)
+    elif which == "optimiser":
+        decision = await svc.run_optimiser(ctx, persist=persist)
+    elif which == "regime-watcher":
+        decision = await svc.run_regime_watcher(ctx, persist=persist)
     else:  # pragma: no cover - argparse enforces this
         raise ValueError(which)
     _dump({"ok": True, "soul": which, "decision": decision.to_dict()})
@@ -254,7 +270,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("apply-migration", help="Print migration path + psql example.")
     sp.add_argument("--path-only", action="store_true")
-    sub.add_parser("migration-sql", help="Print the Phase 31 migration SQL.")
+    sp.add_argument("--phase", type=int, choices=[31, 32], default=31)
+    sp = sub.add_parser("migration-sql", help="Print the Phase 31/32 migration SQL.")
+    sp.add_argument("--phase", type=int, choices=[31, 32], default=31)
 
     sp = sub.add_parser("seed-personas",
                         help="Upsert canonical Apex/Quant/Ledger personas.")
@@ -281,6 +299,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("run-quant", help="Evaluate the Quant soul against a context.")
     _add_run_common(sp)
     sp = sub.add_parser("run-ledger", help="Evaluate the Ledger soul against a context.")
+    _add_run_common(sp)
+    sp = sub.add_parser("run-scout", help="Evaluate the Scout soul against a context.")
+    _add_run_common(sp)
+    sp = sub.add_parser("run-curiosity", help="Evaluate the Curiosity soul.")
+    _add_run_common(sp)
+    sp = sub.add_parser("run-optimiser", help="Evaluate the Optimiser soul.")
+    _add_run_common(sp)
+    sp = sub.add_parser("run-regime-watcher",
+                        help="Evaluate the Regime-Watcher soul.")
     _add_run_common(sp)
 
     sp = sub.add_parser("decisions", help="List recent decisions.")
@@ -326,6 +353,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return asyncio.run(_run_soul(args, "quant"))
     if args.cmd == "run-ledger":
         return asyncio.run(_run_soul(args, "ledger"))
+    if args.cmd == "run-scout":
+        return asyncio.run(_run_soul(args, "scout"))
+    if args.cmd == "run-curiosity":
+        return asyncio.run(_run_soul(args, "curiosity"))
+    if args.cmd == "run-optimiser":
+        return asyncio.run(_run_soul(args, "optimiser"))
+    if args.cmd == "run-regime-watcher":
+        return asyncio.run(_run_soul(args, "regime-watcher"))
     if args.cmd == "decisions":
         return asyncio.run(_handle_decisions_async(args))
     if args.cmd == "latest":
