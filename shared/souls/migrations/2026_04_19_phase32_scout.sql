@@ -19,9 +19,14 @@ CREATE TABLE IF NOT EXISTS public.scout_candidates (
     status          TEXT NOT NULL DEFAULT 'proposed',      -- proposed / accepted / rejected
     correlation_id  TEXT,
     metadata        JSONB NOT NULL DEFAULT '{}'::JSONB,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (exchange, symbol, COALESCE(universe, ''), COALESCE(company_id, ''))
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS scout_candidates_unique_idx
+    ON public.scout_candidates (
+        exchange, symbol,
+        COALESCE(universe, ''),
+        COALESCE(company_id, '')
+    );
 CREATE INDEX IF NOT EXISTS scout_candidates_status_idx
     ON public.scout_candidates (status, created_at DESC);
 
