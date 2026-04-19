@@ -1850,4 +1850,136 @@ in a later phase once we decide the cadence.
 
 ---
 
-*End of ROADMAP_V3.md. Phase 24 (Services Catalog) is next.*
+## Phase 24 — Services Catalog
+
+### Purpose
+
+Phase 22 gave us an in-process `SERVICE_REGISTRY` listing every
+long-running Tickles service. That's fine for `services_cli list`
+but useless for a dashboard, a sibling process, or a human with
+`psql` — they can't see what's registered, whether it's enabled on
+this VPS, when it last heartbeated, and what systemd thinks of it.
+
+Phase 24 mirrors the registry + runtime observations into
+`public.services_catalog` (Postgres `tickles_shared`) so any
+consumer — dashboard, alerting, downstream agent — can answer
+"what services exist and are they healthy?" with one SQL query.
+
+No behaviour of existing services changes. This is the "catalog"
+the Owner Dashboard (Phase 36) is going to render from.
+
+### Built
+
+**DB migration — `shared/services/migrations/2026_04_19_phase24_services_catalog.sql`**
+
+* `public.services_catalog` — one row per service. Columns: static
+  descriptor fields (name PK, kind, module, description,
+  systemd_unit, enabled_on_vps, has_factory, phase, tags jsonb),
+  plus observed state (last_seen_at, last_systemd_state,
+  last_systemd_substate, last_systemd_active_enter_ts,
+  last_heartbeat_ts, last_heartbeat_severity, metadata jsonb).
+  Indices on kind, enabled_on_vps, and last_heartbeat_ts DESC.
+* `public.services_catalog_snapshots` — append-only history of
+  state transitions so operators can see "active -> failed ->
+  active" without `journalctl`.
+* `public.services_catalog_current` — view that bakes in a
+  `health` column (`healthy` / `warning` / `degraded` / `stale` /
+  `no-heartbeat`) based on heartbeat age + severity, ready for
+  dashboards.
+
+Fully idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE OR
+REPLACE VIEW`). Rollback is `DROP VIEW + DROP TABLE`.
+
+**Module — `shared/services/catalog.py`**
+
+* `ServicesCatalog` — DB-backed mirror of `SERVICE_REGISTRY`
+  with four async methods:
+    * `sync_registry(pool)` — upsert every descriptor via
+      `INSERT ... ON CONFLICT (name) DO UPDATE`.
+    * `snapshot_systemd(pool, names=None)` — shell out to
+      `systemctl show` per service, parse `ActiveState` /
+      `SubState` / `ActiveEnterTimestamp` / `LoadState`, update
+      catalog row + append snapshot row.
+    * `attach_heartbeats(pool, [HeartbeatMark ...])` — stamp
+      `last_heartbeat_ts` / `last_heartbeat_severity` and append
+      snapshot rows.
+    * `list_services(pool, kind=None)` / `describe_service`.
+* `SystemdState` dataclass + `parse_systemctl_show()` pure
+  parser (unit-testable with fixture text, no subprocess).
+* `extract_heartbeats_from_audit(store, subjects, window_seconds)`
+  — reads latest `HEARTBEAT` per service from the Phase 21
+  auditor SQLite store.
+* `_InMemoryPool` — tiny async pool stub that implements the
+  `DatabasePool` contract against Python dicts. Used by tests,
+  also available for dry-run tooling.
+
+**Operator CLI — `shared/cli/services_catalog_cli.py`**
+
+Eight subcommands, all single-line JSON stdout:
+
+* `apply-migration` — print SQL path + ready-to-paste psql command.
+* `migration-sql` — emit raw SQL to stdout (pipe-friendly).
+* `sync` — upsert registry → DB.
+* `snapshot [--names a,b,c] [--no-history]` — capture systemd state.
+* `attach-heartbeats [--names] [--window-seconds N]` — stamp
+  latest auditor heartbeats.
+* `list [--kind KIND]` / `describe <name>` — read from DB.
+* `refresh` — sync + snapshot + attach-heartbeats in one shot.
+
+Accepts `--dsn` or `TICKLES_SHARED_DSN` for local dev; otherwise
+routes through the canonical `shared.utils.db.get_shared_pool()`.
+
+**Tests — `shared/tests/test_services_catalog.py`**
+
+20 tests covering: `systemctl show` parsing (happy / empty /
+missing timestamp); `SystemdState.as_update_row` shape; migration
+file presence + key DDL tokens; `_normalize_row` JSONB + datetime
+coercion; `sync_registry` upserts every descriptor and is
+idempotent; `snapshot_systemd` with a stubbed runner, unknown
+service skip, `also_append_history=False` path; `attach_heartbeats`
+round-trip + empty noop; `list_services` + kind filter;
+`describe_service` hit/miss; `extract_heartbeats_from_audit` picks
+the newest record per subject from a real SQLite
+`AuditStore`; CLI `apply-migration` + `migration-sql` + `--help`
+include every subcommand; `describe` against an unreachable DSN
+returns clean JSON error.
+
+### Success criteria (verification)
+
+1. `pytest shared/tests/test_services_catalog.py` — 20/20 green
+   locally and on VPS.
+2. Regression: `pytest shared/tests/test_indicators.py
+   shared/tests/test_engines.py shared/tests/test_features.py
+   shared/tests/test_auditor.py shared/tests/test_services.py
+   shared/tests/test_enrichment.py
+   shared/tests/test_services_catalog.py` — 117/117 green.
+3. `ruff` + `mypy --ignore-missing-imports
+   --explicit-package-bases` clean on the Phase 24 source files.
+4. Migration applies cleanly on VPS and
+   `\d services_catalog` shows the 17-column table.
+5. `python -m shared.cli.services_catalog_cli sync` reports
+   `synced >= 9` on VPS.
+6. `python -m shared.cli.services_catalog_cli snapshot` returns
+   an `active_state` for each Phase 13–22 service that is
+   `active` on box.
+7. `python -m shared.cli.services_catalog_cli list` reflects what
+   `systemctl is-active` reports for each service.
+8. Existing Phase 13–23 services untouched.
+
+### Rollback
+
+Pure additive. Code rollback = `git revert`. DB rollback:
+
+```sql
+BEGIN;
+DROP VIEW  IF EXISTS public.services_catalog_current;
+DROP TABLE IF EXISTS public.services_catalog_snapshots;
+DROP TABLE IF EXISTS public.services_catalog;
+COMMIT;
+```
+
+No systemd units were added or modified by Phase 24.
+
+---
+
+*End of ROADMAP_V3.md. Phase 25 (Banker + Treasury + Capabilities) is next.*

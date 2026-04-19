@@ -48,6 +48,15 @@ from shared.services.registry import (
     SERVICE_REGISTRY,
     register_builtin_services,
 )
+from shared.services.catalog import (
+    HeartbeatMark,
+    MIGRATION_PATH as CATALOG_MIGRATION_PATH,
+    ServicesCatalog,
+    SystemdState,
+    extract_heartbeats_from_audit,
+    parse_systemctl_show,
+    read_migration_sql,
+)
 
 __all__ = [
     "DaemonConfig",
@@ -59,6 +68,13 @@ __all__ = [
     "ServiceRegistry",
     "SERVICE_REGISTRY",
     "register_builtin_services",
+    "ServicesCatalog",
+    "SystemdState",
+    "HeartbeatMark",
+    "CATALOG_MIGRATION_PATH",
+    "parse_systemctl_show",
+    "extract_heartbeats_from_audit",
+    "read_migration_sql",
 ]
 
 register_builtin_services()

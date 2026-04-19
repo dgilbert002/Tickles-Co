@@ -29,4 +29,5 @@ __all__ = [
     "auditor_cli",
     "services_cli",
     "enrichment_cli",
+    "services_catalog_cli",
 ]
