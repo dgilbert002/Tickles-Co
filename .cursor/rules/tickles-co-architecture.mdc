@@ -1,0 +1,84 @@
+---
+description: Tickles-Co platform architecture — authoritative file paths, memory contract, glue gaps, and guardrails. Load on every session in c:\Tickles-Co.
+alwaysApply: true
+---
+
+# Tickles-Co architecture (canonical)
+
+**This is NOT JarvAIs.** JarvAIs lives in `c:\JarvAIs` and has its own
+22-agent, duo-based organization. Tickles-Co is a **platform / building**
+that hosts multiple tenant companies ("ideas"). Never confuse the two. If
+in doubt, ask the CEO.
+
+## Mental model
+
+- **Tickles n Co** (Paperclip company, id in Paperclip DB) = holding co; the
+  CEO's chat + Janitor + Strategy Council Moderator (SCM) + Cody / Schemy /
+  Audrey live here.
+- **Building** (Paperclip company) = platform operations — MCP, gateway,
+  memory services. Infra agents only.
+- **Companies = Ideas** — each tenant (SurgeonCo, PolyDesk, LPCopyDesk,
+  Capital CFD, MentorObserver, ...) gets its own Paperclip company row,
+  its own `tickles_{slug}` DB, its own Qdrant collection, and one or more
+  OpenClaw agents. Company = office; agent = person in the office.
+
+## Authoritative file map
+
+- MCP server / registry / transports: `shared/mcp/server.py`,
+  `shared/mcp/registry.py`, `shared/mcp/transport_*.py`. New tools go under
+  `shared/mcp/tools/` (one file per group, not per tool).
+- Souls (deterministic): `shared/souls/personas/{apex,quant,ledger,scout,
+  curiosity,optimiser,regime_watcher}.py`.
+- Banker / Treasury / Capabilities / Sizer: `shared/trading/*.py`. Banker
+  is append-only; Treasury is the policy gate. Every `execution.submit`
+  MUST go `treasury.evaluate()` → router.
+- MemU (cross-company tier 3): `shared/memu/client.py`. Postgres on
+  `127.0.0.1:5432` database `memu`, `pg_notify('memu_broadcast', ...)`.
+- Market data gateway (CCXT Pro, Redis pub/sub): `shared/gateway/`.
+- Catalog / candle daemon / backtest workers / queue: `shared/catalog/`,
+  `shared/backtest/`.
+- Execution router (paper / ccxt / nautilus): `shared/execution/router.py`.
+- Connectors: `shared/connectors/` (CCXT adapter, Capital REST adapter).
+- Regime + guardrails: `shared/regime/`, `shared/guardrails/`.
+- Auditor (Rule-1 parity, SQLite): `shared/auditor/`.
+- Per-company MySQL schema: `shared/migration/tickles_company.sql` (10
+  tables + universal `trades` + `trade_validations`).
+- Shared Postgres schema: `shared/migration/tickles_shared_pg.sql`.
+- Company provisioning scripts (CLI): `new-project.sh`, `delete-project.sh`
+  — MySQL side only, Paperclip integration lives in Tickles MCP Phase 2+.
+
+## Three-tier memory contract (non-negotiable)
+
+| Tier | Purpose | Storage | Scope keys |
+|------|---------|---------|-----------|
+| 1 | Agent-private lessons | Qdrant via mem0 | collection=`tickles_{company}`, user_id=`{company}`, agent_id=`{company}_{agent}` |
+| 2 | Company-shared facts & trades | MySQL / Postgres `tickles_{slug}` + Qdrant user_id=`{company}`, agent_id=`shared` | company |
+| 3 | Cross-company / Building-wide insights | Postgres `memu` + pgvector + `pg_notify` | global; only contents-hashed deduped rows |
+
+Every agent AGENTS.md begins with: "Before any decision, search mem0
+with `user_id={company}, agent_id={company}_{me}` for last 3 relevant
+entries. After any decision, append outcome + lesson."
+
+## Glue gaps (what's missing — track progress against these)
+
+1. No per-agent LLM cost ingestion in Paperclip.
+2. No Tickles MCP systemd unit; server exists but not long-lived.
+3. MCP tool set missing: provisioning, autopsy, postmortem, learnings,
+   trade.record_outcome, candles.fetch, treasury.evaluate, memu.*.
+4. No Paperclip "Create Company" wizard / API.
+5. Only 5 skills installed on OpenClaw (none trading).
+6. mem0 MCP not registered with OpenClaw (only Claude Code uses it).
+7. MemU Postgres DB not created; pgvector not installed.
+8. `holding_wallets` table + `grant_wallet` tool do not exist.
+
+## Guardrails for me (the AI)
+
+- Do NOT propose JarvAIs files as Tickles-Co canon. If an idea originated
+  in JarvAIs, wrap it as an MCP tool or port it; never link cross-repo.
+- Do NOT create many small files; group tools by function (per `shared/mcp/
+  tools/provisioning.py`, not one file per tool).
+- NEVER delete functionality without explicit approval. Comment-out with a
+  ROLLBACK note pointing at the roadmap file.
+- Every phase: update `shared/docs/ROADMAP_BUILDING_OPERATIONAL.md` with
+  what / why / how-to-roll-back.
+- Log pattern in every function: `[module.function] params=... -> result`.

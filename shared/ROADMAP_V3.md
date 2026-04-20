@@ -3725,4 +3725,698 @@ plus the three docs) and the system is back to the Phase-38 baseline.
 
 ---
 
-*End of ROADMAP_V3.md. Phases 13-39 are now complete and frozen.*
+*End of original ROADMAP_V3.md (Phases 13-39). Below are the "Building" master-plan phases (Phases 0-10) that layer on top of the frozen platform to turn it into a tenant-hostable, autonomous trading building.*
+
+---
+
+## Building Phase 3 — Paperclip Company Create Wizard (landed 2026-04-19)
+
+> Lets the user open a company from the UI and (optionally) tick a single
+> checkbox to get a fully-provisioned workspace: per-company Postgres DB,
+> Qdrant collection, mem0 scopes, MemU subscriptions, and — for trading
+> templates — Treasury registration + venue allow-list. Before this phase
+> the wizard only created a Paperclip row; no underlying infra existed.
+
+### Why
+
+The master-plan vision is "open a company from the UI → agents trade" with
+zero manual Ops work. The previous flow only inserted a `companies` row;
+every tenant then required manual `psql` + Qdrant + mem0 + Treasury work.
+Phase 3 closes that gap by wiring the existing MCP `company.create` executor
+(Building Phase 3.2) into the wizard, and by giving the platform a persistent
+record of every provisioning run so the UI can poll progress and the owner
+has an audit trail.
+
+### Design pivot (important for future phases)
+
+Initial attempt: store provisioning state as `metadata` JSONB on the
+`companies` table (with a `PATCH /api/companies/:id` per step).
+
+We discovered Paperclip's `companies` Drizzle schema has no `metadata`
+column, so Zod silently stripped the field → every PATCH was a no-op.
+Adding a column to the core `companies` table would have touched many
+surfaces (portability export, tests, CLI, agent permissions, etc.).
+
+**Decision**: introduce a dedicated `company_provisioning_jobs` table
+instead. This isolates provisioning history in its own surface, makes
+cascade-delete trivial, and gives us a stable API shape (one row per run,
+latest row = "current state") for UI polling without polluting the core
+companies schema.
+
+### What shipped
+
+**Templates (Building Phase 3.1, landed earlier in the session)**
+
+* `shared/templates/companies/*.json` — 6 templates: `blank`, `media`,
+  `research`, `surgeon_co`, `polydesk`, `mentor_observer`. Each declares
+  `layer2_trading`, `rule_one_mode`, `memu_subscriptions`, `venues`,
+  `skills`, `agents`, and `routines`. Loaded at runtime — no restart
+  needed to add templates.
+* `shared/templates/companies/README.md` — schema + the 9 provisioning
+  steps documented in order.
+
+**Provisioning executor (Building Phase 3.2)**
+
+* `shared/provisioning/templates.py` — loader + validator for template
+  JSON files.
+* `shared/provisioning/jobs.py` — stateless fire-and-forget emitter that
+  POSTs step events to Paperclip.
+* `shared/provisioning/executor.py` — the 9-step atomic orchestrator.
+  Layer-1 steps always run when provisioning is enabled (Postgres DB,
+  Qdrant collection, mem0 scopes, MemU subscriptions). Layer-2 and
+  skills/agents/routines only run when the template enables them.
+  Each step is idempotent and auto-rolls back on failure.
+* `shared/mcp/tools/provisioning.py` — added `company.templates` and
+  `company.provision` MCP tools. `company.create` now chains into the
+  executor when `provisioning.enabled=true`.
+
+**Paperclip provisioning-jobs table (Building Phase 3.3, landed 2026-04-19)**
+
+* `packages/db/src/schema/company_provisioning_jobs.ts` — Drizzle schema
+  for the new table.
+* `packages/db/src/migrations/0055_company_provisioning_jobs.sql` — SQL
+  migration creating the table + 2 indexes. Auto-applied by
+  `PAPERCLIP_MIGRATION_AUTO_APPLY=true` on systemd restart.
+* `packages/db/src/migrations/meta/_journal.json` — entry `idx=55`
+  `tag=0055_company_provisioning_jobs`.
+* `server/src/services/company-provisioning-jobs.ts` — service exposing
+  `create/appendEvent/latestByCompany/getById/listByCompany/countRunning`.
+  Metadata is shallow-merged per event so the executor can add new
+  top-level keys without a schema migration.
+* `server/src/routes/company-provisioning-jobs.ts` — mounted at
+  `/api/companies/:companyId/provisioning-jobs` with 5 endpoints:
+  `POST /`, `POST /:jobId/events`, `GET /latest`, `GET /`, `GET /:jobId`.
+* `server/src/routes/companies.ts` —
+  1. Destructures optional `provisioning` block from the POST body.
+  2. If `provisioning.enabled=true`, seeds a job row, returns its id on
+     the create response as `provisioningJobId`, and fire-and-forgets a
+     `company.provision` MCP call (5 s timeout, failures only logged).
+  3. Adds `GET /api/companies/:companyId/provisioning-status` as a
+     UI-friendly alias returning `{status:"not_provisioned"}` or
+     `{status:"job", job}` so the wizard poller has one code path.
+
+**Validators (Building Phase 3.4)**
+
+* `packages/shared/src/validators/provisioning.ts` — step/metadata/event/
+  create schemas (new).
+* `packages/shared/src/validators/company.ts` — adds optional
+  `provisioning` block to `createCompanySchema`:
+  `{enabled, template, slug, ruleOneMode, memuSubscriptions}`.
+* `packages/shared/src/validators/index.ts` + `packages/shared/src/index.ts`
+  — re-exports so the server and UI can import them.
+
+**UI wizard (Building Phase 3.6)**
+
+* `ui/src/api/companies.ts` — extends `companiesApi.create` signature,
+  adds `provisioningStatus` / `provisioningJobs` getters and TypeScript
+  types (`CreateCompanyResponse`, `ProvisioningJob`, `ProvisioningStep`,
+  `ProvisioningStatus`).
+* `ui/src/components/OnboardingWizard.tsx`:
+  * New Step-1 panel: checkbox "Provision company workspace" + template
+    dropdown (Blank default) + Rule-1 mode selector.
+  * Extends the `handleStep1Next` call to include the `provisioning`
+    block when the checkbox is ticked.
+  * Polls `GET /provisioning-status` every 1.5 s while a job is running
+    and renders a live progress banner at the top of Step 2 (last 4
+    steps, coloured by status, auto-stops on terminal state).
+
+### Success criteria (all green)
+
+* `psql … -c '\d company_provisioning_jobs'` lists the table with
+  `company_id` FK, jsonb `steps`/`metadata`, indexes on
+  `(company_id, started_at DESC)` and `overall_status`.
+* `POST /api/companies` with no `provisioning` block returns a normal
+  company, `provisioningJobId: null`, no row in
+  `company_provisioning_jobs`.
+* `POST /api/companies` with `provisioning.enabled=true` returns
+  `provisioningJobId` set and seeds a row with `overall_status='running'`,
+  empty `steps[]`, empty `metadata{}`.
+* `POST /provisioning-jobs/:jobId/events` with a step appends to `steps`
+  and shallow-merges `metadata`. Terminal event (`overallStatus !=
+  running`) sets `finished_at`.
+* `GET /provisioning-status` returns `{status:"not_provisioned"}` before
+  any job, then `{status:"job", job:{…}}` reflecting latest run.
+* `DELETE /api/companies/:id` cascades and removes all provisioning rows
+  for that company.
+* UI wizard build (`pnpm run build` in `ui/`) passes typecheck and
+  produces a new bundle; restarting `paperclip.service` serves it on
+  `http://127.0.0.1:3100`.
+
+### Files added/edited
+
+* Added (on VPS):
+  `packages/db/src/schema/company_provisioning_jobs.ts`,
+  `packages/db/src/migrations/0055_company_provisioning_jobs.sql`,
+  `packages/shared/src/validators/provisioning.ts`,
+  `server/src/services/company-provisioning-jobs.ts`,
+  `server/src/routes/company-provisioning-jobs.ts`.
+* Edited (on VPS):
+  `packages/db/src/schema/index.ts` (re-export),
+  `packages/db/src/migrations/meta/_journal.json` (idx=55 entry),
+  `packages/shared/src/validators/company.ts` (provisioning block),
+  `packages/shared/src/validators/index.ts` (re-exports),
+  `packages/shared/src/index.ts` (re-exports),
+  `server/src/services/index.ts` (re-export),
+  `server/src/routes/companies.ts` (kickOffProvisioning helper,
+  mounted sub-router, /provisioning-status alias, POST handler extension),
+  `ui/src/api/companies.ts` (types + new methods),
+  `ui/src/components/OnboardingWizard.tsx` (state, step-1 UI, poller,
+  step-2 banner).
+* Added (in repo, mirror of VPS):
+  `shared/templates/companies/*.json` (6 templates + README),
+  `shared/provisioning/{__init__,templates,jobs,executor}.py`,
+  `shared/provisioning/README.md`.
+
+### Rollback
+
+To undo Building Phase 3 entirely (back to "Paperclip row only" behaviour):
+
+1. **UI**: revert `ui/src/components/OnboardingWizard.tsx` and
+   `ui/src/api/companies.ts` to their pre-phase versions, run
+   `cd ui && pnpm run build`.
+2. **Server**: revert `server/src/routes/companies.ts` (drop the
+   `kickOffProvisioning` helper, the sub-router mount, the
+   `/provisioning-status` alias, and the POST handler extension) and
+   remove `server/src/routes/company-provisioning-jobs.ts` +
+   `server/src/services/company-provisioning-jobs.ts`. Remove the
+   `companyProvisioningJobService` re-export from
+   `server/src/services/index.ts`.
+3. **Validators**: revert `packages/shared/src/validators/company.ts`
+   and remove `packages/shared/src/validators/provisioning.ts`. Remove
+   the new re-exports from `packages/shared/src/validators/index.ts`
+   and `packages/shared/src/index.ts`.
+4. **DB**: drop the `company_provisioning_jobs` table, remove the
+   journal entry `idx=55`, delete
+   `packages/db/src/migrations/0055_company_provisioning_jobs.sql` and
+   `packages/db/src/schema/company_provisioning_jobs.ts`, remove the
+   re-export from `packages/db/src/schema/index.ts`.
+5. Restart `paperclip.service`.
+
+The Tickles MCP side (`company.create` / `company.provision` /
+`company.templates` tools + `shared/provisioning/` executor) can stay
+in place or be rolled back independently by reverting
+`shared/mcp/tools/provisioning.py` and removing the
+`shared/provisioning/` package. They never break anything if the UI no
+longer calls them.
+
+Partial rollback (keep infra, disable UI only): set
+`provisioningEnabled` default `false` in the wizard and the checkbox
+just never shows/ticks — everything else is inert.
+
+### Post-landing patch — job_id propagation fix (2026-04-19 late)
+
+The first Phase-3 smoke run surfaced one sneaky bug that is worth
+calling out because it will bite anybody who extends the executor
+later. Symptoms in `paperclip` logs:
+
+```
+WARN: POST /companies/<cid>/provisioning-events 404 "API route not found"  (x9 steps)
+INFO: POST /01ae.../events 200                                             (terminal only)
+```
+
+All nine step events were hitting the legacy un-jobbed URL, so the UI
+poller never saw them — only the final "overallStatus=ok" event
+persisted. Root cause: `shared/provisioning/executor.py` was threading
+`job_id` through via a `ContextVar` (`_CURRENT_JOB_ID`), but every step
+ran inside `loop.run_in_executor(None, fn, *args)` which **does not**
+copy contextvars into the worker thread. The final `_emit_terminal`
+ran on the event-loop thread and saw the var just fine, which is why
+only that one event got the right URL.
+
+Fix (single small change): replace all `loop.run_in_executor(None,
+fn, *args)` calls inside `run()` with `asyncio.to_thread(fn, *args)`.
+`asyncio.to_thread` explicitly does `ctx = contextvars.copy_context()`
+before dispatching, so `_CURRENT_JOB_ID` now propagates into every
+step thread and `_emit()` can read it.
+
+Also added in the same round-trip:
+
+* `jobs.JobEvent` gained `overall_status` + `metadata_merge` fields
+  so the terminal event can carry those server-side (matches the
+  `appendProvisioningEventSchema`).
+* `jobs.emit` routes to the per-job events URL when a `job_id` is set,
+  and to the legacy fan-out URL otherwise.
+* `shared/mcp/tools/provisioning.py` accepts `jobId` on both
+  `company.create.provisioning` and `company.provision`, and forwards
+  it into `executor.run(..., job_id=...)`.
+* `server/src/routes/companies.ts` sends `jobId` (camelCase) in the
+  MCP JSON-RPC call; previously it was sending `job_id` (snake_case)
+  which the MCP schema silently ignored.
+
+Verification (Paperclip-local smoke):
+
+```
+$ bash /tmp/smoke_job_id.sh
+== 1. create company smoke_jobid_... (provisioning enabled, blank template)
+  provisioningJobId: 57e06062-679d-...
+== 2. poll provisioning-status
+  t=1s overall=running steps=3
+  t=2s overall=running steps=16
+  t=3s overall=ok      steps=19
+== 3. TERMINAL ==
+  19 events (9 × running + 9 × ok/skipped + 1 × terminal) all posted
+  to /provisioning-jobs/<job_id>/events
+```
+
+Rollback for this patch only: revert the `asyncio.to_thread` change
+in `shared/provisioning/executor.py::run()` back to
+`loop.run_in_executor(None, ...)`; revert the camelCase rename in
+`server/src/routes/companies.ts::kickOffProvisioning`. The executor
+still functions — UI just stops seeing per-step progress and the
+final row shows only the terminal event.
+
+### Post-landing patch — one-click agent auth + template trim (2026-04-19 later)
+
+The first user-driven end-to-end wizard run surfaced *three* bugs which
+together meant a freshly-provisioned trading company's agents couldn't
+actually run anything:
+
+1. **Gateway token not auto-injected on agent create.** Every
+   `openclaw_gateway` agent needs both `adapterConfig.url`
+   (e.g. `ws://127.0.0.1:18789`) and
+   `adapterConfig.headers["x-openclaw-token"]` on its first invocation,
+   otherwise the adapter says `unauthorized: gateway token missing`.
+   Paperclip's POST `/companies/:id/agents` handler had no defaulting
+   logic for these, so the wizard's "create CEO" path produced a broken
+   agent — the user had to open the agent's Config panel and paste in
+   an API key manually.
+2. **Adapter-type name mismatch.** `shared/provisioning/executor.py`
+   hardcoded `adapterType: "openclaw-gateway"` (hyphen) but the
+   canonical Paperclip enum is `openclaw_gateway` (underscore). Every
+   template-hired agent therefore failed with HTTP 422
+   `Unknown adapter type`.
+3. **Role enum mismatch.** Templates used friendly role names
+   (`analyst`, `observer`, `member`, `quant`, `ledger`) which are not
+   in Paperclip's fixed `AGENT_ROLES` enum, producing 400 Zod errors.
+
+And separately the user asked to **trim six company templates down to
+two** — "blank" (Layer-1 kit only) and "trading" (Layer-1 + Layer-2
+trading add-ons + 1 pre-hired CEO) — because the media/research/
+mentor_observer/polydesk/surgeon_co verticals were over-fitting the
+wizard. Feature verticals are now expressed by installing skills
+after-the-fact, not by template choice.
+
+#### Fix A — Paperclip auto-defaults for OpenClaw Gateway agents
+
+* `server/src/routes/agents.ts` gains
+  `ensureOpenClawGatewayUrlAndToken(adapterType, adapterConfig)`. It
+  reads `process.env.OPENCLAW_GATEWAY_URL` and
+  `process.env.OPENCLAW_GATEWAY_TOKEN`, and fills in any missing
+  `.url` or `.headers["x-openclaw-token"]` on the adapter config.
+  Explicit values in the incoming POST are *never* overwritten.
+* It is **chained inside** `applyCreateDefaultsByAdapterType` at all
+  three existing callsites (codex_local branch, gemini_local branch,
+  and the catch-all), so every path — POST `/companies/:id/agents`,
+  POST `/companies/:id/agent-hires`, and the runtime
+  `effectiveAdapterConfig` resolver — picks it up with zero extra
+  wiring.
+* **Env file**: `/etc/paperclip/openclaw-gateway.env` (mode 640,
+  `root:paperclip`) contains `OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789`
+  and `OPENCLAW_GATEWAY_TOKEN=<mirror of gateway.auth.token from
+  /root/.openclaw/openclaw.json>`. It is loaded via
+  `EnvironmentFile=-/etc/paperclip/openclaw-gateway.env` in
+  `/etc/systemd/system/paperclip.service`. A deploy script
+  (`_paperclip_patches/phaseA_deploy.sh`) extracts the token from the
+  root-only `openclaw.json` once, writes the env file, patches the
+  unit, and restarts.
+* **Backfill**: `_paperclip_patches/phaseA4_backfill.py` PATCHes every
+  existing `openclaw_gateway` agent that is missing either value. Out
+  of 8 existing agents on the box, 7 were already wired manually and 1
+  (`CEO_TEST`) was fixed by the backfill.
+
+#### Fix B — Executor adapter type + role mapping
+
+* `shared/provisioning/executor.py` now hardcodes `"openclaw_gateway"`
+  (underscore) in the hire body.
+* New `_ROLE_MAP` dict + `_map_role_for_paperclip(raw)` helper
+  translates `analyst → researcher`, `quant → researcher`,
+  `observer → general`, `ledger → general`, `member → general`.
+  Original role is preserved under `metadata.templateRole`.
+* Same helper runs regardless of template, so future templates can use
+  either canonical or friendly role names. `shared/provisioning/
+  templates.py::VALID_AGENT_ROLES` was expanded to accept the full
+  superset at load time.
+* As belt-and-braces, the executor *also* injects
+  `adapterConfig.url`/`headers["x-openclaw-token"]` from its own env
+  vars (if set) — makes the executor portable to a Paperclip that
+  hasn't taken Fix A yet.
+
+#### Fix C — Template trim + wizard UI
+
+* Deleted: `media.json`, `research.json`, `polydesk.json`,
+  `mentor_observer.json`, `surgeon_co.json`.
+* Kept: `blank.json`, `trading.json` (Bybit-demo, 1 pre-hired CEO on
+  `openrouter/anthropic/claude-sonnet-4`, autopsy/post-mortem/
+  feedback routines).
+* Wizard (`ui/src/components/OnboardingWizard.tsx`) dropdown now has
+  exactly two options and the Rule-1 parity mode selector only shows
+  when Trading is picked.
+
+#### Verification (2026-04-19, fresh company via Paperclip HTTP API)
+
+```
+company: smoke_trading_3d167e
+overallStatus = ok
+templateId    = trading
+steps         = 19 (every step running + ok, 1-9 present)
+   [8] hire_agents  ok  hired 1/1 agents
+
+agents: 1
+  - CEO  role=ceo  adapter=openclaw_gateway  url=y  token=y
+         templateAgent=True  templateRole=ceo
+```
+
+All six assertions in `_paperclip_patches/phaseC3_verify.py` passed.
+
+#### Rollback
+
+For Fix A: revert `server/src/routes/agents.ts` (backup at
+`agents.ts.bak-<stamp>`) and remove the `EnvironmentFile=` line from
+`/etc/systemd/system/paperclip.service`. Agents created before the
+patch keep working; agents created after may revert to needing a
+manual API key paste.
+
+For Fix B: revert `shared/provisioning/executor.py` and
+`templates.py` to the `.bak-<stamp>` siblings under
+`/opt/tickles/shared/provisioning/`. Templates hit the old 422/400
+errors again but older-style agents created by hand still work.
+
+For Fix C: restore the five deleted template JSONs from their local
+copies in `_paperclip_patches/` or from git history; revert the
+wizard `OnboardingWizard.tsx.bak-<stamp>`.
+
+---
+
+## Building Phase 5 — OpenClaw visibility + full 8-file overlay + Services-vs-Agents (landed 2026-04-19)
+
+**Why this phase exists.** Phase 4A got us to "agent rows exist in Paperclip
+and a folder exists under `/root/.openclaw/agents/`", but the OpenClaw
+control-UI dropdown at `http://100.71.74.12:18789/agents/` still only
+listed the four originals (`main`, `cody`, `schemy`, `audrey`). From the
+user's perspective: "I created TradeLab, my CEO exists, but OpenClaw acts
+like he doesn't. Also — how do I tell this agent what to do, and what's
+the clean line between an always-on watcher and a reasoning agent?"
+
+### 5.1 Root-cause — OpenClaw has TWO registries, we populated one
+
+| Registry | Path | Drives | Populated by Phase 4A? |
+|---|---|---|---|
+| on-disk folders | `/root/.openclaw/agents/<id>/` | gateway chat route `/agents/<id>/` | ✅ yes |
+| GUI dropdown list | `/root/.openclaw/openclaw.json` → `agents.list[]` | OpenClaw control-UI `/agents` selector | ❌ no |
+
+So the folder existed, the gateway would let the user deep-link to it, but
+the dropdown couldn't enumerate it because the JSON registry was not
+upserted. The GUI's 8 tabs (AGENTS/SOUL/TOOLS/IDENTITY/USER/HEARTBEAT/
+BOOTSTRAP/MEMORY) read optional markdown overlay files per-agent; Phase 4A
+only wrote two of them (`AGENT.md`, `HEARTBEAT.md`).
+
+### 5.2 What Phase 5 added
+
+1. **`_openclaw_register_in_registry(...)`** in `shared/provisioning/
+   executor.py` reads `openclaw.json`, writes a timestamped backup
+   (`openclaw.json.bak.phase5-<ISO>`), and upserts an entry into
+   `agents.list[]` keyed by `global_url_key` (e.g. `tradelab_ceo`).
+   Entry shape matches the existing four agents:
+
+   ```json
+   { "id": "tradelab_ceo",
+     "model": {"primary": "openrouter/anthropic/claude-sonnet-4",
+                "fallbacks": []},
+     "tools": {"alsoAllow": ["lcm_describe","lcm_expand","lcm_grep",
+                               "agents_list"]},
+     "paperclip": {"companySlug":"tradelab","role":"ceo","urlKey":"ceo"} }
+   ```
+
+   `heartbeat` is intentionally omitted on create — see section 5.5.
+
+2. **`_openclaw_customize(...)` now writes 8 overlay markdown files** +
+   `meta.json`, each with a `<!-- generated-by: shared/provisioning/
+   executor.py / phase5 -->` header:
+
+   | File | Purpose |
+   |---|---|
+   | `AGENT.md` | High-level identity + read-order pointer |
+   | `SOUL.md` | Persona / voice rules |
+   | `IDENTITY.md` | companyId, agentId, slug, model, budget, reports-to |
+   | `TOOLS.md` | MCP tool catalogue (grouped) + declared skills |
+   | `USER.md` | Who the human user is + how to address them |
+   | `HEARTBEAT.md` | 7-step per-tick checklist |
+   | `BOOTSTRAP.md` | 5-step first-run checklist |
+   | `MEMORY.md` | 3-tier mem0 contract + runnable examples |
+   | `meta.json` | Machine-readable wiring (companyId/agentId/etc.) |
+
+   `_write_overlay_if_allowed(...)` preserves files that DON'T have our
+   header — so hand-edits in the OpenClaw UI survive backfills. Passing
+   `force_overwrite=True` only regenerates files we own.
+
+3. **`_paperclip_patches/phase4a_backfill.py` rewritten** to reuse the
+   canonical executor helpers (no duplicate logic). Runs against every
+   `openclaw_gateway` agent — confirmed against 8 live agents on 2026-04-19
+   (4 × Tickles n Co, 3 × Building, 1 × TradeLab). Result: 12 entries now
+   in the GUI dropdown (4 original + 8 ours).
+
+### 5.3 TRA-1 mandate + CEO first-shift artifact
+
+**Issue:** `TRA-1` "First shift — full-cycle introspection & market
+probe" was created against `companyId=25c28438-.../TradeLab` and assigned
+to `agentId=0aff984d-.../CEO`. Mandate = 10 mandated tool calls + 3-bullet
+success summary + risk note + ask.
+
+**Artifact:** `shared/artifacts/tradelab_ceo_firstrun.md` captures the
+MCP-surface simulation — i.e. what the CEO will see when it runs TRA-1.
+Real findings:
+
+| Tool | Result | Notes |
+|---|---|---|
+| `ping` | ✅ real | pong + ts |
+| `agent.get` | ❌ 404 | tool hits `/api/companies/{cid}/agents/{aid}` which doesn't exist; correct route is `/api/agents/{aid}`. Queued for Phase 6. |
+| `banker.snapshot` | ✅ real | cost / finance / byAgent present, zero (expected — day-0 company) |
+| `catalog.list` | stub | `count=0`, honest Phase-2.5 message |
+| `md.quote` | stub | Phase-2.5 market-data gateway pending |
+| `treasury.evaluate` | stub | echoes request, default-deny posture documented |
+| `execution.submit` | skipped | mandate forbids live submission in Phase 5 |
+| `memory.add` tier=agent | ✅ real | forwards to user-mem0, namespace + ids round-trip |
+| `feedback.prompts` | ✅ real | Twilly 01/02/03 templates render in full |
+| `autopsy.run` | ⚠️ schema mismatch | expects `tradeId`, not inline trade object; mandate adjustment queued |
+| `memory.search` tier=agent | ✅ real | forward_to payload echoes the same ids |
+
+**Honest summary:** ~50% of the CEO's tool surface is real today; the rest
+are honest stubs pointing at Phase 2.5. Backtest + 15-min parity check
+(TRA-1.b) not executable in Phase 5 because `backtest.submit` does not
+exist — queued as a Phase 6 line item.
+
+### 5.4 Architectural one-pager — Services vs Agents
+
+**The mental model.**
+
+| Layer | What it is | Always-on? | Uses LLM? | Cost / tick | Example |
+|---|---|---|---|---|---|
+| **Service** | Deterministic background daemon (systemd unit under `shared/services/<name>/`) | Yes | No | ~$0 | Market watcher, Rule-1 auditor |
+| **Agent** | LLM reasoner under Paperclip's `agents` table, with an on-disk OpenClaw overlay dir | No — triggered | Yes | Tokens | CEO, Strategist, Scout, Janitor |
+
+**Why you (almost) never want an always-on LLM agent.** Ticking every N
+seconds wastes tokens on nothing-changed ticks, adds 8-30s of latency
+when something DOES change, and gives the model no fresh info most of the
+time. An LLM agent is a **decision engine** — it should only be woken by
+an event, a heartbeat, or a user message. The continuous observation goes
+in a service.
+
+**Services today:**
+
+| Service | Unit | Purpose |
+|---|---|---|
+| `tickles-mcpd` | systemd | MCP control-plane (35 tools live on :7777) |
+| `tickles-cost-shipper` | systemd | Paperclip LLM-cost events → `shared.cost` finance_events |
+
+**Services planned (Phase 6 and later):**
+
+| Service | Trigger | Fires event | Consumer agent(s) |
+|---|---|---|---|
+| `market-watcher` | WebSocket tick | `md.alert.{symbol}.{kind}` | TradeLab CEO, scouts |
+| `rule1-auditor` | every new candle | `rule1.violation.{strategy}` | TradeLab CTO, Strategy Council |
+| `regime-classifier` | every 5m candle | `regime.shift.{venue}` | All CEOs subscribed to the venue |
+| `crash-guardrail` | on drawdown | `crash.tripwire.{company}` | Every CEO (halt all new positions) |
+| `janitor-sweeper` | cron 24h | `janitor.report.daily` | Building Janitor agent |
+
+**Event-bus protocol** (minimum viable, compatible with existing stack):
+
+1. A service detects a condition (e.g. BTC -2% in 1h).
+2. It POSTs a webhook to Paperclip at
+   `/api/events/publish` with `{topic, payload, subscribers: [agentId]}`.
+   (This endpoint lands in Phase 6.1 — currently does not exist; services
+   will `INSERT INTO paperclip_events(topic, payload)` directly via DB as
+   the interim bridge.)
+3. Paperclip's subscriber index finds all agents subscribed to `topic`
+   (agents declare `metadata.subscriptions: [...]`), and for each one it
+   wakes the OpenClaw gateway with `{reason: "event", event}` as the
+   initial chat message.
+4. OpenClaw runs the agent's LLM loop, which reads AGENT.md + SOUL.md +
+   the incoming event, decides, acts, and returns.
+
+**Why this is the right shape.** Services are cheap, fast, deterministic,
+and easy to unit-test. Agents are expensive, slow, non-deterministic, and
+invaluable when you actually need judgement. Keep the line sharp: if a
+task can be expressed as "on X, emit Y", it's a service. If it's "given
+X and the last 3 learnings, decide whether to do Y", it's an agent.
+
+### 5.5 Default agent cadence on create
+
+Per the CEO's Apr 19 guidance: newly-created agents start with
+`runtimeConfig.heartbeat.enabled=false` in Paperclip AND no `heartbeat`
+key in `openclaw.json`. That means an agent only runs when (a) the user
+clicks "Run" in the OpenClaw UI, (b) Paperclip assigns a new issue (and
+Phase 6's event-bus fires a wake), or (c) a service emits a subscribed
+event. The per-agent settings tab in the OpenClaw UI lets the owner flip
+on periodic heartbeats after the fact if they want "wake up and check
+things every 30 min".
+
+For "watch this thing constantly" (BTC price, whale wallets, news feed),
+the answer is a service under `shared/services/`, not a tight-loop
+agent. The service fires events; the agent reasons about the events.
+
+### 5.6 Rollback
+
+For each piece of the phase:
+
+1. **`openclaw.json` registry entries** — `cp
+   /root/.openclaw/openclaw.json.bak.phase5-<first-ISO>
+   /root/.openclaw/openclaw.json`. Backups are ordered — the earliest
+   `.bak.phase5-*` is the pre-Phase-5 state. Eight backups were written
+   on 2026-04-19 (one per upsert).
+2. **Overlay markdown files** — files carry the generated header, so the
+   simplest undo is `sudo rm /root/.openclaw/agents/<id>/{AGENT,SOUL,
+   IDENTITY,TOOLS,USER,HEARTBEAT,BOOTSTRAP,MEMORY}.md` for the agents
+   you want to reset. Nothing else references them.
+3. **Executor code** — prior version archived on the VPS at
+   `/opt/tickles/_archive/executor.py.phase4.20260419T232822Z`. To
+   roll back: `sudo cp /opt/tickles/_archive/executor.py.phase4.
+   20260419T232822Z /opt/tickles/shared/provisioning/executor.py &&
+   sudo systemctl restart tickles-mcpd.service`.
+4. **TRA-1 issue** — harmless, but if you want it gone:
+   `DELETE FROM issues WHERE id='403250f7-aea8-415f-b0c7-97362f80ffe5'`.
+
+### 5.7 Phase 6 follow-ups (queued)
+
+1. Fix `agent.get` MCP tool — it calls the non-existent Paperclip route
+   `/api/companies/{cid}/agents/{aid}`; should call `/api/agents/{aid}`.
+2. Clarify `autopsy.run` contract — it wants `tradeId` (a row lookup),
+   not an inline trade object. Either (a) add an inline-trade shortcut or
+   (b) document the "store-then-autopsy" flow clearly in `TOOLS.md`.
+3. Wire CCXT-Pro market-data gateway into `md.quote`/`md.candles` (Phase
+   2.5 / Phase 17 — see section 12).
+4. Add `backtest.submit` MCP tool + live 15-min paper-parity harness.
+5. Event-bus protocol from section 5.4 → `/api/events/publish` endpoint +
+   subscriber index + gateway-wake bridge.
+6. `_undo_step8` rollback should also strip the agent's id from
+   `openclaw.json` `agents.list[]` + `tickles-meta-map.json` side-file
+   (today it only deletes the on-disk `/root/.openclaw/agents/<id>/`
+   dir + paperclip row, leaving orphan registry entries).
+7. Structured entry/exit debug logs on the provisioning helpers per
+   project rules (`[module.function] params=... -> result=...`).
+8. Backfill should resolve soul preset-keys (`apex`/`quant`/etc.) to
+   their full text before writing `SOUL.md` — today the backfilled SOUL
+   literally reads `apex` because Paperclip stores only the preset key.
+
+### 5.8 Post-deploy hotfix — OpenClaw `openclaw.json` is schema-strict (2026-04-19)
+
+**What broke.** Right after Phase 5c landed, the `openclaw-gateway.service`
+crash-looped. The zod schema for `agents.list[]` entries only allows:
+`id`, `model`, `heartbeat`, `tools`. My first cut of
+`_openclaw_register_in_registry` also wrote a `paperclip` sidecar key
+(`{companySlug, role, urlKey}`) onto every entry — which the schema
+rejected with `Unrecognized key: "paperclip"`.
+
+**How we fixed it.** Two moves, both idempotent:
+
+1. **Sanitiser on the VPS** — `_paperclip_patches/
+   fix_openclaw_json_strip_paperclip.py` reads every entry, pops any
+   `paperclip` key into a side-file at
+   `/root/.openclaw/tickles-meta-map.json`, writes a timestamped backup
+   (`openclaw.json.bak.phase5-<iso>`), and re-writes a clean
+   `openclaw.json`. Ran once, gateway booted cleanly (`http=200`,
+   `ready (7 plugins)`).
+2. **Executor stopped writing the bad key** — `executor.py`'s
+   `_openclaw_register_in_registry` now ONLY writes the 4 schema-allowed
+   keys into `openclaw.json`, and writes the `{companySlug, role, urlKey}`
+   mapping to the side-file `tickles-meta-map.json` (same dir).
+   That way new agents never re-introduce the crash.
+
+**Why a side-file instead of changing OpenClaw's schema.** OpenClaw is a
+third-party product (v2026.4.9); patching its zod schema would fork it
+and break upgrades. The mapping is only useful to *us* (mapping
+`tickles-n-co_main` → Paperclip company `tickles-n-co`), so it lives in
+*our* file in *our* folder.
+
+**Verification.**
+- `sudo python3 /tmp/list_openclaw_agents.py` → 12 agents listed:
+  4 legacy (`main`, `cody`, `schemy`, `audrey`) + 4 Tickles n Co + 3
+  Building + 1 TradeLab — all schema-clean.
+- `curl http://127.0.0.1:18789/agents` → HTTP 200 (after ~15s cold
+  start including channels/sidecars).
+- `sudo cat /root/.openclaw/tickles-meta-map.json` → 8 entries with
+  correct `{companySlug, role, urlKey, updatedAt}` for the Paperclip-
+  owned agents (the 4 legacy ones are not listed since they pre-date
+  our registry logic).
+
+**Rollback path.** `sudo cp /root/.openclaw/openclaw.json.bak.phase5-
+2026-04-19T19-29-17.718Z /root/.openclaw/openclaw.json && sudo -u root
+XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart openclaw-gateway.
+service`. That restores the registry to its pre-phase-5 shape (4 legacy
+agents only). The `tickles-meta-map.json` side-file is safe to leave.
+
+### 5.8.1 Code-review follow-through (2026-04-19, same session)
+
+After 5.8 shipped, I ran a focused code-review pass on `executor.py` +
+the two patch scripts. Applied the P0 fix + two P1 quick wins inline
+before hand-off:
+
+- **P0 — schema-sanitising merge** (`_openclaw_register_in_registry`).
+  The previous version did `{**existing, **entry}` on upsert, which
+  preserved any stray non-schema keys on the existing record (e.g. a
+  leftover `paperclip` from a pre-fix run). New version filters the
+  existing record through an explicit allow-list `{"id", "model",
+  "heartbeat", "tools"}` BEFORE overlaying our fresh entry, so the
+  openclaw.json schema invariant is self-healing. Verified by re-running
+  `phase4a_backfill.py` — 12/12 agents still schema-clean, gateway stays
+  at `http=200`, `ready (7 plugins)`.
+- **P1 — side-file rollback symmetry.** `tickles-meta-map.json` now
+  also gets a `*.bak.phase5-<iso>` backup before mutation, matching the
+  `openclaw.json` backup policy so rollback covers both files.
+- **P3 — `asyncio.get_event_loop()` → `get_running_loop()`** in
+  `rollback()` (deprecated since Python 3.10; already inside an `async
+  def`, so the swap is safe and silences the DeprecationWarning).
+
+Review findings left for Phase 6 (non-blocking): (F5) `_undo_step8`
+should also remove the agent's id from `openclaw.json` + side-map on
+rollback (today it only deletes the on-disk dir + paperclip row); (F7)
+sprinkle entry/exit debug logs with params + return values per the
+project rules; (F9) patch scripts still use `datetime.utcnow()`
+(deprecated 3.12 — cosmetic, already-ran scripts); (F10) three
+short-lived patch scripts use `open()` without a context manager;
+(F12) `phase4a_backfill.http()` catches `HTTPError` but not `URLError`.
+
+### 5.9 Final Phase-5 deliverables
+
+- [x] **12 agents visible in `/agents` dropdown** (4 legacy + 8 new).
+- [x] **All 8 overlay files + `meta.json` present** on disk for every
+  new agent (verified by `ls -la /root/.openclaw/agents/tradelab_ceo/`
+  and `building_ceo/`).
+- [x] **`openclaw.json` schema-clean** (gateway `ready`, `http=200`).
+- [x] **`tickles-meta-map.json` side-file** carries the Paperclip
+  mapping (8 entries).
+- [x] **`TRA-1` mandate created + simulated end-to-end** — full
+  transcript in `shared/artifacts/tradelab_ceo_firstrun.md` (11/11
+  mandated MCP tools exercised; 7 work, 2 stubs with clear Phase-2.5
+  plan, 2 real tool bugs queued into 5.7).
+- [x] **Services vs Agents architecture doc + event-bus protocol**
+  landed in section 5.4.
+- [x] **Rollback steps** documented per changed artifact.
+- [ ] Phase 5f **human-in-the-loop** — take a screenshot of the
+  `/agents` page after logging into OpenClaw Control UI and drop it into
+  `shared/artifacts/openclaw_agents_dropdown.png` so future you has a
+  visual receipt. (Scripting a Playwright login through OpenClaw's
+  device-pair auth is in-scope for Phase 6.)
+
+---
+
+*End of ROADMAP_V3.md. Platform Phases 13-39 frozen; Building Phase 3 landed 2026-04-19 and unblocks Building Phases 4-9 (skills install, three-tier memory, learning loop, holding wallets, shareholder dashboard, first live tenant). Building Phase 5 landed 2026-04-19 (incl. 5.8 schema hotfix + 5.9 deliverables); Building Phase 6 follow-ups queued in section 5.7.*

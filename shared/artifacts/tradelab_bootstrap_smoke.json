@@ -1,0 +1,298 @@
+{
+  "started_at": "2026-04-19T19:03:29.990945+00:00",
+  "company": "TradeLab",
+  "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+  "ceoAgentId": "0aff984d-e3a4-4f69-8636-ac29546ed5a0",
+  "openclawAgentId": "tradelab_ceo",
+  "steps": [
+    {
+      "label": "1. ping (MCP heartbeat)",
+      "tool": "ping",
+      "args": {},
+      "result": {
+        "tool": "ping",
+        "ok": true,
+        "result": {
+          "pong": true,
+          "ts": "2026-04-19T19:03:30.005703+00:00"
+        }
+      }
+    },
+    {
+      "label": "2. catalog.list (bybit, 5)",
+      "tool": "catalog.list",
+      "args": {
+        "venue": "bybit",
+        "limit": 5
+      },
+      "result": {
+        "tool": "catalog.list",
+        "ok": true,
+        "result": {
+          "count": 0,
+          "instruments": [],
+          "note": "Paperclip /api/catalog/instruments not exposed yet \u2014 will be wired in Phase 2.5 (asset catalog HTTP adapter)."
+        }
+      }
+    },
+    {
+      "label": "3. md.quote stub",
+      "tool": "md.quote",
+      "args": {
+        "venue": "bybit",
+        "symbol": "BTC/USDT:USDT"
+      },
+      "result": {
+        "tool": "md.quote",
+        "ok": true,
+        "result": {
+          "status": "not_implemented",
+          "feature": "md.quote",
+          "message": "md.quote will be wired in Phase 2.5 when the market-data gateway is hoisted out of Paperclip heartbeats into a standalone service. Until then, agents should use Paperclip's heartbeat tools directly."
+        }
+      }
+    },
+    {
+      "label": "4. md.candles stub",
+      "tool": "md.candles",
+      "args": {
+        "venue": "bybit",
+        "symbol": "BTC/USDT:USDT",
+        "timeframe": "1h",
+        "limit": 5
+      },
+      "result": {
+        "tool": "md.candles",
+        "ok": true,
+        "result": {
+          "status": "not_implemented",
+          "feature": "md.candles",
+          "message": "md.candles will be wired in Phase 2.5 when the market-data gateway is hoisted out of Paperclip heartbeats into a standalone service. Until then, agents should use Paperclip's heartbeat tools directly."
+        }
+      }
+    },
+    {
+      "label": "5. memory.add scope=agent (Tier-1)",
+      "tool": "memory.add",
+      "args": {
+        "scope": "agent",
+        "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+        "agentId": "0aff984d-e3a4-4f69-8636-ac29546ed5a0",
+        "content": "TradeLab CEO smoke-v2: Layer 1 infra verified; Banker DB-backed.",
+        "metadata": {
+          "test": "smoke-v2",
+          "tier": 1
+        }
+      },
+      "result": {
+        "tool": "memory.add",
+        "ok": true,
+        "result": {
+          "forward_to": "user-mem0::add-memory",
+          "arguments": {
+            "content": "TradeLab CEO smoke-v2: Layer 1 infra verified; Banker DB-backed.",
+            "metadata": {
+              "test": "smoke-v2",
+              "tier": 1
+            },
+            "namespace": "tickles_25c28438-1208-4593-82fc-d86b460a4a1e",
+            "user_id": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "agent_id": "25c28438-1208-4593-82fc-d86b460a4a1e_0aff984d-e3a4-4f69-8636-ac29546ed5a0"
+          }
+        }
+      }
+    },
+    {
+      "label": "6. memory.search scope=agent",
+      "tool": "memory.search",
+      "args": {
+        "scope": "agent",
+        "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+        "agentId": "0aff984d-e3a4-4f69-8636-ac29546ed5a0",
+        "query": "Layer 1 infra",
+        "limit": 3
+      },
+      "result": {
+        "tool": "memory.search",
+        "ok": true,
+        "result": {
+          "forward_to": "user-mem0::search-memory",
+          "arguments": {
+            "query": "Layer 1 infra",
+            "limit": 3,
+            "namespace": "tickles_25c28438-1208-4593-82fc-d86b460a4a1e",
+            "user_id": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "agent_id": "25c28438-1208-4593-82fc-d86b460a4a1e_0aff984d-e3a4-4f69-8636-ac29546ed5a0"
+          }
+        }
+      }
+    },
+    {
+      "label": "7. memory.add scope=company (Tier-2)",
+      "tool": "memory.add",
+      "args": {
+        "scope": "company",
+        "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+        "content": "TradeLab is live. Rule-1 advisory. Template=trading.",
+        "metadata": {
+          "test": "smoke-v2",
+          "tier": 2
+        }
+      },
+      "result": {
+        "tool": "memory.add",
+        "ok": true,
+        "result": {
+          "forward_to": "user-mem0::add-memory",
+          "arguments": {
+            "content": "TradeLab is live. Rule-1 advisory. Template=trading.",
+            "metadata": {
+              "test": "smoke-v2",
+              "tier": 2
+            },
+            "namespace": "tickles_25c28438-1208-4593-82fc-d86b460a4a1e",
+            "user_id": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "agent_id": "shared"
+          }
+        }
+      }
+    },
+    {
+      "label": "8. memory.search scope=building (Tier-3 building shared)",
+      "tool": "memory.search",
+      "args": {
+        "scope": "building",
+        "query": "welcome",
+        "limit": 3
+      },
+      "result": {
+        "tool": "memory.search",
+        "ok": true,
+        "result": {
+          "forward_to": "user-mem0::search-memory",
+          "arguments": {
+            "query": "welcome",
+            "limit": 3,
+            "namespace": "tickles_building",
+            "user_id": "building",
+            "agent_id": "shared"
+          }
+        }
+      }
+    },
+    {
+      "label": "9. banker.snapshot",
+      "tool": "banker.snapshot",
+      "args": {
+        "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e"
+      },
+      "result": {
+        "tool": "banker.snapshot",
+        "ok": true,
+        "result": {
+          "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+          "window": {
+            "from": null,
+            "to": null
+          },
+          "cost": {
+            "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "spendCents": 0,
+            "budgetCents": 0,
+            "utilizationPercent": 0
+          },
+          "finance": {
+            "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "debitCents": 0,
+            "creditCents": 0,
+            "netCents": 0,
+            "estimatedDebitCents": 0,
+            "eventCount": 0
+          },
+          "byAgent": []
+        }
+      }
+    },
+    {
+      "label": "10. treasury.evaluate",
+      "tool": "treasury.evaluate",
+      "args": {
+        "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+        "venue": "bybit",
+        "symbol": "BTC/USDT:USDT",
+        "side": "buy",
+        "quantity": 0.001,
+        "order_type": "market",
+        "mode": "demo"
+      },
+      "result": {
+        "tool": "treasury.evaluate",
+        "ok": true,
+        "result": {
+          "status": "not_implemented",
+          "feature": "treasury.evaluate",
+          "message": "treasury.evaluate will be wired in Phase 2.5 when shared/trading/* is mounted into the MCP daemon process. Until then, the banker and treasury run inside the Python CLIs (shared/cli/*).",
+          "echo": {
+            "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "venue": "bybit",
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "quantity": 0.001,
+            "order_type": "market",
+            "mode": "demo"
+          },
+          "note": "Default-deny is assumed until Phase 2.5 wires shared.trading.treasury into the MCP daemon."
+        }
+      }
+    },
+    {
+      "label": "11. learnings.read_last_3",
+      "tool": "learnings.read_last_3",
+      "args": {
+        "companyId": "25c28438-1208-4593-82fc-d86b460a4a1e",
+        "agentId": "0aff984d-e3a4-4f69-8636-ac29546ed5a0"
+      },
+      "result": {
+        "tool": "learnings.read_last_3",
+        "ok": true,
+        "result": {
+          "forward_to": "user-mem0::search-memory",
+          "arguments": {
+            "query": "recent learnings",
+            "limit": 3,
+            "namespace": "tickles_25c28438-1208-4593-82fc-d86b460a4a1e",
+            "user_id": "25c28438-1208-4593-82fc-d86b460a4a1e",
+            "agent_id": "25c28438-1208-4593-82fc-d86b460a4a1e_0aff984d-e3a4-4f69-8636-ac29546ed5a0",
+            "memory_types": [
+              "learning",
+              "postmortem",
+              "autopsy"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "label": "12. feedback.prompts (Twilly templates)",
+      "tool": "feedback.prompts",
+      "args": {},
+      "result": {
+        "tool": "feedback.prompts",
+        "ok": true,
+        "result": {
+          "twilly-01-autopsy": "# Twilly Template 01 \u2014 Trade Autopsy\n\nYou have just closed trade {trade_id} ({symbol} {side}). Before moving on,\nproduce a short autopsy in this exact schema:\n\n1. What I expected to happen (pre-trade thesis, in one sentence).\n2. What actually happened (price path + PnL).\n3. Which signals confirmed or contradicted the thesis in real-time.\n4. What I would do differently with hindsight (1-3 bullets).\n5. One learning to commit to mem0 (<=80 words, actionable, not emotional).\n\nKeep each section to 2 sentences or fewer. Write in first person.\n",
+          "twilly-02-postmortem": "# Twilly Template 02 \u2014 Session Postmortem\n\nSession {session_id} wrapped with {n_trades} trades. Write a postmortem:\n\n1. Scorecard: wins vs losses, realised PnL, biggest winner, biggest loser.\n2. Two regimes the market traversed during the session.\n3. Which playbook fired best? Which misfired?\n4. One systemic issue (data, latency, emotional, sizing).\n5. One commitment for next session (<=60 words).\n\nThis is read by the Strategy Council Moderator at the next board meeting.\n",
+          "twilly-03-feedback": "# Twilly Template 03 \u2014 Cycle Feedback Loop\n\nOver the last {period} you ran {n_sessions} sessions and closed {n_trades}\ntrades. Before your next decision, MUST:\n\n1. Read `learnings.read_last_3` output \u2014 call out any pattern.\n2. Identify 1 playbook drifting from intent (if any).\n3. Suggest 1 guardrail adjustment (or explicit \"keep current\").\n4. Rank curiosities for next cycle (top 3, one line each).\n\nIf no drift is detected, write \"STABLE \u2014 keep current\" and stop.\n"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "ok_total": 12,
+    "failed_total": 0,
+    "ok_real_data": 9,
+    "ok_stubbed": 3,
+    "total_steps": 12
+  },
+  "finished_at": "2026-04-19T19:03:30.100999+00:00"
+}

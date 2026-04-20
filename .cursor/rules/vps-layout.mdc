@@ -1,0 +1,67 @@
+---
+description: Tickles-Co VPS layout — ports, systemd units, databases, Qdrant collections, env file locations. Load always.
+alwaysApply: true
+---
+
+# VPS layout (100.71.74.12)
+
+## Ports
+
+| Port | Bind | What |
+|------|------|------|
+| 3100 | 0.0.0.0 | Paperclip web UI + API |
+| 3306 | 0.0.0.0 | MySQL — `tickles_shared`, `tickles_jarvais`, future `tickles_{slug}` |
+| 5432 | 127.0.0.1 | System Postgres 16 — `tickles_shared`, future `memu`, future `tickles_{slug}` |
+| 6333 / 6334 | 127.0.0.1 | Qdrant (REST / gRPC) — collections `tickles_shared`, `mem0migrations`, future `tickles_{slug}` |
+| 6379 | 127.0.0.1 | Redis (md-gateway pub/sub, backtest queue) |
+| 18789 | 0.0.0.0 | OpenClaw gateway (LAN/Tailscale only; auth token in `gateway.auth.token`) |
+| 54329 | 127.0.0.1 | Paperclip embedded Postgres (no ad-hoc access; use Paperclip HTTP API) |
+| 7777 | 100.71.74.12 (Tailscale) | **Planned** Tickles MCP SSE+HTTP |
+
+## systemd services (all `systemctl` — root or sudo)
+
+- `paperclip.service` — Paperclip server + embedded PG child.
+- `tickles-md-gateway.service` — CCXT Pro market-data fan-out → Redis.
+- `tickles-candle-daemon.service` — REST backfill of OHLCV → Postgres.
+- `tickles-catalog.service` — asset / venue registry service.
+- `tickles-bt-workers.service` — backtest queue workers.
+- **Planned**: `tickles-mcp.service` (Phase 2),
+  `tickles-cost-shipper.service` (Phase 1).
+
+## Home / path conventions
+
+- OpenClaw state: `/root/.openclaw/`
+  - `openclaw.json` — config (chmod 600; contains plaintext secrets pending
+    rotation — see `shared/docs/SECURITY_ROTATE_CHECKLIST.md`).
+  - `agents/{agent-id}/agent/AGENTS.md` — per-agent soul prompt.
+  - `logs/` — per-turn telemetry (source for Phase 1 cost shipper).
+  - `workspace/` — agent working dir.
+- Paperclip: `/home/paperclip/.paperclip/instances/default/`
+  - `.env` — contains `PAPERCLIP_AGENT_JWT_SECRET` only (no DB password;
+    embedded PG generates its own, encrypted).
+  - `data/postgres/` — embedded PG datadir.
+- Tickles code repo: `/opt/tickles/` (mirrors `c:\Tickles-Co\`).
+- Tickles secrets env (recommended future): `/root/.tickles/secrets.env`
+  chmod 600.
+
+## Qdrant collections (plan for)
+
+- `tickles_shared` — current shared memory (will migrate / alias in P5).
+- `mem0migrations` — existing mem0 test artifacts.
+- `tickles_{slug}` — per-company (created by `company.create` MCP tool).
+
+## Env vars canonical names
+
+- `PAPERCLIP_AGENT_JWT_SECRET` — shared between Paperclip and Tickles MCP.
+- `OPENROUTER_API_KEY` — gateway LLM key; reconciled daily in Phase 1.
+- `BYBIT_DEMO_API_KEY` / `_API_SECRET` — SurgeonCo first tenant.
+- `CAPITAL_API_KEY` / `_API_PASSWORD` / `_IDENTIFIER` — Capital CFDs.
+- `TELEGRAM_BOT_TOKEN` — (post-rotation) source for openclaw telegram.
+- `HELIUS_RPC_URL` — Meteora DLMM skill (Phase 4).
+
+## SSH / access
+
+- SSH alias `vps` (from local PC) maps to the box; all audits/scripts use
+  `ssh vps '<bash>'`. Never commit keys.
+- Sudo password is already configured via NOPASSWD for root tasks on VPS
+  (inherited setup). Don't assume for fresh boxes.

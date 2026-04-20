@@ -1,0 +1,29 @@
+[Unit]
+Description=Tickles MCP daemon (control-plane for agents) on :7777
+After=network.target paperclip.service
+Wants=paperclip.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/etc/tickles/mcp.env
+Environment=TICKLES_MCP_HOST=127.0.0.1
+Environment=TICKLES_MCP_PORT=7777
+Environment=PAPERCLIP_URL=http://127.0.0.1:3100
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/usr/bin/python3 -m shared.mcp.bin.tickles_mcpd
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/tickles /var/log/tickles
+
+[Install]
+WantedBy=multi-user.target

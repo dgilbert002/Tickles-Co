@@ -78,6 +78,33 @@ Thumbs.db
 .paperclip-cache/
 *.tsbuildinfo
 
+# --- Audit / scratch outputs (Phase 0 — contain host state, possible tokens) ---
+shared/docs/_audit_*.txt
+shared/docs/_audit_*.md
+_audit_*.txt
+_audit_*.md
+
+# --- Reference chat logs containing exposed third-party API keys (Phase 0) ---
+# The OpenRouter premium-model chats embedded live Aster/Bybit/etc keys and
+# configs; keep locally for reference but never commit.
+shared/docs/OpenRouter_Chats.md
+shared/docs/OpenClaw Trading Systems.txt
+shared/docs/Top wallets capture 86% of the move.txt
+shared/docs/PHASE_39_DRILL*.json
+
+# --- OTP / auth debug logs (contain Telegram 2FA codes, expire in 5 min) ---
+_otp_log.jsonl
+_otp_log_*.jsonl
+
+# --- Secret-prone ad-hoc scripts (safety net; real keys live in /root/.bashrc) ---
+# Any script named *.secret.sh, or test_* scripts under _rubicon_deploy that
+# might inline credentials during debugging, must not reach the remote.
+# We intentionally whitelist the redacted test_openrouter.sh (which now reads
+# the key from $OPENROUTER_API_KEY).
+*.secret.sh
+_rubicon_deploy/test_*.local.sh
+_tmp_*secret*.sh
+
 # --- Explicit includes (override broader patterns above) ---
 !shared/migration/*.sql
 !shared/migration/*.py

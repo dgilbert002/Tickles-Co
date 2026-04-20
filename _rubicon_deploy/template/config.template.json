@@ -1,0 +1,19 @@
+{
+  "agent_name": "{{AGENT_NAME}}",
+  "company_name": "{{COMPANY_NAME}}",
+  "workspace": "/root/.openclaw/workspace/{{COMPANY_SLUG}}_{{AGENT_NAME}}",
+  "mode": "PAPER_TRADING",
+  "starting_balance": 10000.0,
+  "leverage": 25,
+  "taker_fee": 0.0005,
+  "slippage": 0.0002,
+  "max_positions": 3,
+  "model_primary": "anthropic/claude-sonnet-4.5",
+  "model_fallback": "openai/gpt-4.1",
+  "model_budget_usd_day": 5.0,
+  "interval_sec": 300,
+  "log_tail_bytes": 4000,
+  "max_output_tokens": 2000,
+  "temperature": 0.2,
+  "openrouter_timeout_sec": 90
+}
