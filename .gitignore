@@ -109,3 +109,7 @@ _tmp_*secret*.sh
 !shared/migration/*.sql
 !shared/migration/*.py
 !shared/utils/*.py
+
+# OpenMemory - IDE/Assistant specific rules
+.cursor\rules\openmemory.mdc
+CLAUDE.md
