@@ -1,6 +1,6 @@
 # MCP & Memory Implementation Plan — Tickles & Co
 
-**Status:** DRAFT — proposal only. Nothing in `shared/` will be changed until the CEO (you) explicitly approves the phases below.
+**Status:** APPROVED — 6 open questions resolved 2026-04-20 (see Section 7). Execution begins on CEO command ("start M0").
 **Branch:** `mcp`
 **Owners:** CEO (approval) + AI (implementation)
 **Last updated:** 2026-04-20
@@ -141,9 +141,9 @@ Counting groups honestly, assuming we register every existing code capability as
 
 **Rough total if fully unpacked: 14+25+30+20+15+10+10+8+10+15+4+8+5 ≈ 174 tools.**
 
-That comfortably clears your "100+" bar without inventing anything. Hitting 300-400 starts to mean splitting each family into micro-tools (e.g. `indicator.rsi`, `indicator.macd`, ... as first-class tools); reasonable if we want a flat shopping list, but my recommendation is to **keep domain groups and let agents drill via parameters** — 170-ish fat tools > 400 tiny tools for LLM context budget reasons.
+That comfortably clears your "100+" bar without inventing anything.
 
-> **Decision needed from you before Phase M5:** do we want ~170 fat tools (each one takes a `kind` parameter) or ~400 thin tools (one per indicator, one per engine, one per strategy)? I'll recommend fat + a `tools.catalogue` meta-tool that returns the full menu so agents can be curious without blowing their context window.
+> **DECISION LOCKED (2026-04-20):** Fat tools (~174), **conditional on full indicator discoverability.** That means Phase M5 MUST ship: `indicator.list`, `indicator.get(name)`, `indicator.params_schema(name)`, `indicator.compute_preview(kind, params, ...)`. If during M5 testing an agent can't find an indicator by browsing these tools in ≤ 2 calls, we fall back to the **hybrid** form: keep everything else fat, but split the indicator family into thin (one tool per indicator, ~40 extra tools). Strategies and engines stay fat regardless.
 
 ---
 
@@ -158,7 +158,7 @@ Every phase ends with:
 
 ### Phase M0 — VPS reality baseline (no changes; 1 day)
 
-**What:** SSH into the VPS, run a read-only audit script that answers 8 yes/no questions:
+**What:** SSH into the VPS, run a read-only audit script that answers 9 yes/no questions:
 
 1. Is `mcp-server` systemd unit installed + enabled + running?
 2. Does Postgres `memu` database exist? Does the `vector` extension exist? Is the `insights` table present?
@@ -168,10 +168,11 @@ Every phase ends with:
 6. What venues are actually connected via CCXT Pro? (Poll `shared/gateway/*` live.)
 7. Which of the 17 "shipped but inactive" services would start cleanly if we `systemctl enable --now`'d them? (Dry-run with `systemd-analyze verify` + config probe.)
 8. What's the current total count of tools registered in the running MCP server? (`echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | nc -U /run/tickles/mcp.sock` or via HTTP transport.)
+9. **Venue credentials audit** (added 2026-04-20): for each of {Binance, Bybit, Gates.io, Blofin, BitGet} and any other venue env vars in `/opt/tickles/.env`, report presence (yes/no) and key length (first 4 chars + `<N chars>`). **No secret values are ever printed or logged.** This tells us in advance which venues Phase M7 + M8 can actually reach. The contest scope in M7 follows this list — whatever we have keys for.
 
 **Why:** everything downstream depends on knowing the true state — writing code based on assumptions is how we lost time earlier.
 
-**Deliverable:** `shared/docs/PHASE_M0_BASELINE.md` — one table, 8 rows, each answered "yes/no + evidence line".
+**Deliverable:** `shared/docs/PHASE_M0_BASELINE.md` — one table, 9 rows, each answered "yes/no + evidence line".
 
 **Rollback:** none — no files changed.
 
@@ -326,9 +327,11 @@ agent> tools.request_new('onchain.whale_entries', ...)     # issue created in TI
 
 ### Phase M7 — Paper trading contest — 3 days
 
+**Venue scope (decided 2026-04-20):** contest uses **whatever venues we have valid API keys for**, as surfaced by the Phase M0 credential audit (question 9). No credentials = not in contest. This avoids the "design for 5 venues, only 1 works" trap.
+
 **What:** The single highest-leverage fun feature. Ship:
 
-- `contest.create(name, venues[], coins[], duration_days, starting_paper_usd_per_agent, agent_ids[])` → creates a row in new `contests` table, provisions a `paper_wallets` row per agent, sets `contest_id` on all their `orders` + `fills`.
+- `contest.create(name, venues[], coins[], duration_days, starting_paper_usd_per_agent, agent_ids[])` → creates a row in new `contests` table, provisions a `paper_wallets` row per agent, sets `contest_id` on all their `orders` + `fills`. The `venues[]` param is validated against M0's credential set — unreachable venues return a clear error.
 - `contest.join(contest_id, agent_id, strategy_ref)` → registers a late-joiner.
 - `contest.leaderboard(contest_id)` → reads from `position_snapshots` + `fills`, returns ranked P&L.
 - `contest.end(contest_id)` → freezes balances, auto-runs `postmortem.run` for every agent, stores learnings in MemU with `category='contest_lesson'`.
@@ -423,14 +426,23 @@ Agents from other companies subscribe to categories they care about. An agent in
 
 ---
 
-## 7. Open questions (need your answer before I start any phase)
+## 7. Decisions locked (2026-04-20)
 
-1. **Fat tools vs thin tools** (170 vs 400) — which do you prefer? My recommendation: fat.
-2. **Contest venues** — you listed Binance, Bybit, Gates.io, Blofin, BitGet as preferred. For Phase M7, should the contest span all 5, or start with Binance-only and expand? (My recommendation: Binance-only for M7 smoke, expand in M8+.)
-3. **Real-money gate** — when we eventually unlock `is_live=true` (post-M8), what's the approval flow? My suggestion: CEO + "auto-denied unless the agent has 30 consecutive days of positive paper PnL with Sharpe > 1.5". Numbers are placeholders.
-4. **Live venues that need CCXT accounts** — do you want me to audit whether the existing `/opt/tickles/.env` on the VPS has keys for all 5 venues, or is that out of scope?
-5. **Phase ordering** — my order is M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8. Is there any phase you want to reprioritize? (E.g. if you care about the contest first, we could do M0 → M1 → M4 → M2 → M7 and skip M3/M5/M6 until later.)
-6. **Tool naming taste** — I've used dot-separated hierarchies (`candles.coverage`, `execution.submit`). Some platforms prefer slashes (`candles/coverage`). Tickles today uses dots, and I've kept that. OK to proceed?
+All six open questions have CEO answers. No further approval needed before Phase M0 starts — only the "start M0" command.
+
+| # | Question | CEO decision | Rationale / constraint |
+|---|---|---|---|
+| 1 | Fat vs thin tools | **Fat (~174), conditional on full indicator discoverability.** If Phase M5 testing shows agents can't find an indicator in ≤2 calls, fall back to hybrid (split indicators into thin, keep everything else fat). | Protects LLM context budget while preserving the "be curious" UX. |
+| 2 | Contest venues (M7) | **Whatever venues have valid API keys on VPS**, per the Phase M0 credential audit (Section 4, M0, question 9). | Avoids designing for 5 venues when only 1 has keys. Also fine: a 1-venue contest is still a contest. |
+| 3 | Real-money unlock gate | **Deferred.** Don't design the gate until the moment we actually need it (post-M8, earliest). | Lets us see real paper-trading data before picking thresholds. Nothing in M0-M8 requires a gate to be defined. |
+| 4 | Env credential audit in M0 | **Include in M0**, read-only, never prints secrets (only presence + length). | Tells us upfront which venues M7 + M8 can reach. |
+| 5 | Phase ordering | **Default: M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8.** | Data → trade → memory → discovery → contest → prod. Bottom-up, no step depends on a later step. |
+| 6 | Tool naming | **Dots (`candles.coverage`, `execution.submit`).** | Matches all 41 existing tools, the audit table, and the registry schema. Zero migration cost. |
+
+### Items explicitly deferred
+
+- **Real-money unlock thresholds** (Q3) — revisit when ≥1 agent has 30+ days of paper trading under M2 + M7.
+- **Venues beyond the M0 credential set** — if you want to add Bybit/Gates/Blofin/BitGet keys later, drop them into `/opt/tickles/.env` and run the M0 audit again; the contest + M8 live-enable will pick them up automatically.
 
 ---
 
@@ -449,10 +461,20 @@ I will only continue to **read and document**. Writing begins when you say so.
 
 ## 9. How to respond
 
-Minimum — just pick a start point:
-- "Start M0" → I run the VPS baseline audit, write `PHASE_M0_BASELINE.md`, nothing else.
-- "Start M1 and M4 in parallel" → I open two work tracks.
-- "Edit the plan: <change>" → I redraft.
-- "More detail on <phase>" → I expand that section.
+With the 6 decisions locked (Section 7), the only remaining input needed is a **start command**:
+
+- **"Start M0"** → I run the VPS baseline audit (SSH, 9 questions, read-only), write `shared/docs/PHASE_M0_BASELINE.md`, report findings. No code changes, no service changes, ~1 day.
+- **"Start M0 and M4 in parallel"** → I open two tracks (M0 audit + wiring the `user-mem0` MCP into OpenClaw's config). M4 is tiny, and it's a prerequisite for all agent memory writes.
+- **"Edit the plan: <change>"** → I redraft, you re-approve.
+- **"More detail on <phase>"** → I expand that section before you approve the start.
 
 I'll update this file (`shared/docs/MCP_AND_MEMORY_PLAN.md`) as the plan evolves; every phase completion gets a "✅ Done YYYY-MM-DD, commit <sha>, rollback <how>" note appended.
+
+---
+
+## Changelog
+
+| Date | Change | Commit |
+|---|---|---|
+| 2026-04-20 | Initial plan drafted | `0adceec` |
+| 2026-04-20 | 6 open questions answered; plan status → APPROVED; M0 gains env credential audit; M7 venue scope locked to M0 audit output; Section 7 rewritten as decisions table | *this commit* |
