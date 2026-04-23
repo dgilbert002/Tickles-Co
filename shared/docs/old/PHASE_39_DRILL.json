@@ -1,0 +1,610 @@
+{
+  "steps_total": 19,
+  "steps_passed": 19,
+  "steps_failed": 0,
+  "elapsed_ms": 21000,
+  "all_green": true,
+  "results": [
+    {
+      "phase": "14",
+      "step": "market_data_layout",
+      "description": "Phase-14 market-data package layout check.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 4,
+      "stderr": "",
+      "payload": {
+        "package_present": true,
+        "module_files": [
+          "README.md",
+          "__init__.py",
+          "candle_service.py",
+          "gap_detector.py",
+          "retention.py",
+          "run_candle_collection.py",
+          "timing_service.py"
+        ],
+        "expected_present": true,
+        "missing": []
+      }
+    },
+    {
+      "phase": "18",
+      "step": "indicators_registry",
+      "description": "Count registered indicators (Phase 18).",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 712,
+      "stderr": "",
+      "payload": {
+        "indicators_registered": 260,
+        "sample": [
+          "atr",
+          "bbands_pb",
+          "bos_bearish",
+          "bos_bullish",
+          "crash_protection"
+        ],
+        "categories": [
+          "crash_protection",
+          "momentum",
+          "pattern",
+          "performance",
+          "smart_money",
+          "statistical",
+          "trend",
+          "volatility",
+          "volume"
+        ]
+      }
+    },
+    {
+      "phase": "19",
+      "step": "backtest_engines_registry",
+      "description": "Phase-19 backtest engine registry import.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 5,
+      "stderr": "",
+      "payload": {
+        "engines": [
+          "classic",
+          "nautilus",
+          "vectorbt"
+        ]
+      }
+    },
+    {
+      "phase": "21",
+      "step": "auditor_store_import",
+      "description": "Phase-21 Rule-1 auditor store import.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 9,
+      "stderr": "",
+      "payload": {
+        "auditor_available": true,
+        "store": "AuditStore",
+        "auditor": "ContinuousAuditor"
+      }
+    },
+    {
+      "phase": "22",
+      "step": "services_registry_snapshot",
+      "description": "Phase-22 service registry inventory.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 27,
+      "stderr": "",
+      "payload": {
+        "services_total": 23,
+        "services_by_kind": {
+          "api": 3,
+          "auditor": 1,
+          "catalog": 1,
+          "collector": 5,
+          "gateway": 1,
+          "worker": 12
+        },
+        "services_by_phase": {
+          "13": 1,
+          "14": 1,
+          "16": 1,
+          "17": 1,
+          "21": 1,
+          "25": 1,
+          "26": 1,
+          "27": 1,
+          "28": 1,
+          "29": 1,
+          "30": 1,
+          "31-32": 1,
+          "33": 2,
+          "34": 1,
+          "35": 2,
+          "36": 1,
+          "37": 1,
+          "3A.1": 4
+        }
+      }
+    },
+    {
+      "phase": "23",
+      "step": "enrichment_default_pipeline",
+      "description": "Phase-23 default enrichment pipeline.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 4,
+      "stderr": "",
+      "payload": {
+        "pipeline_built": true,
+        "stages": [
+          "LanguageDetector",
+          "SymbolResolver",
+          "SentimentScorer",
+          "RelevanceScorer"
+        ]
+      }
+    },
+    {
+      "phase": "25",
+      "step": "treasury_pure_size",
+      "description": "Phase-25 Treasury.pure-size deterministic.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.treasury_cli",
+        "pure-size",
+        "--company",
+        "tickles",
+        "--exchange",
+        "binance",
+        "--symbol",
+        "BTC/USDT",
+        "--direction",
+        "long",
+        "--account-id",
+        "drill-acct",
+        "--price",
+        "60000",
+        "--balance",
+        "10000",
+        "--equity",
+        "10000",
+        "--requested-notional-usd",
+        "250",
+        "--taker-fee-bps",
+        "5",
+        "--maker-fee-bps",
+        "2",
+        "--slippage-bps",
+        "1",
+        "--cap-max-notional-usd",
+        "1000",
+        "--cap-max-leverage",
+        "3"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 126,
+      "stderr": "",
+      "payload": {
+        "ok": true,
+        "sized": {
+          "direction": "long",
+          "entry_price": 60000.0,
+          "exchange": "binance",
+          "expected_entry_price": 60006.0,
+          "expected_fee_usd": 0.125,
+          "expected_overnight_usd_per_day": 0.0,
+          "expected_slippage_usd": 0.025,
+          "expected_spread_usd": 0.0,
+          "fee_rate_bps": 5.0,
+          "intent_hash": "f5f7368ac568f94f740d207e5cc16c50360c1a495529d7ab6339140399059304",
+          "leverage": 3,
+          "notional_usd": 250.0,
+          "quantity": 0.004166666666666667,
+          "reasons": [
+            "requested_notional=250.0",
+            "fraction_notional=30000.0000 (frac=1.0)",
+            "cap_max_notional=1000.0000"
+          ],
+          "skipped": false,
+          "skipped_reason": null,
+          "stop_loss_price": null,
+          "symbol": "BTC/USDT",
+          "take_profit_price": null
+        }
+      }
+    },
+    {
+      "phase": "26",
+      "step": "execution_paper_simulate",
+      "description": "Phase-26 paper execution adapter.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.execution_cli",
+        "paper-simulate",
+        "--company",
+        "tickles",
+        "--exchange",
+        "binance",
+        "--account-id",
+        "drill-acct",
+        "--symbol",
+        "BTC/USDT",
+        "--direction",
+        "long",
+        "--order-type",
+        "market",
+        "--quantity",
+        "0.01",
+        "--price",
+        "60000",
+        "--market-last",
+        "60000",
+        "--market-bid",
+        "59995",
+        "--market-ask",
+        "60005"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 717,
+      "stderr": "",
+      "payload": {
+        "adapter": "paper",
+        "fills": [
+          {
+            "account_id_external": "drill-acct",
+            "adapter": "paper",
+            "company_id": "tickles",
+            "direction": "long",
+            "exchange": "binance",
+            "external_fill_id": null,
+            "fee_currency": null,
+            "fee_usd": 0.24002000000000004,
+            "id": 1,
+            "is_maker": false,
+            "liquidity": "taker",
+            "metadata": {
+              "update_payload": {
+                "notional_usd": 600.0500000000001,
+                "tick_ts": "2026-04-19T08:28:02.619830+00:00"
+              }
+            },
+            "notional_usd": 600.0500000000001,
+            "order_id": 1,
+            "price": 60005.0,
+            "quantity": 0.01,
+            "realized_pnl_usd": null,
+            "symbol": "BTC/USDT",
+            "ts": "2026-04-19T08:28:02.619830+00:00"
+          }
+        ],
+        "ok": true,
+        "order": {
+          "account_id_external": "drill-acct",
+          "adapter": "paper",
+          "average_fill_price": 60005.00000000001,
+          "client_order_id": "tk-eea3b870d3a34a2bb95d3069",
+          "company_id": "tickles",
+          "direction": "long",
+          "exchange": "binance",
+          "external_order_id": null,
+          "fees_paid_usd": 0.24002000000000004,
+          "filled_quantity": 0.01,
+          "id": 1,
+          "metadata": {
+            "intent_hash": null
+          },
+          "order_type": "market",
+          "quantity": 0.01,
+          "reason": "paper: filled @ 60005.00000000",
+          "requested_price": 60000.0,
+          "status": "filled",
+          "submitted_at": "2026-04-19T08:28:02.619830+00:00",
+          "symbol": "BTC/USDT",
+          "updated_at": "2026-04-19T08:28:02.619830+00:00"
+        },
+        "positions": [
+          {
+            "account_id_external": "drill-acct",
+            "adapter": "paper",
+            "average_entry_price": 60005.00000000001,
+            "company_id": "tickles",
+            "direction": "long",
+            "exchange": "binance",
+            "id": 1,
+            "leverage": 1,
+            "metadata": {
+              "client_order_id": null
+            },
+            "notional_usd": 600.0500000000001,
+            "quantity": 0.01,
+            "realized_pnl_usd": 0.0,
+            "source": "adapter",
+            "symbol": "BTC/USDT",
+            "ts": "2026-04-19T08:28:02.619830+00:00",
+            "unrealised_pnl_usd": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "phase": "27",
+      "step": "regime_classifiers",
+      "description": "Phase-27 regime classifiers + labels.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 6,
+      "stderr": "",
+      "payload": {
+        "classifiers": [
+          "composite",
+          "trend",
+          "volatility"
+        ],
+        "regimes": [
+          "bear",
+          "bull",
+          "crash",
+          "high_vol",
+          "low_vol",
+          "recovery",
+          "sideways",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "phase": "28",
+      "step": "guardrails_rule_kinds",
+      "description": "Phase-28 guardrails rule + action types.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 5,
+      "stderr": "",
+      "payload": {
+        "rule_kinds": [
+          "daily_loss",
+          "equity_drawdown",
+          "position_notional",
+          "regime_crash",
+          "stale_data"
+        ],
+        "actions": [
+          "alert",
+          "flatten_positions",
+          "halt_new_orders"
+        ]
+      }
+    },
+    {
+      "phase": "29",
+      "step": "altdata_sources",
+      "description": "Phase-29 alt-data source catalogue.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.altdata_cli",
+        "sources"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 122,
+      "stderr": "",
+      "payload": {
+        "built_in": [
+          {
+            "category": "custom",
+            "name": "static"
+          },
+          {
+            "category": "custom",
+            "name": "manual"
+          },
+          {
+            "category": "funding_rate",
+            "name": "ccxt_funding"
+          },
+          {
+            "category": "open_interest",
+            "name": "ccxt_open_interest"
+          }
+        ],
+        "ok": true,
+        "source_types": [
+          "custom",
+          "funding_rate",
+          "macro",
+          "onchain",
+          "open_interest",
+          "social"
+        ]
+      }
+    },
+    {
+      "phase": "30",
+      "step": "events_kinds",
+      "description": "Phase-30 events canonical kinds.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.events_cli",
+        "kinds"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 118,
+      "stderr": "",
+      "payload": {
+        "kinds": [
+          "custom",
+          "earnings",
+          "funding_roll",
+          "halving",
+          "macro",
+          "maintenance",
+          "regulatory"
+        ],
+        "ok": true
+      }
+    },
+    {
+      "phase": "31-32",
+      "step": "souls_personas",
+      "description": "Phase-31/32 soul persona constants.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 13,
+      "stderr": "",
+      "payload": {
+        "personas": [
+          "apex",
+          "curiosity",
+          "ledger",
+          "optimiser",
+          "quant",
+          "regime_watcher",
+          "scout"
+        ]
+      }
+    },
+    {
+      "phase": "33",
+      "step": "arb_demo",
+      "description": "Phase-33 arb scanner in-memory demo.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.arb_cli",
+        "demo"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 7154,
+      "stderr": "",
+      "payload": {
+        "stdout_tail": "sk   +0.00bps\n  kraken     bid        2318.8900    ask        2319.2200    gap-vs-best-ask   -0.09bps\n  coinbase   bid        2318.2500    ask        2320.1400    gap-vs-best-ask   -2.85bps\n  bybit      bid        2318.9000    ask        2318.9100 *  gap-vs-best-ask   -0.04bps\n\n== opportunities (min_net_bps=5.0, max_size_usd=10000.0) ==\n  (no net-positive gap after fees \u2014 normal in liquid markets)"
+      }
+    },
+    {
+      "phase": "33",
+      "step": "copy_demo",
+      "description": "Phase-33 copy-trader in-memory demo.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.copy_cli",
+        "demo"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 3042,
+      "stderr": "",
+      "payload": {
+        "stdout_tail": ".9700     0.000019                 1.4290\n  2026-04-19T08:28:10.213000+00:00 sell     0.000230   75211.9600     0.000023                 1.7299\n  2026-04-19T08:28:10.630000+00:00 buy      0.006600   75211.9700     0.000660                49.6399\n  2026-04-19T08:28:11.070000+00:00 sell     0.000710   75211.9600     0.000071                 5.3400\n  ... 10 more (full audit row stored in copy_trades)"
+      }
+    },
+    {
+      "phase": "34",
+      "step": "strategy_demo",
+      "description": "Phase-34 strategy composer in-memory demo.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.strategy_cli",
+        "demo"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 8424,
+      "stderr": "",
+      "payload": {
+        "stdout_tail": "[demo] scanning ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'] on ['binance', 'kraken', 'coinbase', 'bybit'] ...\n[demo] arb opportunities found: 0\n\n== composition result ==\n  proposed=0  approved=0  rejected=0  duplicate=0  submitted=0  failed=0  skipped=0"
+      }
+    },
+    {
+      "phase": "35",
+      "step": "backtest_submit_demo",
+      "description": "Phase-35 backtest submit in-memory demo.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.backtest_cli",
+        "demo"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 119,
+      "stderr": "2026-04-19 12:28:21,688 tickles.backtest_submit INFO submit: hash 2565bae1b5a1 already active/completed as id=1",
+      "payload": {
+        "stdout_tail": "2  pnl=$ 196.90  trades=26   sharpe=1.4\n  worker finished id=3  pnl=$  70.35  trades=29   sharpe=2.1\n\n[demo] final statuses:\n  id=1   status=completed  strategy=rsi_crossover        pnl=$  73.45 trades=23  sharpe=0.7\n  id=2   status=completed  strategy=donchian_breakout    pnl=$ 196.90 trades=26  sharpe=1.4\n  id=3   status=completed  strategy=ma_revert            pnl=$  70.35 trades=29  sharpe=2.1"
+      }
+    },
+    {
+      "phase": "36",
+      "step": "dashboard_import",
+      "description": "Phase-36 dashboard package import.",
+      "kind": "python",
+      "argv": [],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 12,
+      "stderr": "",
+      "payload": {
+        "dashboard_import_ok": true,
+        "migration_present": true,
+        "pool_class": "InMemoryDashboardPool"
+      }
+    },
+    {
+      "phase": "37",
+      "step": "mcp_demo",
+      "description": "Phase-37 MCP stack in-memory demo.",
+      "kind": "cli",
+      "argv": [
+        "-m",
+        "shared.cli.mcp_cli",
+        "demo"
+      ],
+      "returncode": 0,
+      "ok": true,
+      "elapsed_ms": 373,
+      "stderr": "",
+      "payload": {
+        "invocations_logged": 4,
+        "tools_registered": [
+          "backtest.status",
+          "backtest.submit",
+          "dashboard.snapshot",
+          "ping",
+          "regime.current",
+          "services.list",
+          "strategy.intents.recent"
+        ],
+        "transcript_steps": 6
+      }
+    }
+  ]
+}

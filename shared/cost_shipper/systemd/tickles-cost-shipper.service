@@ -1,0 +1,27 @@
+[Unit]
+Description=Tickles cost shipper — streams OpenClaw LLM usage into Paperclip cost_events
+After=network.target paperclip.service
+Wants=paperclip.service
+
+[Service]
+Type=simple
+User=root
+Environment=PAPERCLIP_URL=http://127.0.0.1:3100
+Environment=OPENCLAW_ROOT=/root/.openclaw
+Environment=TICKLES_COST_STATE=/var/lib/tickles/cost-shipper
+Environment=TICKLES_COST_POLL_SEC=5
+ExecStart=/usr/bin/python3 /opt/tickles/shared/cost_shipper/shipper.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — we only read openclaw state and POST to localhost
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/tickles
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

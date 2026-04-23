@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from shared.copy import (
+from shared.copy_trader_trader import (
     CopyService,
     CopyStore,
     CopySource,
@@ -234,7 +234,7 @@ async def _handle_demo_async(args: argparse.Namespace) -> int:
         except Exception:  # pragma: no cover
             continue
 
-    from shared.copy.sources import StaticCopySource as _Static
+    from shared.copy_trader_trader.sources import StaticCopySource as _Static
     svc = CopyService(store, _Static(fills))
     result = await svc.tick_one(saved, correlation_id="copy-demo")
 

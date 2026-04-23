@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from clickhouse_driver import Client
 
-from backtest.engine import BacktestResult, Trade
+from .engine import BacktestResult, Trade
 
 log = logging.getLogger("tickles.ch_writer")
 
@@ -137,6 +137,93 @@ class ClickHouseWriter:
     def write_many(self, results: Iterable[BacktestResult],
                    batch_id: Optional[str] = None) -> List[str]:
         return [self.write_result(r, batch_id=batch_id) for r in results]
+
+    # ------------------------------------------------------------------
+    # Forward Testing (Phase 1D)
+    # ------------------------------------------------------------------
+    def write_forward_run_start(self, run_id: str, strategy_id: str, cfg: BacktestResult.config, instrument_id: int = 0) -> None:
+        """Initialize a forward-test run record."""
+        cols = (
+            "forward_run_id", "strategy_id", "param_hash", "candle_data_hash",
+            "instrument_id", "exchange", "symbol", "timeframe", "params",
+            "initial_balance", "current_balance", "total_return_pct",
+            "sharpe_ratio", "total_trades", "status", "started_at", "last_updated_at"
+        )
+        values = (
+            uuid.UUID(run_id),
+            strategy_id,
+            cfg.param_hash()[:64],
+            "0" * 64,
+            int(instrument_id),
+            cfg.source,
+            cfg.symbol,
+            cfg.timeframe,
+            json.dumps(cfg.indicator_params, sort_keys=True, default=str),
+            _d(cfg.initial_capital),
+            _d(cfg.initial_capital),
+            0.0,
+            0.0,
+            0,
+            "active",
+            datetime.now(timezone.utc),
+            datetime.now(timezone.utc)
+        )
+        self.client.execute(
+            f"INSERT INTO backtest_forward_runs ({', '.join(cols)}) VALUES",
+            [values],
+            types_check=True
+        )
+
+    def write_forward_trade(self, run_id: str, strategy_id: str, trade: Trade, trade_index: int) -> None:
+        """Insert a completed shadow trade."""
+        cols = (
+            "forward_run_id", "strategy_id", "trade_index", "direction",
+            "entry_at", "exit_at", "entry_price", "exit_price", "quantity",
+            "net_pnl", "fees", "exit_reason", "pairing_key", "created_at"
+        )
+        
+        # Pairing key: (strategy_id, signal_timestamp_ms, symbol)
+        # We use entry_at as a proxy for signal_timestamp if not explicitly provided
+        signal_ts_ms = int(trade.entry_at.timestamp() * 1000)
+        pairing_key = f"{strategy_id}:{signal_ts_ms}:{trade.entry_at.strftime('%Y%m%d%H%M%S')}"
+
+        values = (
+            uuid.UUID(run_id),
+            strategy_id,
+            int(trade_index),
+            1 if trade.direction == "long" else 2,
+            trade.entry_at.to_pydatetime(),
+            trade.exit_at.to_pydatetime() if trade.exit_at else None,
+            _d(trade.entry_px),
+            _d(trade.exit_px) if trade.exit_px else None,
+            _d(trade.qty),
+            _d(trade.pnl_abs),
+            _d(trade.fees),
+            trade.exit_reason,
+            pairing_key,
+            datetime.now(timezone.utc)
+        )
+        self.client.execute(
+            f"INSERT INTO backtest_forward_trades ({', '.join(cols)}) VALUES",
+            [values],
+            types_check=True
+        )
+
+    def update_forward_run_stats(self, run_id: str, current_balance: float, return_pct: float, trades_count: int) -> None:
+        """Update the summary stats for an active forward run."""
+        self.client.execute(
+            "ALTER TABLE backtest_forward_runs UPDATE "
+            "current_balance = %(bal)s, total_return_pct = %(ret)s, "
+            "total_trades = %(cnt)s, last_updated_at = %(now)s "
+            "WHERE forward_run_id = %(rid)s",
+            {
+                "bal": _d(current_balance),
+                "ret": _f(return_pct),
+                "cnt": int(trades_count),
+                "now": datetime.now(timezone.utc),
+                "rid": uuid.UUID(run_id)
+            }
+        )
 
     def run_exists(self, param_hash: str) -> bool:
         rows = self.client.execute(

@@ -130,6 +130,24 @@ def _markprice_to_model(exchange: str, symbol: str, raw: Dict[str, Any]) -> Opti
     )
 
 
+def _ohlcv_to_candle(exchange: str, symbol: str, raw: list) -> Optional[Candle]:
+    try:
+        # raw is [timestamp, open, high, low, close, volume]
+        return Candle(
+            exchange=exchange,
+            symbol=symbol,
+            timestamp=_utc_from_ms(raw[0]),
+            timeframe="unknown",  # ccxt doesn't return timeframe in the row
+            open=_maybe_decimal(raw[1]),
+            high=_maybe_decimal(raw[2]),
+            low=_maybe_decimal(raw[3]),
+            close=_maybe_decimal(raw[4]),
+            volume=_maybe_decimal(raw[5]),
+        )
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
 def parse_message(key: SubscriptionKey, raw: Any) -> list[Any]:
     """Pure helper exposed for tests."""
     if key.channel == TickChannel.TICK and isinstance(raw, dict):
@@ -141,6 +159,18 @@ def parse_message(key: SubscriptionKey, raw: Any) -> list[Any]:
     if key.channel == TickChannel.MARK and isinstance(raw, dict):
         m = _markprice_to_model(key.exchange, key.symbol, raw)
         return [m] if m is not None else []
+    if key.channel == TickChannel.CANDLE and isinstance(raw, list):
+        # watchOHLCV returns a list of candles or a single candle depending on exchange
+        if len(raw) > 0 and isinstance(raw[0], list):
+            out = []
+            for row in raw:
+                c = _ohlcv_to_candle(key.exchange, key.symbol, row)
+                if c:
+                    out.append(c)
+            return out
+        else:
+            c = _ohlcv_to_candle(key.exchange, key.symbol, raw)
+            return [c] if c else []
     return []
 
 
@@ -266,6 +296,8 @@ class ExchangeSource:
             return ("watch_mark_price", "symbol")
         if channel == TickChannel.FUNDING:
             return ("watch_funding_rate", "symbol")
+        if channel == TickChannel.CANDLE:
+            return ("watch_ohlcv", "symbol")
         raise ValueError(f"Unsupported channel {channel}")
 
 

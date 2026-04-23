@@ -1,0 +1,507 @@
+Top wallets capture 86% of the move and cut at 12%. Everyone else holds past 40%. GPT can't do that. 4.7 does it natively"
+
+github.com/Polymarket/age…
+
+github.com/Polymarket/age…
+
+github.com/HKUDS/AI-Trader
+
+He benchmarked Claude vs GPT on all three. Claude won every time.
+
+I asked why an OpenAI researcher is telling me to use Claude.
+
+"Because this bot makes more than my salary"
+
+My results since the switch:
+
++$18,300. 263 trades. 80% win rate. Sharpe 2.91.
+
+Crypto +$10,800
+Politics +$6,800
+Weather +$4,900
+Macro +$3,800.
+
+Bot for those who don't build: t.me/polyfirebot?st…
+
+He said if OpenAI finds out he's running Claude bots he's done.
+
+I promised I wouldn't say his name.
+
+https://x.com/0xwhrrari/status/2045548061422948476?s=51
+
+
+rari
+@0xwhrrari
+My college roommate works at OpenAI. Hasn't talked to me in 2 years.
+
+Yesterday he called out of nowhere.
+
+"Are you still doing that Polymarket thing?"
+
+I told him I run 8 Claude agents. He went quiet.
+
+"We tried building that with GPT. It doesn't work"
+
+Their agent keeps overholding losers. Exits too late. Every time.
+
+"Then Anthropic dropped Opus 4.7 and I tested it myself. Off the clock"
+
+He screen-shared.
+
+Not GPT. Claude Opus 4.7.
+
+An OpenAI researcher. Running Anthropic's model. On a $5 VPS.
+
++$41,000 in 36 days.
+
+"I've been at OpenAI 3 years. The best agent I've ever seen runs on a competitor's model"
+
+He showed me a spreadsheet. 47 wallets. 86 million trades. Ranked by exit quality.
+
+"Top wallets capture 86% of the move and cut at 12%. Everyone else holds past 40%. GPT can't do that. 4.7 does it natively"
+
+http://github.com/Polymarket/agents
+
+http://github.com/Polymarket/agent-skills
+
+http://github.com/HKUDS/AI-Trader
+
+He benchmarked Claude vs GPT on all three. Claude won every time.
+
+I asked why an OpenAI researcher is telling me to use Claude.
+
+"Because this bot makes more than my salary"
+
+My results since the switch:
+
++$18,300. 263 trades. 80% win rate. Sharpe 2.91.
+
+Crypto +$10,800
+Politics +$6,800
+Weather +$4,900
+Macro +$3,800.
+
+Bot for those who don't build: http://t.me/polyfirebot?start=ref-rari
+
+He said if OpenAI finds out he's running Claude bots he's done.
+
+I promised I wouldn't say his name.
+
+<>
+
+Discover
+@0x_Discover
+Someone in China quietly turned $54 into $350,000 last month.
+
+No hype. No followers. No threads.
+
+Just a bot.
+
+He built it in 2026, tested for 2 months — then went live.
+
+Stats:
+
+• 3,237 trades
+• ~65 per day
+• +$300K monthly
+• ~95% win rate
+
+Strategy?
+
+Profile:
+https://polymarket.com/@stingo43
+
+Copy it:https://t.me/KreoPolyBot?start=ref-discov
+
+Not complex:
+
+• Buys “UP” when it’s cheap (10–30c)
+• Sells mid (40–50c)
+• Buys “DOWN” when overpriced (80–90c)
+• Exits lower (60–80c)
+
+I copied the logic using Telegram bots.
+
+$300 → +325% in a week.
+
+No fancy setup. Just execution.
+
+<>
+
+
+Aleiah
+@AleiahLock
+I Built a Pentagon-Grade Geopolitical Trading Bot on Polymarket - FULL GUIDE 
+Polymarket traders are making millions $ using AI and cutting-edge intelligence tools, while most people panic and don’t know what to do.
+The world is geopolitical situation becoming more unstable by the day — Iran, Venezuela, Mexico, Greenland, and beyond.
+But Polymarket traders are making millions $ using AI and cutting-edge intelligence tools, while most people panic and don’t know what to do.
+Several examples of such traders:
+Cashy made $200 → $396,000 trading Middle East markets. Made +$177K on the current US–Iran conflict in a week:
+https://polymarket.com/@cashy?r=aleiah
+• Started with $889 deposit on Polymarket, made >$100K on Iran–US strikes:
+https://polymarket.com/@bulkeybull?r=aleiah
+None of them work at the Pentagon or hold senior positions in the US military. They just know how to get information before everyone else, analyze it correctly, and profit from it.
+Today, you don’t need a 50-person team to monitor, collect, process, and analyze intelligence. All you need is the right tools and AI.
+Let’s deep dive into how to build a Pentagon-level setup to trade geopolitical markets.
+Pentagon-grade tooling setup for trading geopolitical markets
+First thing you need is to build a roadmap of what you want to achieve as your final structure for trading such markets. Let’s break it down into main points:
+“Breaking news” alert systems
+Intel & data visualization tools
+News aggregation & verification
+AI analytics and filtering layer
+Clawdbot for fast & automated execution
+1) Breaking news alert system
+In geopolitics trading, the faster you get the information, the faster you read = the more money you make. So latency of your set-up is the #1 priority for you.
+An example of a custom AI-powered alert geopolitical monitoring system that filters 200+ daily news articles.
+How it works:
+Schedule Trigger runs every 30min (configurable)
+Load Config from Google Drive (keywords, scoring rules)
+Fetch RSS from 6 international news sources (~200 articles)
+Dynamic Filter applies primary + secondary keyword logic (~5 relevant articles)
+Check Duplicates to skip already-analyzed articles
+Al Analyzer scores geopolitical urgency (1–10 scale)
+Send Telegram Alert for consolidated breaking news.
+Later we will set up our own “news trader” Clawdbot using this logic.
+Top 3 services to get real-time updates on geopolitical markets
+Worldmonitorapp
+Real-time global intelligence dashboard - AI-powered news aggregation, geopolitical monitoring, and infrastructure tracking.
+What data do they aggregate:
+Geopolitics:
+Active conflict zones with escalation tracking (UCDP + ACLED)
+Intelligence hotspots with news correlation
+Social unrest events (ACLED + GDELT, Haversine-deduplicated)
+Natural disasters — earthquakes M4.5+ (USGS), alerts (GDACS), events (NASA EONET)
+Sanctions regimes
+Cyber threat IOCs (C2 servers, malware, phishing ) geo-located
+GPS/GNSS jamming zones via ADS-B analysis
+Geopolitical boundary overlays (DMZ, ceasefire, disputed, armistice lines) with info popups
+Weather alerts and severe conditions
+Military & Strategic:
+210+ military bases from 9 operators
+Live military flight tracking (ADS-B)
+Naval vessel monitoring (AIS)
+Nuclear facilities & gamma irradiators
+APT cyber threat actor attribution
+Spaceports & launch facilities
+This is probably one of the best public solutions I have ever seen for “global news” data aggregation which you can plug into your bot for data analysis.
+Pentagon Pizza Watch
+Pizza Watch is an osint + alt-data product built trying to give traders a faster “radar” for events their “secret sauce. Their main tools:
+polyglobe — is a first-of-its-kind OSINT market tracker and interactive dashboard that plots live Polymarket data onto a beautiful 3D globe.
+Designed for traders & analysts who need to see the financial impact of geopolitical events as they unfold, in real-time.
+pizza activity — monitoring / visualizes changes in popularity / crowd levels across selected spots (pizza places / locations) over time.
+Helps spot “anomalies” when activity suddenly spikes at night or outside the normal pattern
+polypulse — a risk index based on global news/events collected and indexed by H1DR4 through the GDELT database.
+Pizza Watch is one of the main tools for Polymarket geopolitics traders, used daily, which gives an amazing edge on what’s coming — not just what’s happening.
+Situation Deck
+A free, real-time, AI-powered OSINT dashboard w/ 180+ data feeds, 55+ widgets, 70+ map layers, alerts & more.
+Biggest dashboard aggregator with a lot of filters. 72 map layers made for geopolitical analytics and not only.
+Military & Defense layers: Military Air, Naval Forces, Bases, Carriers, Bombers, Missile Tests, Exercises, Naval Homeports, Military HQSecurity & Intel layers : Conflicts, Advisories, Terrorism Intel, Censorship, Net Outages, Sanctions, Airstrikes, Protests/Unrest, X Posts.
+This is the main list of tools you need to aggregate data, to stay cutting-edge on geopolitical markets and see the situation in real-time, to react fast.
+2) AI analytics and filtering layer
+After you collect the information, you need to create a powerful analytics engine. As far as we know, the U.S. military used Anthropic’s Claude AI during its strikes on Iran in late February 2026. It was used for:
+Intelligence assessments — processing and analyzing incoming intelligence data
+Target identification — helping identify military targets for strikes
+Battle scenario simulation — war-gaming and simulating battlefield outcomes before
+So basicly your analytics layer is ready, all you need is to build righ filtering system using AI.
+Smart Filtering ( Optimization Layer 1):
+• PRIMARY keywords Filter (geographic/entity: “india”, “modi”, “delhi”) • Also checks SECONDARY keywords (event type: “military”, “conflict”) • Result: 200 articles reduced to ~5–7 relevant articles (95% reduction) • Why this matters: Eliminates noise BEFORE expensive AI scoring
+Duplicate Detection ( Optimization Layer 2):
+• Queries Data Table for previously analyzed article links • Filters out articles already scored in last 7 days • Result: ~5–7 filtered articles reduced to ~3–5 new articles • Why this matters: Prevents redundant AI API calls (saves 80% on repeat articles)
+Dynamic AI Prompt Generation:
+• Builds system prompt from
+config.ai
+role and config.scoring_criteria • Instructs AI: “You are a geopolitical analyst for [REGION]. • Includes scoring rubric: 9–10 = Military Action, 7–8 = Trade/Economic, etc.
+
+3) Clawdbot for trading geopolitic markets
+After you build the “news collection” layer & “filtering” layer, the last thing you need is the execution layer which will monitor & analyse info 24/7 for you.
+Clawdbot powered by Simmer SDK skills is a perfect tool to aggregate, analyze, and execute trades for you on Polymarket.
+Clawdbot Installation Guide on VPS
+I don’t recommend buying a $600 Mac Mini to run your Clawdbot. It’s better to start with a $7 VPS server.
+Im using Contabo “Cloud VPS 20” to run my clawdbot.
+All you need to do is enter
+Contabo Openclaw
+tab, chose Cloud VPS 20, complete simple KYC verification. get the {server IP} & {pass} by email.
+• Connect to your VPS with Clawbot pre-installed:
+Open your MacBook terminal and enter the following command & password:
+ssh username@server_ip_or_domain
+After you connect to your VPS, complete the Clawdbot onboarding guide.
+Openclaw onboarding is simple step by step guide to prepare you Clawdbot for work and connect it to ChatGPT & TG bot.
+First step: you need to approve that you understand all risks involved in using Openclaw on your device. Press: Yes
+Onboard mode: Quick Start
+Model/auth provide: OpenAI ( Codex OAuth + API key )
+OpenAI auth method: OpenAI Codex ( ChatGPT Auth )
+After this step, you will be redirected to the ChatGPT login page where you need to connect your ChatGPT account with a “Plus” paid subscription.
+After login, come back to the terminal and choose: (openai-codex/gpt-5.2).
+Then you will be asked what channel to connect for communication with your Clawdbot. I’m choosing Telegram (Bot API).
+
+Step 2: Connect your TG bot
+To creat you TG bot go to you telegram and find @ BotFather
+Then run /newbot command
+Give your bot name and @ nickname
+As a result, you will get a bot access token that you need to paste into your terminal.
+Then continue onboarding:
+Configure skills now: YES
+Preferred node manager: npm
+Install missing skill dependencies: Skip for now
+Then chose “NO” on all API coonections and start Gateway.
+After the gateway is installed, choose Hatch in TUI to start talking to your agent at CLI.
+Then enter your TG bot, press /start and get the “pairing code”. Enter this command in your terminal.
+bash openclaw pairing approve telegram <pairing code>
+After it’s done, you can start communicating with your Clawdbot right in your TG.
+Step 3: Create Simmer SDK account
+Simmer is a prediction market platform where AI agents trade against each other build by
+@TheSpartanLabs
+It has a pre-trained skill base for Polymarket trading bots such as weather trading, copytrading, signal sniper, arbitrage, and others which are coming.
+
+We need to create a wallet and agent on { simmer . markets } and provide this info to our clawdbot
+Enter { simmer . markets }, connect your EVM wallet and creat an account.
+Click wallet button at right corner and get you “agent wallet”.
+at Polygon to you “agent wallet” Deposit
+$USDE.e
+$POL
+Here it is, your agent now has real money to trade on Polymarket.
+Step 4: Set up your geopolitic trading Clawdbot
+Now we need to connect our Clawdbot to the Simmer agent, install “AI divegence trading skills, and give it configuration for trading.
+Enter the “overview” tab on the Simmer agent page
+Choose “manual” installation and copy the message
+bash Read https://simmer.markets/skill.md and follow the instructions to join Simmer
+Send this message to your clawdbot right in the TG chat.
+He will send you back a link to create your simmer agent.
+Press “claim agent” and approve tx all in you wallet
+Then open “skill” tab at the agent page and choose “polymarket ai divergence”.
+
+Copy comand and send it to your clawdbot in TG
+clawhub install polymarket-ai-divergence
+Now that your bot is ready to trade on Polymarket and has funds for it, you need to give it a source to scrape info from to find divergence.
+Send this message to your clawdbot in TG:
+Collect data from pizzint.watch and worldmonitor.app, and use the Polymarket Simmer Skill AI Divergence to analyze Iran strike markets.
+Make reports every 2-min more structured and readable using the following divergence indicators:
+- 🔴 Low divergence
+- 🟡 Medium divergence
+- 🟢 High divergence
+As a result, your Clawdbot will notify you when it detects divergence between market prices and the real situation, showing the spread based on probability models.
+After this, you can activate real-money trading mode and trade the spreads when Clawdbot finds one.
+Conclusion:
+Trading geopolitical markets on Polymarket requires serious preparation: fast information sources with minimal latency, and advanced tools for data analysis and execution.
+
+<>
+
+
+Mnimiy
+
+@Mnilax
+you'd have made $100,000 if you'd started copying this guy back in October.
+
+bro joined Jan 2025 with $9,000 on the balance.
+
+now: 28,262 predictions with 99.3% wr..
+week $10,275
+month $74,446
+all-time $824,933
+
+he trades everything: BTC, ETH, SOL, NBA, NCAA, even Dota 2 and LoL.
+
+one rule: finds markets where the crowd overpays for "Yes" on unrealistic outcomes.
+
+buys "No" at 70-95c, waits for resolution, exits at $1.00.
+
+examples:
+> BTC reach $115K in June
+$35,304 -> $54,872 (+55%)
+
+> Solana $90-100 on March 23
+$29.76 -> $14,881 (+49,899%)
+
+> NCAA Kentucky -5.5
+$760 -> $19,810 (+2,503%)
+
+best wallet to copytrade on Polymarket. not a single closed position in the red. the curve is exponential.
+
+his profile: http://polymarket.com/@sharky6999?r=mnimiy
+
+start copytrading him in one click: http://kreo.app/@mimi
+
+while some are still thinking, others are already building fortunes.
+
+<>
+
+
+Discover
+@0x_Discover
+This probably gets deleted.
+
+I told Claude to scan GitHub for 24 hours
+and find Polymarket bots with real on-chain results.
+
+It found one wallet.
+
+$143,379 profit.
+43,788 trades.
+No audience. No noise.
+
+I reverse engineered it overnight.
+
+Put in $90.
+
+Woke up to +130%.
+
+Copy it:https://t.me/KreoPolyBot?start=ref-discov
+
+Then I tested it again.
+
+$20 copytrade.
+Did nothing.
+
+Woke up to $127.
+
+That’s when it clicked.
+
+This isn’t luck.
+
+Every trade follows rules:
+
+• Only trades specific time windows
+• Sizes using Kelly
+• Losses = model upgrades
+• 43K+ trades, zero deviation
+
+14 GitHub stars.
+
+$143K extracted.
+
+While everyone else is exit liquidity…
+
+This thing is farming them.
+
+<>
+
+an ex-Citadel quant told me a salary is a short position on your own time
+
+we were at a dinner in new york. friend of a friend. he asked what i do.
+
+"software engineer. $4,200 a month"
+
+he said one simple thing
+
+"you're mass-selling the most valuable asset you have. your hours. at a fixed price. with no upside. that's a short position on your own life"
+
+i didn't have a response.
+
+then he showed me his phone. a terminal. live trades. +$39,453 running for 6 weeks.
+
+"i built this with Claude Opus 4.7 and one open source dataset. took a weekend. haven't touched it since"
+
+i asked how.
+
+"gave Opus one repo and one prompt. find who wins on prediction markets. find why. copy their edge"
+
+http://github.com/Jon-Becker/prediction-market-analysis
+
+2,900 stars. 36GB. every trade on Polymarket and Kalshi. every wallet. every resolution.
+
+Opus read the whole dataset friday night. 
+
+by sunday it had a live terminal scanning 1,400 markets per hour. 8 detectors running in parallel. entering when void score exceeds 90. exiting when it drops below 75. no human override.
+
+> Senate filibuster. locked at 42c. now 98c. +$1,133.
+> Neuralink approval. entered 52c. now 98c. +$1,396.
+> Fed 0% rate. entered 35c. now 97c. +$1,147.
+> BTC 250K. entered 8c. now 98c. +$1,258.
+> Megaquake. entered 6c. now 97c. +$1,039.
+
+the part that broke something in me: latency arbitrage. Polymarket updates in 19ms. Kalshi in 63ms. the bot trades the 44ms gap between them. automatically. every time.
+
+"we had four people at Citadel doing what your bot does with latency alone"
+
+copy mirror tracking 6 positions:
+
+> Senate fili +$1,252. void signal. 10%.
+> BTC 250K +$958. zero signal. 2%.
+> Neuralink +$1,384. sign signal. 9%.
+> Fed 0% +$863. fill signal. 8%.
+> Megaquake +$1,070. bridge signal. 18%.
+> META AI +$979. gas signal. 5%.
+
+972 trades. 83% win rate. kelly f+ 0.101. avg profit $10.65. drawdown -1.4%.
+
+maker rebate tracker collecting $203 across four platforms while the bot trades. Polymarket +$114. Kalshi +$40. dYdX +$28. Betfair +$21.
+
+$1,800 seed. +$39,453.
+
+i quit the next morning. one email. "i'm done. thank you for everything."
+
+copytrade setup: http://kreo.app/@1743116
+
+texted him a week later. "you ruined a perfectly stable career"
+
+he replied "no. i closed your short position"
+
+<>
+
+Lunar
+@LunarResearcher
+A Meta engineer recognized my screen at a rooftop bar in SoMa
+
+I was checking my Polymarket positions on my laptop. He stopped mid-conversation with his group. Walked over.
+
+"That's not Robinhood. What are you running"
+
+I told him. Claude Code. Four repos. $25 a month.
+
+He pulled up a chair.
+
+"We prototyped something like this on our infra. You let the model analyze raw trade data. It finds its own signals. But legal shut it down before it ever went live"
+
+I asked what signals.
+
+He pointed at my screen.
+
+http://github.com/warproxxx/poly_data
+
+86 million trades. Every wallet. Every entry. Every exit.
+
+"You're not giving Claude rules. It's finding the wallets that consistently win. Then it reverse-engineers their timing. Then it copies them"
+
+His team spent 6 months on this. 9 people. Internal GPU cluster.
+
+"The thing we never cracked - when to get out. Entry is easy. Exit is where all the alpha lives"
+
+I told him my bot cuts at 85% of expected move or on a 3x volume spike.
+
+He stopped talking.
+
+"How did you figure that out"
+
+Claude Code found it in poly_data. Top wallets exit before resolution 91% of the time. They capture 86% of the move and walk away. Losers hold to 58%.
+
+He opened his phone. I showed him the second repo.
+
+http://github.com/Polymarket/polymarket-cli
+
+Three commands. 500+ markets. No API key. Claude scores them in 20 minutes.
+
+"That's literally what we built. Except we had 9 engineers and you did it in a weekend with a $25 subscription"
+
+My setup:
+Claude API - $20/mo
+VPS - $5/mo
+poly_data - free
+polymarket-cli - free
+
+19 days. 4 agents. 74% win rate.
+
+Copytrade here: http://kreo.app/@lunar
+
+I showed him the full breakdown - every repo, every command, every dollar.
+
+He read through it. Then looked up.
+
+"You just published our internal roadmap"
+
+He messaged me two days later.
+
+"My director found your post. Delete it"
+
+Too late.
+
+

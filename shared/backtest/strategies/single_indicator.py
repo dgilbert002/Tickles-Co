@@ -17,8 +17,8 @@ from typing import Any, Callable, Dict
 import numpy as np
 import pandas as pd
 
-from backtest.indicators import get as get_indicator
-from backtest.indicators.core import _close
+from ..indicators import get as get_indicator
+from ..indicators.core import _close
 
 
 def _state_from_ma(fast: pd.Series, slow: pd.Series) -> pd.Series:

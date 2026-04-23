@@ -1,0 +1,13 @@
+{
+  "id": "blank",
+  "name": "Blank company",
+  "description": "Layer-1 infrastructure only (database + memory + vector store). No agents hired. Pick this when you want a real tenant but haven't decided the strategy yet — add agents later via the 'Hire agent' wizard.",
+  "category": "general",
+  "layer2_trading": false,
+  "rule_one_mode": "off",
+  "memu_subscriptions": [],
+  "venues": [],
+  "skills": [],
+  "agents": [],
+  "routines": []
+}

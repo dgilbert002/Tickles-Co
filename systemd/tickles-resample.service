@@ -1,0 +1,17 @@
+[Unit]
+Description=Tickles V2 candle resample runner (1m -> 5m/15m/30m/1h/4h/1d/1w)
+After=network.target postgresql.service tickles-candle-daemon.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=/opt/tickles/.env
+ExecStart=/usr/bin/python3 -m shared.candles.resample_runner
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tickles/resample_runner.log
+StandardError=append:/var/log/tickles/resample_runner.log
+
+[Install]
+WantedBy=multi-user.target

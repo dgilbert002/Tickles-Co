@@ -137,10 +137,12 @@ class ExecutionRouter:
         if existing.is_terminal:
             return existing
 
+        account_name = existing.metadata.get("accountName", "main")
         update = await adapter_obj.cancel(
             client_order_id,
             exchange=existing.exchange,
             symbol=existing.symbol,
+            account_name=account_name,
         )
         assert existing.id is not None
         await self._store.insert_event(existing.id, update)
@@ -181,8 +183,15 @@ class ExecutionRouter:
         if not open_orders:
             return []
 
-        client_ids = [o.client_order_id for o in open_orders]
-        updates = await adapter_obj.poll_updates(client_ids)
+        # Group by accountName to poll efficiently
+        by_account: Dict[str, List[str]] = {}
+        for o in open_orders:
+            acc = o.metadata.get("accountName", "main")
+            by_account.setdefault(acc, []).append(o.client_order_id)
+
+        updates = []
+        for acc, cids in by_account.items():
+            updates.extend(await adapter_obj.poll_updates(cids, account_name=acc))
 
         by_cid: Dict[str, List[OrderUpdate]] = {}
         for u in updates:

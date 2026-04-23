@@ -28,6 +28,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from shared.connectors.capital_adapter import CapitalAdapter
+from shared.gateway.capital_source import CapitalSource
 from shared.gateway.ccxt_pro_source import ExchangeSource, default_ccxt_pro_factory
 from shared.gateway.redis_bus import RedisBus
 from shared.gateway.schema import (
@@ -52,11 +54,11 @@ class Gateway:
     def __init__(
         self,
         bus: RedisBus,
-        source_factory: Optional[Callable[[str], ExchangeSource]] = None,
+        source_factory: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self._bus = bus
         self._registry = SubscriptionRegistry()
-        self._sources: Dict[str, ExchangeSource] = {}
+        self._sources: Dict[str, Any] = {}
         self._source_factory = source_factory or self._default_source_factory
         self._started_at: Optional[datetime] = None
         self._messages_in = 0
@@ -67,6 +69,7 @@ class Gateway:
         self._stats_task: Optional[asyncio.Task[None]] = None
 
     async def start(self) -> None:
+        """Initialize the gateway, connect to Redis, and start the stats loop."""
         if self._started_at is not None:
             return
         await self._bus.connect()
@@ -158,7 +161,7 @@ class Gateway:
     async def _on_reconnect(self, key: SubscriptionKey) -> None:
         self._reconnects += 1
 
-    def _ensure_source(self, exchange: str) -> ExchangeSource:
+    def _ensure_source(self, exchange: str) -> Any:
         source = self._sources.get(exchange)
         if source is not None:
             return source
@@ -166,7 +169,15 @@ class Gateway:
         self._sources[exchange] = source
         return source
 
-    def _default_source_factory(self, exchange: str) -> ExchangeSource:
+    def _default_source_factory(self, exchange: str) -> Any:
+        if exchange.lower() == "capital":
+            from shared.utils import config
+            return CapitalSource(
+                adapter=CapitalAdapter(environment=config.CAPITAL_ENV),
+                on_message=self._on_message,
+                on_reconnect=self._on_reconnect,
+            )
+
         return ExchangeSource(
             exchange=exchange,
             client_factory=default_ccxt_pro_factory(exchange),

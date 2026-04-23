@@ -36,7 +36,7 @@ COLLECTION_EXCHANGES = os.getenv(
 ).split(",")
 
 
-def _build_adapters() -> Dict[str, BaseExchangeAdapter]:
+async def _build_adapters() -> Dict[str, BaseExchangeAdapter]:
     """Build exchange adapters from configuration.
 
     Returns:
@@ -60,6 +60,14 @@ def _build_adapters() -> Dict[str, BaseExchangeAdapter]:
             "api_secret": os.environ.get("BITGET_API_SECRET", ""),
             "sandbox": False,
         },
+        "capitalcom": {
+            "api_key": os.environ.get("CAPITAL_API_KEY", ""),
+            "api_secret": "", # Not used by Capital but needed for the loop
+            "email": os.environ.get("CAPITAL_EMAIL", ""),
+            "password": os.environ.get("CAPITAL_PASSWORD", ""),
+            "environment": os.environ.get("CAPITAL_ENV", "demo"),
+            "sandbox": True,
+        },
     }
 
     for exchange_name in COLLECTION_EXCHANGES:
@@ -81,7 +89,21 @@ def _build_adapters() -> Dict[str, BaseExchangeAdapter]:
                     "secret": cfg["api_secret"],
                 },
             )
-            adapters[exchange_name] = adapter
+            if exchange_name == "capitalcom":
+                from shared.connectors.capital_adapter import CapitalAdapter
+                adapter = CapitalAdapter(environment=cfg["environment"])
+                await adapter.authenticate(cfg["email"], cfg["password"], cfg["api_key"])
+                adapters[exchange_name] = adapter
+            else:
+                adapter = CCXTAdapter(
+                    exchange_id=exchange_name,
+                    use_sandbox=cfg["sandbox"],
+                    config={
+                        "apiKey": cfg["api_key"],
+                        "secret": cfg["api_secret"],
+                    },
+                )
+                adapters[exchange_name] = adapter
             logger.info("Built adapter for %s", exchange_name)
 
         except Exception as e:
@@ -98,7 +120,7 @@ async def run_collection(db_pool: DatabasePool) -> None:
     Args:
         db_pool: Database connection pool
     """
-    adapters = _build_adapters()
+    adapters = await _build_adapters()
     if not adapters:
         logger.error("No exchange adapters available, exiting")
         return

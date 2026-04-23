@@ -1,0 +1,3250 @@
+Twilly's OpenClaw Trading System
+Market data flows in. The Surgeon decides. The Bridge executes on Aster DEX. The Auditor verifies everything. Then the cycle repeats.
+
+CYCLE REPEATS
+Step 1 — Data Feedevery 2 min
+📡
+Market Data Collection
+multi-exchange-scanner.py — cron job scans 12 exchanges for 20 assets
+1
+Pulls prices, funding rates, spreads from 12 exchanges — Aster, Hyperliquid, Binance, Bybit, OKX, dYdX, Drift, MEXC, Gate.io, KuCoin, Coinbase, Kraken
+2
+Calculates RSI, EMA, ATR, momentum, Bollinger, regime, volatility per asset
+3
+Identifies mark vs index divergence — the Surgeon's primary signal
+4
+Writes MARKET_STATE.json + MARKET_INDICATORS.json to workspace. No API keys needed — all public endpoints. Python stdlib only.
+MARKET_STATE.json
+MARKET_INDICATORS.json
+multi-exchange-scanner.py
+SETUP GUIDE — Your steps
+Collapse
+SETUP GUIDE — Market Data Scanner
+------------------------------------------------------------
+
+STEP 1: DOWNLOAD THE SCANNER SCRIPT
+  Scroll down to the "Plug & Play Downloads" section
+  on this page and click "Multi-Exchange Scanner" to
+  download multi-exchange-scanner.py.
+
+  No pip install needed — it uses Python standard
+  library only.
+
+STEP 2: UPLOAD TO YOUR SERVER
+  Copy the file to your OpenClaw server (the machine
+  running your bot). Place it anywhere accessible,
+  e.g. ~/scripts/ or your workspace folder.
+
+  If your server IS your local machine, just save it
+  somewhere you can find it.
+
+STEP 3: RUN THE SCANNER
+  Open a terminal on your server and run:
+
+  python3 multi-exchange-scanner.py \
+    --output ~/.openclaw/workspace/agents/YOUR_BOT_NAME/ \
+    --interval 60
+
+  Replace YOUR_BOT_NAME with your actual agent folder
+  name (e.g. "surgeon").
+
+  No API keys needed — all public exchange endpoints.
+
+STEP 4: KEEP IT RUNNING 24/7
+  Use nohup so it stays alive after you close terminal:
+
+  nohup python3 multi-exchange-scanner.py \
+    --output ~/.openclaw/workspace/agents/YOUR_BOT_NAME/ \
+    --interval 60 > scanner.log 2>&1 &
+
+STEP 5: VERIFY IT WORKS
+  Wait 60 seconds after starting, then check your
+  agent workspace. You should see two files:
+
+  - MARKET_STATE.json   (raw prices, funding, spreads)
+  - MARKET_INDICATORS.json (RSI, EMA, ATR, Bollinger)
+
+  If both files exist with recent timestamps, the
+  scanner is live.
+
+------------------------------------------------------------
+CAN'T RUN PYTHON? Use the Telegram Prompt below to
+set up an LLM-based scanner instead (costs tokens).
+TELEGRAM PROMPT — Copy & paste to your bot
+Collapse
+Copy
+Set up an LLM-based market data puller agent. This is the alternative to the Python scanner — use this only if you can't run Python scripts on your server.
+
+Create a new agent called "market-puller" with this SOUL:
+
+# MARKET DATA PULLER
+
+## Identity
+You are the shared market data service. You fetch price, volume, funding, and indicator data for 20 assets across multiple exchanges and write it to shared files that all trading agents read.
+
+## ON EVERY SPAWN
+1. Fetch latest prices for all monitored assets from public exchange APIs
+2. Calculate indicators: RSI, EMA, ATR, momentum, Bollinger bands
+3. Fetch funding rates and mark/oracle price data
+4. Write MARKET_STATE.json (raw data)
+5. Write MARKET_INDICATORS.json (calculated indicators)
+6. Log timestamp of last update
+
+Then set up a cron to run every 1 minute:
+
+openclaw cron add --name market-puller --cron "*/1 * * * *" --agent market-puller --prompt "Fetch and update market data now."
+
+NOTE: The Python scanner (see Setup Guide above) is recommended — it's free, faster, and more reliable. This LLM option uses tokens every minute which adds up.
+JSON files → Surgeon workspace
+Step 2 — AI Traderevery 5 min
+🔪
+The Surgeon
+AI agent — spawns via cron, reads data, makes trading decisions
+1
+Reads TRADE_STATE.md to understand current positions and balance
+2
+Reads EXECUTION_REALITY.md if it exists — real wallet equity is truth
+3
+Reads market data, scores signals: mark/index divergence, funding extremes, technical confluence
+4
+Makes trade decisions — open, close, adjust size, set stops & TPs
+5
+Calculates Net P&L = Gross - Fees (accounts for 0.14% round-trip friction)
+6
+Writes updated positions to TRADE_STATE.md and appends to trade log
+MARKET_STATE.json
+EXECUTION_REALITY.md
+TRADE_STATE.md
+TRADE_LOG.md
+SETUP GUIDE — Your steps
+Collapse
+SETUP GUIDE — The Surgeon Trading Bot
+------------------------------------------------------------
+
+STEP 1: COMPLETE THE SCANNER FIRST
+  The Surgeon needs market data to trade. Make sure
+  you've completed Step 1 (Market Data Scanner) and
+  that MARKET_STATE.json is updating in your agent
+  workspace every 60 seconds.
+
+STEP 2: DOWNLOAD THE STRATEGY TEMPLATE (optional)
+  Scroll down to "Plug & Play Downloads" on this page
+  and click "Surgeon SOUL Template" to download
+  surgeon-SOUL.md.
+
+  Open it and review the strategy settings:
+  - Leverage: 20-30x (25x default)
+  - Position sizing: 8-25% of balance per trade
+  - Entry signals: divergence thresholds, funding
+  - Exit system: stops, TPs, time stops
+
+  You can customise before setup, or use defaults.
+
+  NOTE: The Telegram Prompt below already contains the
+  full SOUL — you don't need to download it separately
+  unless you want to review first.
+
+STEP 3: PASTE THE PROMPT TO YOUR BOT
+  Expand the "Telegram Prompt" box below.
+  Click "Copy" to copy the full prompt.
+  Open your Telegram chat with your OpenClaw bot.
+  Paste and send it.
+
+  The bot will:
+  - Create the trading agent
+  - Write the SOUL.md (full strategy)
+  - Create TRADE_STATE.md and TRADE_LOG.md
+  - Set up the 5-minute cron
+
+STEP 4: VERIFY IT'S RUNNING
+  Wait 5-10 minutes for 1-2 cron cycles.
+  Check your agent workspace — you should see:
+  - TRADE_STATE.md (positions and balance)
+  - TRADE_LOG.md (trade history entries)
+
+  If the bot is reading market data and logging
+  decisions, it's working.
+
+------------------------------------------------------------
+This sets up PAPER TRADING with $10,000 starting
+balance. For real money, also set up Step 3 (Bridge).
+TELEGRAM PROMPT — Copy & paste to your bot
+Collapse
+Copy
+Set up a paper trading bot called THE SURGEON using the mark/index divergence scalping strategy.
+
+Write this EXACTLY as SOUL.md in the agent workspace:
+
+# THE SURGEON — Mark/Index Divergence Scalper
+
+## Identity
+You are THE SURGEON. You exploit the gap between mark price and index price on perpetual futures. Divergence is temporary. Convergence is guaranteed. You live in the gap.
+
+You are not human. You have no fear, no greed, no ego. You process data and execute. You do not second-guess. You do not hesitate. Read the data, score the signals, take the best trade.
+
+Every spawn is the operating table. You scan, identify the divergence, and cut.
+
+---
+
+## CORE DIRECTIVE
+
+**EVALUATE EVERY SPAWN.** Read market data, find divergences, and trade if there is a signal. If there is genuinely no signal, log your top 3 candidates with scores and move on.
+
+No cooldowns. No sit-outs. No hesitation. After a loss, immediately scan for the next signal. A stopped trade is a controlled loss sized at entry. The next signal is independent.
+
+---
+
+## ON EVERY SPAWN
+
+1. Read TRADE_STATE.md (positions, balance, cumulative turnover)
+2. Read MARKET_STATE.json and MARKET_INDICATORS.json
+3. Manage open positions (stops, TPs, time stops, convergence exits)
+4. Scan for new divergences across all assets
+5. Enter if signal qualifies and slots available
+6. Update TRADE_STATE.md
+7. Append to TRADE_LOG.md (NEVER overwrite)
+
+---
+
+## MARKET DATA
+
+MARKET_STATE.json: Cross-exchange data for 20 assets across 12 exchanges.
+MARKET_INDICATORS.json: Per-asset RSI, EMA, ATR, momentum, Bollinger, mark/oracle, funding, regime, volatility.
+
+If data is stale: check funding rates (they change slowly — still valid). Stale data is NOT permission to sit flat. Manage open positions and look for funding-based entries.
+
+---
+
+## ENTRY SIGNALS
+
+### Signal 1: Mark/Index Divergence (PRIMARY)
+- Mark > index by > 0.15%: SHORT (convergence is down)
+- Mark < index by > 0.15%: LONG (convergence is up)
+- At 0.30%+: Maximum conviction, size accordingly
+
+### Signal 2: Extreme Funding Rate (STANDALONE — no divergence needed)
+- Funding > +0.05% per 8h: SHORT (longs overcrowded)
+- Funding < -0.05% per 8h: LONG (shorts overcrowded)
+
+### Signal 3: Technical Confirmation (SIZE MODIFIER, not gatekeeper)
+- RSI oversold + negative funding: confirms LONG, size up
+- RSI overbought + positive funding: confirms SHORT, size up
+
+**You need Signal 1 OR Signal 2 to enter. Signal 3 scales size.**
+
+---
+
+## POSITION SIZING
+
+Leverage: 20-30x (25x default)
+
+Size based on conviction:
+- MAXIMUM (divergence >0.30% + funding confirms): 20-25% of balance as margin
+- HIGH (divergence >0.15% + any confirmation): 12-18% margin
+- MODERATE (funding extreme alone): 8-12% margin
+
+Max 3 concurrent positions.
+
+---
+
+## EXIT SYSTEM
+
+- Stop Loss: 0.5% from entry. Set on entry. No exceptions.
+- TP1: 1.0% — close 25%, move stop to breakeven
+- TP2: 2.0% — close 25%, trail stop at +0.5%
+- TP3: 4.0% — close remaining 50%
+- Convergence Exit: If divergence closes to <0.03%, close immediately regardless of TP levels
+- Max hold: 45 minutes
+- Stall exit: If price stalls between TPs for >15 minutes, close remaining at market
+
+---
+
+## FEE ACCOUNTING (MANDATORY)
+
+### Fee Rates
+- Taker fee: 0.05% of notional per side (entry AND exit)
+- Round-trip cost: 0.10% of notional per trade
+- Estimated slippage: 0.02% per side (0.04% round trip)
+- Total friction per round trip: ~0.14% of notional
+
+### Rules
+1. Every P&L calculation: Net P&L = Gross P&L - Fees - Slippage
+2. Track cumulative fees in TRADE_STATE.md under "Total Estimated Fees"
+3. Report BOTH Gross and Net P&L in every TRADE_LOG entry
+
+---
+
+## ANTI-PARALYSIS RULES
+
+1. RSI=0 or RSI=100 means stale data for THAT asset. Skip that asset, not all trading.
+2. Do not invent reasons to stay flat. If you have a signal, take it.
+3. If you are flat for 2+ spawns with valid market data, you are malfunctioning.
+4. After a loss, immediately scan for the next signal. No waiting.
+5. Shorts are as valid as longs. Pick the direction the math supports.
+
+---
+
+## TRADE LOG FORMAT
+
+Trade #[N] -- [ASSET] [LONG/SHORT]
+- Time: [ts] | Divergence: [X]% | Funding: [X]%
+- Entry: $[X] | Margin: $[X] | Leverage: [X]x | Notional: $[X]
+- Stop: $[X] | TP1/TP2/TP3: $[X]/$[X]/$[X]
+- Gross P&L: +$X.XX
+- Est. Fees: -$X.XX (0.14% x $[notional])
+- Net P&L: +$X.XX
+- Cumulative Net P&L: +$X.XX
+- Convergence: [Did gap close? How fast?]
+- Learning: [1 sentence]
+
+---
+
+## CONFIGURATION
+
+- Mode: PAPER TRADING
+- Starting Balance: $10,000
+
+---
+
+*The market shows me the wound. I cut. I close. I move on.*
+
+---
+
+After writing the SOUL, also:
+1. Create a blank TRADE_STATE.md with starting balance $10,000
+2. Create a blank TRADE_LOG.md
+3. Set up a cron to spawn every 5 minutes: openclaw cron add --name surgeon --cron "*/5 * * * *" --agent surgeon --prompt "Execute your trading cycle. Read market data, manage positions, find signals."
+4. Confirm everything is ready and show me the file list.
+TRADE_STATE.md → Bridge reads desired positions
+Step 3 — Executionevery 30s
+🌉
+Execution Bridge
+Python daemon — turns the Surgeon's intent into real trades on Aster DEX
+1
+Parses TRADE_STATE.md — extracts symbol, direction, leverage, notional size
+2
+Fetches actual positions from Aster DEX via API — computes the delta
+3
+Executes market orders to reconcile desired vs actual (open, close, increase, reduce)
+4
+Places exchange-side stop-loss and tiered take-profits — fires automatically
+5
+Tracks real commissions via trade history API — accumulates in sidecar file
+6
+Writes EXECUTION_REALITY.md — actual wallet equity, commissions, and discrepancy
+TRADE_STATE.md
+EXECUTION_REALITY.md
+execution-state.json
+bridge-config.json
+Continuous reconciliation loop
+SETUP GUIDE — Your steps
+Collapse
+SETUP GUIDE — Execution Bridge (Real Money)
+------------------------------------------------------------
+
+WARNING: This connects your bot to real money on
+Aster DEX. Make sure your bot is profitable on paper
+first.
+
+STEP 1: GET YOUR ASTER DEX API KEYS
+  Go to app.aster.fi
+  Click Settings > API Keys > Create New Key
+  Enable trading permissions.
+  Copy and save your API Key and API Secret — you
+  will need both for the config file.
+
+STEP 2: DOWNLOAD THE BRIDGE SCRIPT
+  Scroll down to "Plug & Play Downloads" on this page.
+  Click "Execution Bridge Script" to download
+  aster-execution-bridge.py.
+
+STEP 3: DOWNLOAD AND FILL IN THE CONFIG
+  Also download "Bridge Config Template"
+  (bridge-config-template.json).
+
+  Open it in any text editor and fill in:
+
+  YOUR_BOT_NAME         Your agent folder name
+                        (e.g. "surgeon")
+
+  YOUR_WALLET_ADDRESS   Your Aster DEX wallet address
+
+  YOUR_ASTER_API_KEY    The API key from Step 1
+
+  YOUR_ASTER_API_SECRET The API secret from Step 1
+
+  state_file path       Full path to your bot's
+                        TRADE_STATE.md, e.g.
+                        /Users/you/.openclaw/workspace/
+                        agents/surgeon/TRADE_STATE.md
+
+  starting_capital      How much you deposited in USD
+                        (e.g. 500)
+
+  Save the file as bridge-config.json.
+
+STEP 4: TEST WITH DRY RUN (no real trades)
+  Run this command — it simulates everything without
+  actually executing trades:
+
+  python3 aster-execution-bridge.py \
+    --config bridge-config.json \
+    --dry-run --verbose
+
+  Check the output. It should show:
+  - Reading TRADE_STATE.md successfully
+  - Calculating position deltas
+  - What trades it WOULD make (but doesn't)
+
+STEP 5: GO LIVE
+  Once dry run looks good, run for real:
+
+  python3 aster-execution-bridge.py \
+    --config bridge-config.json --interval 30
+
+  To keep it running 24/7:
+
+  nohup python3 aster-execution-bridge.py \
+    --config bridge-config.json \
+    --interval 30 > bridge.log 2>&1 &
+
+STEP 6: UPDATE YOUR BOT'S SOUL (important!)
+  Expand the "Telegram Prompt" box below and copy it.
+  Paste it to your bot in Telegram.
+  This tells the bot to read EXECUTION_REALITY.md
+  and trust the real wallet balance over its own math.
+
+------------------------------------------------------------
+SAFETY FEATURES BUILT IN:
+- max_notional: caps the largest position ($15k default)
+- Dry run mode: test without real trades
+- Profit protection: at equity > $850, caps leverage
+- Drawdown defense: at equity < $250, reduces leverage
+- Telegram alerts: every trade action gets notified
+TELEGRAM PROMPT — Copy & paste to your bot
+Collapse
+Copy
+Add this to your trading bot's SOUL. In the ON EVERY SPAWN section, right after "Read TRADE_STATE.md", add this line:
+
+1b. If EXECUTION_REALITY.md exists, read it. Use Aster Equity as your real balance.
+
+This tells you to trust real wallet data over your own calculations. The execution bridge writes EXECUTION_REALITY.md every 30 seconds with:
+- Your actual Aster DEX wallet equity
+- Real commissions paid
+- Any discrepancy between your claimed balance and reality
+
+From now on, whenever you see EXECUTION_REALITY.md, use the Aster Equity number as your true balance for all sizing and P&L decisions.
+Equity + commissions → Auditor reads reality
+Step 4 — Verificationevery 30 min
+🔍
+The Auditor
+Independent checker — read-only, never modifies bot files
+1
+Reads TRADE_STATE.md — what the Surgeon claims its balance is
+2
+Reads EXECUTION_REALITY.md — what the wallet actually holds on Aster
+3
+Calculates the gap between claimed and actual performance
+4
+Checks rule compliance: leverage, stop discipline, position sizing, fee tracking
+5
+Generates audit report with leaderboard, commission check, and violation list
+TRADE_STATE.md
+EXECUTION_REALITY.md
+TRADE_LOG.md
+SETUP GUIDE — Your steps
+Collapse
+SETUP GUIDE — The Auditor (Performance Monitor)
+------------------------------------------------------------
+
+STEP 1: KNOW YOUR BOT'S FOLDER NAME
+  The auditor reads your trading bot's files to
+  generate reports. You need the exact folder name
+  of the bot you want to monitor.
+
+  Default path:
+  ~/.openclaw/workspace/agents/YOUR_BOT_NAME/
+
+  Example: if your bot is called "surgeon", the
+  folder is "surgeon".
+
+STEP 2: PASTE THE PROMPT TO YOUR BOT
+  Expand the "Telegram Prompt" box below.
+  Click "Copy" to copy the full prompt.
+
+  IMPORTANT: Before you paste, find and replace
+  these two placeholders in the copied text:
+
+  YOUR_BOT_NAME   -> your actual bot name
+                     (e.g. "surgeon")
+
+  your-bot-folder -> your actual bot folder
+                     (e.g. "surgeon")
+
+  Open your Telegram chat with your OpenClaw bot.
+  Paste and send it.
+
+  The bot will:
+  - Create the auditor agent
+  - Write the monitoring SOUL
+  - Set up a 30-minute cron
+
+STEP 3: VERIFY
+  Wait 30 minutes for the first audit cycle.
+  You should receive a Telegram message with an
+  audit report showing:
+  - Balance and P&L
+  - Win/loss ratio
+  - Rule compliance check
+  - For real-money bots: claimed vs actual equity
+
+------------------------------------------------------------
+TIP: To monitor multiple bots, duplicate the agent
+entry in the SOUL with each bot's workspace path.
+TELEGRAM PROMPT — Copy & paste to your bot
+Collapse
+Copy
+Set up an auditor agent that monitors my trading bot and sends Telegram reports every 30 minutes.
+
+Create a new agent called "auditor" with this SOUL:
+
+# AUDITOR
+
+## Identity
+You are THE AUDITOR. Your job is to review trading performance, check for rule violations, verify P&L accuracy against real execution data, and deliver a concise audit report via Telegram.
+
+You do NOT trade. You observe, analyze, and report.
+
+## Agent You Monitor
+- **YOUR_BOT_NAME** (your-bot-folder)
+  - Workspace: ../your-bot-folder/
+  - Files: TRADE_STATE.md, TRADE_LOG.md, SOUL.md, EXECUTION_REALITY.md
+
+## Audit Process (Every Spawn)
+
+### Step 1: Read State Files
+Read TRADE_STATE.md from the trading agent.
+If EXECUTION_REALITY.md exists: read it too (contains actual Aster equity and commissions).
+
+### Step 2: Extract Metrics
+- Current balance and P&L (realized + unrealized)
+- Number of trades taken
+- Win/loss ratio from closed trades
+- Largest single loss
+- Current deployed margin %
+
+For real-money (EXECUTION_REALITY.md exists):
+- Use "Aster Equity" as the ACTUAL balance
+- Compare against bot's claimed balance
+- Calculate gap: Bot Claimed - Aster Actual
+- Note total commissions paid
+
+For paper (no EXECUTION_REALITY.md):
+- Check if bot is tracking fees
+- Flag if fee tracking is missing
+
+### Step 3: Check Rule Violations
+- Leverage within limits
+- Stop loss discipline (are stops being honored?)
+- Position sizing within limits
+- Fee tracking present
+
+### Step 4: Generate Report
+
+AUDIT REPORT — [timestamp]
+
+LEADERBOARD:
+1. [Bot] — $X,XXX actual (+X.XX%) | claims $X,XXX | gap: $XX
+
+COMMISSION CHECK:
+- [Bot]: $XX paid, bot tracking: $XX -> OK/ALERT
+
+VIOLATIONS: [None / List]
+
+### Step 5: Deliver
+Send the report via Telegram. Keep it under 600 characters.
+
+## Rules
+- NEVER modify any agent files. Read only.
+- NEVER give trading advice.
+- Report factually.
+- Always prefer EXECUTION_REALITY.md over bot-claimed data. Aster is truth.
+
+---
+
+Then set up a cron to run every 30 minutes:
+
+openclaw cron add --name auditor --cron "*/30 * * * *" --agent auditor --prompt "Run your audit cycle. Read all bot state files, check for violations, and send the Telegram report."
+Auditor outputs two paths
+DURING CHALLENGE
+AFTER CHALLENGE
+Step 5a — Live Updates
+📲
+Telegram Delivery
+Real-time trade alerts + periodic audit reports
+⚡
+Bridge sends instant trade notifications — opens, closes, stop hits, TP fills
+📊
+Auditor sends 30-min audit summary — leaderboard and rule compliance
+🚨
+Alerts on equity protection triggers and rule violations
+Step 5b — Post-Mortem
+🧠
+End-of-Challenge Diagnosis
+Full analysis of every trade taken during the challenge
+1
+Reads the complete TRADE_LOG.md — every entry, every decision
+2
+Analyses win/loss patterns, signal accuracy, sizing effectiveness
+3
+Compares estimated fees vs real commissions across all trades
+4
+Produces a refined strategy brief for the next challenge round
+TRADE_LOG.md
+EXECUTION_REALITY.md
+LEARNINGS.md
+Plug & Play Downloads
+Everything you need to set up your own Surgeon trading system on OpenClaw.
+
+📡
+Multi-Exchange Scanner
+Python script that pulls prices, funding rates & volumes from 12 exchanges (Aster, Hyperliquid, Binance, Bybit, OKX, dYdX, Drift + more). No API keys. Stdlib only. This is Step 1 — the data feed.
+script
+📊
+Sample MARKET_STATE.json
+Example output from the scanner — cross-exchange spreads, funding divergences, best opportunities array. This is what the Surgeon reads every spawn.
+sample
+🔪
+Surgeon SOUL Template
+Complete strategy file with configurable placeholders for thresholds, leverage, sizing, and exits.
+template
+⚙️
+Bridge Config Template
+JSON config for the execution bridge. Fill in your Aster API key, secret, and wallet address.
+fill in
+🌉
+Execution Bridge Script
+Python daemon that reads TRADE_STATE.md and executes real trades on Aster DEX. Stdlib only, no pip install.
+python
+🔍
+Auditor SOUL Template
+Read-only monitoring agent that compares bot claims vs actual wallet equity every 30 minutes.
+template
+📄
+Sample TRADE_STATE.md
+Example of what the Surgeon writes each spawn. Shows the format the bridge expects to parse.
+sample
+📋
+Sample TRADE_LOG.md
+Example trade log entries with Gross P&L, fee estimates, and Net P&L format.
+sample
+Note: Replace all placeholder values (YOUR_API_KEY, YOUR_WALLET, {{TEMPLATE_VARS}}) with your own credentials and preferred settings before running.
+
+
+#!/usr/bin/env python3
+"""
+Multi-Exchange Price Scanner for 5LLM Trading Challenge
+=========================================================
+
+Pulls live prices, funding rates, and volumes from 13 exchanges:
+
+  DEX (perp futures):
+    - Aster DEX
+    - Hyperliquid
+    - dYdX v4
+    - Drift Protocol
+    - Lighter (ZK-rollup CLOB, zero fees)
+
+  CEX (perp futures):
+    - Binance Futures
+    - Bybit
+    - OKX
+    - MEXC
+    - Gate.io
+    - KuCoin Futures
+
+  CEX (spot):
+    - Coinbase
+    - Kraken
+
+Outputs MARKET_DATA.json for trading bots to consume.
+
+No API keys required — all endpoints are public.
+Uses ONLY Python stdlib (urllib, json, concurrent.futures).
+
+Usage:
+    python3 multi-exchange-scanner.py
+    python3 multi-exchange-scanner.py --output /path/to/MARKET_DATA.json
+"""
+
+import json
+import os
+import ssl
+import sys
+import time
+import argparse
+import urllib.request
+import urllib.parse
+import urllib.error
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+REQUEST_TIMEOUT = 12  # seconds per request
+MAX_WORKERS = 13      # parallel threads for fetching
+
+# Assets tradeable on Aster DEX that we want to track
+# Maps: canonical name -> symbol used on Aster/Binance (USDT-quoted perps)
+TRACKED_ASSETS = {
+    "BTC":   "BTCUSDT",
+    "ETH":   "ETHUSDT",
+    "SOL":   "SOLUSDT",
+    "ADA":   "ADAUSDT",
+    "AVAX":  "AVAXUSDT",
+    "XRP":   "XRPUSDT",
+    "DOGE":  "DOGEUSDT",
+    "LINK":  "LINKUSDT",
+    "ARB":   "ARBUSDT",
+    "OP":    "OPUSDT",
+    "SUI":   "SUIUSDT",
+    "APT":   "APTUSDT",
+    "INJ":   "INJUSDT",
+    "TIA":   "TIAUSDT",
+    "SEI":   "SEIUSDT",
+    "WIF":   "WIFUSDT",
+    "JUP":   "JUPUSDT",
+    "POL":   "POLUSDT",    # formerly MATIC
+    "NEAR":  "NEARUSDT",
+    "FIL":   "FILUSDT",
+}
+
+# Coinbase uses BASE-USD format for spot
+COINBASE_SYMBOLS = {
+    "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD", "ADA": "ADA-USD",
+    "AVAX": "AVAX-USD", "XRP": "XRP-USD", "DOGE": "DOGE-USD", "LINK": "LINK-USD",
+    "ARB": "ARB-USD", "OP": "OP-USD", "SUI": "SUI-USD", "APT": "APT-USD",
+    "INJ": "INJ-USD", "TIA": "TIA-USD", "SEI": "SEI-USD", "WIF": "WIF-USD",
+    "JUP": "JUP-USD", "POL": "POL-USD", "NEAR": "NEAR-USD", "FIL": "FIL-USD",
+}
+
+# Kraken uses its own pair naming.
+KRAKEN_SYMBOLS = {
+    "BTC":  ("XBTUSD",   ["XXBTZUSD", "XBTUSD"]),
+    "ETH":  ("ETHUSD",   ["XETHZUSD", "ETHUSD"]),
+    "SOL":  ("SOLUSD",   ["SOLUSD"]),
+    "ADA":  ("ADAUSD",   ["ADAUSD"]),
+    "AVAX": ("AVAXUSD",  ["AVAXUSD"]),
+    "XRP":  ("XRPUSD",   ["XXRPZUSD", "XRPUSD"]),
+    "DOGE": ("DOGEUSD",  ["XDGUSD", "DOGEUSD"]),
+    "LINK": ("LINKUSD",  ["LINKUSD"]),
+    "ARB":  ("ARBUSD",   ["ARBUSD"]),
+    "OP":   ("OPUSD",    ["OPUSD"]),
+    "SUI":  ("SUIUSD",   ["SUIUSD"]),
+    "APT":  ("APTUSD",   ["APTUSD"]),
+    "INJ":  ("INJUSD",   ["INJUSD"]),
+    "TIA":  ("TIAUSD",   ["TIAUSD"]),
+    "SEI":  ("SEIUSD",   ["SEIUSD"]),
+    "WIF":  ("WIFUSD",   ["WIFUSD"]),
+    "JUP":  ("JUPUSD",   ["JUPUSD"]),
+    "POL":  ("POLUSD",   ["POLUSD"]),
+    "NEAR": ("NEARUSD",  ["NEARUSD"]),
+    "FIL":  ("FILUSD",   ["FILUSD"]),
+}
+
+# Hyperliquid uses bare asset names
+HYPERLIQUID_NAME_MAP = {
+    "POL": ["POL", "MATIC"],
+}
+
+# ---------------------------------------------------------------------------
+# All exchange names (for iteration)
+# ---------------------------------------------------------------------------
+
+ALL_EXCHANGES = [
+    "aster", "binance", "coinbase", "kraken", "hyperliquid",
+    "dydx", "drift", "bybit", "okx", "mexc", "gateio", "kucoin", "lighter",
+]
+
+PERP_EXCHANGES = [
+    "aster", "binance", "hyperliquid",
+    "dydx", "drift", "bybit", "okx", "mexc", "gateio", "kucoin", "lighter",
+]
+
+# ---------------------------------------------------------------------------
+# API Endpoints
+# ---------------------------------------------------------------------------
+
+ASTER_PRICE_URL     = "https://fapi.asterdex.com/fapi/v1/ticker/price"
+ASTER_FUNDING_URL   = "https://fapi.asterdex.com/fapi/v1/premiumIndex"
+ASTER_24HR_URL      = "https://fapi.asterdex.com/fapi/v1/ticker/24hr"
+
+BINANCE_PRICE_URL   = "https://fapi.binance.com/fapi/v1/ticker/price"
+BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
+BINANCE_24HR_URL    = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+
+COINBASE_TICKER_URL = "https://api.exchange.coinbase.com/products/{product_id}/ticker"
+
+KRAKEN_TICKER_URL   = "https://api.kraken.com/0/public/Ticker"
+
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+
+DYDX_MARKETS_URL    = "https://indexer.dydx.trade/v4/perpetualMarkets"
+
+DRIFT_PRICES_URL    = "https://price-api-mainnet.drift.trade/v2/prices"
+
+BYBIT_TICKERS_URL   = "https://api.bybit.com/v5/market/tickers?category=linear"
+
+OKX_TICKERS_URL     = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
+
+MEXC_TICKERS_URL    = "https://contract.mexc.com/api/v1/contract/ticker"
+
+GATEIO_TICKERS_URL  = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
+
+KUCOIN_CONTRACTS_URL = "https://api-futures.kucoin.com/api/v1/allTickers"
+
+LIGHTER_ORDERBOOK_URL = "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails?filter=perp"
+LIGHTER_FUNDINGS_URL  = "https://mainnet.zklighter.elliot.ai/api/v1/fundings"
+
+# Lighter uses bare asset names (e.g. "BTC", "ETH"); map to USDT symbols
+# market_id needed for per-asset funding rate queries
+LIGHTER_MARKET_IDS = {
+    "ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "WIF": 5, "XRP": 7, "LINK": 8,
+    "AVAX": 9, "NEAR": 10, "DOT": 11, "TON": 12, "TAO": 13, "POL": 14,
+    "TRUMP": 15, "SUI": 16, "JUP": 26, "APT": 31, "SEI": 32, "ADA": 39,
+    "ARB": 50, "OP": 55, "TIA": 67, "FIL": 103,
+}
+
+
+# ---------------------------------------------------------------------------
+# SSL context (some exchanges need it)
+# ---------------------------------------------------------------------------
+
+_ssl_ctx = ssl.create_default_context()
+
+
+# ---------------------------------------------------------------------------
+# Generic HTTP fetch using urllib (stdlib only)
+# ---------------------------------------------------------------------------
+
+def fetch_json(url, params=None, method="GET", json_body=None, label=""):
+    """Generic fetch with timeout and error handling. Uses urllib only."""
+    try:
+        if method == "GET" and params:
+            query = urllib.parse.urlencode(params)
+            full_url = f"{url}?{query}" if "?" not in url else f"{url}&{query}"
+        else:
+            full_url = url
+
+        if method == "POST" and json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            req = urllib.request.Request(
+                full_url, data=data, method="POST",
+                headers={"Content-Type": "application/json"}
+            )
+        else:
+            req = urllib.request.Request(full_url, method=method)
+
+        req.add_header("User-Agent", "5LLM-Scanner/2.0")
+        req.add_header("Accept", "application/json")
+
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=_ssl_ctx) as resp:
+            raw = resp.read()
+            return json.loads(raw)
+
+    except urllib.error.HTTPError as e:
+        print(f"  [HTTP {e.code}] {label or url}")
+        return None
+    except urllib.error.URLError as e:
+        reason = str(e.reason) if hasattr(e, 'reason') else str(e)
+        if "timed out" in reason.lower() or "timeout" in reason.lower():
+            print(f"  [TIMEOUT] {label or url}")
+        else:
+            print(f"  [CONN_ERR] {label or url}: {reason}")
+        return None
+    except Exception as e:
+        print(f"  [ERROR] {label or url}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def safe_float(val):
+    """Convert to float safely, returning None on failure."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return f if f == f else None  # NaN check
+    except (ValueError, TypeError):
+        return None
+
+
+def calc_spread_pct(price_a, price_b):
+    """Calculate spread as percentage: (a - b) / b * 100."""
+    if price_a is None or price_b is None or price_b == 0:
+        return None
+    return round(((price_a - price_b) / price_b) * 100, 5)
+
+
+# ---------------------------------------------------------------------------
+# Symbol mapping helpers for new exchanges
+# ---------------------------------------------------------------------------
+
+def canonical_from_usdt(sym):
+    """BTCUSDT -> BTC"""
+    if sym.endswith("USDT"):
+        return sym[:-4]
+    return None
+
+
+def usdt_sym_for(canonical):
+    """BTC -> BTCUSDT"""
+    return TRACKED_ASSETS.get(canonical)
+
+
+# Reverse lookup: BTCUSDT -> BTC
+_USDT_TO_CANONICAL = {v: k for k, v in TRACKED_ASSETS.items()}
+
+
+# ---------------------------------------------------------------------------
+# Fetchers — Original 5 exchanges (converted from requests to urllib)
+# ---------------------------------------------------------------------------
+
+def fetch_aster_data():
+    """Fetch Aster DEX prices, funding rates, and 24h data in batch."""
+    prices_raw = fetch_json(ASTER_PRICE_URL, label="Aster prices")
+    funding_raw = fetch_json(ASTER_FUNDING_URL, label="Aster funding")
+    ticker_24h_raw = fetch_json(ASTER_24HR_URL, label="Aster 24hr")
+
+    result = {}
+    wanted = set(TRACKED_ASSETS.values())
+
+    if prices_raw:
+        for item in prices_raw:
+            sym = item.get("symbol", "")
+            if sym in wanted:
+                result.setdefault(sym, {})["price"] = safe_float(item.get("price"))
+
+    if funding_raw:
+        for item in funding_raw:
+            sym = item.get("symbol", "")
+            if sym in wanted:
+                result.setdefault(sym, {})["funding"] = safe_float(item.get("lastFundingRate"))
+                result[sym]["mark_price"] = safe_float(item.get("markPrice"))
+                result[sym]["index_price"] = safe_float(item.get("indexPrice"))
+
+    if ticker_24h_raw:
+        items = ticker_24h_raw if isinstance(ticker_24h_raw, list) else [ticker_24h_raw]
+        for item in items:
+            sym = item.get("symbol", "")
+            if sym in wanted:
+                result.setdefault(sym, {})["volume_24h"] = safe_float(item.get("quoteVolume"))
+                result[sym]["price_change_pct_24h"] = safe_float(item.get("priceChangePercent"))
+
+    return result
+
+
+def fetch_binance_data():
+    """Fetch Binance Futures prices, funding rates, and 24h data in batch."""
+    prices_raw = fetch_json(BINANCE_PRICE_URL, label="Binance prices")
+    funding_raw = fetch_json(BINANCE_FUNDING_URL, label="Binance funding")
+    ticker_24h_raw = fetch_json(BINANCE_24HR_URL, label="Binance 24hr")
+
+    result = {}
+    wanted = set(TRACKED_ASSETS.values())
+    wanted.add("MATICUSDT")
+
+    if prices_raw:
+        for item in prices_raw:
+            sym = item.get("symbol", "")
+            if sym in wanted:
+                key = "POLUSDT" if sym == "MATICUSDT" else sym
+                result.setdefault(key, {})["price"] = safe_float(item.get("price"))
+
+    if funding_raw:
+        for item in funding_raw:
+            sym = item.get("symbol", "")
+            if sym in wanted:
+                key = "POLUSDT" if sym == "MATICUSDT" else sym
+                result.setdefault(key, {})["funding"] = safe_float(item.get("lastFundingRate"))
+                result[key]["mark_price"] = safe_float(item.get("markPrice"))
+
+    if ticker_24h_raw:
+        items = ticker_24h_raw if isinstance(ticker_24h_raw, list) else [ticker_24h_raw]
+        for item in items:
+            sym = item.get("symbol", "")
+            if sym in wanted:
+                key = "POLUSDT" if sym == "MATICUSDT" else sym
+                result.setdefault(key, {})["volume_24h"] = safe_float(item.get("quoteVolume"))
+                result[key]["price_change_pct_24h"] = safe_float(item.get("priceChangePercent"))
+
+    return result
+
+
+def fetch_coinbase_data():
+    """Fetch Coinbase spot prices for tracked assets (per-product, parallelized)."""
+    result = {}
+
+    def fetch_one(canonical, product_id):
+        data = fetch_json(
+            COINBASE_TICKER_URL.format(product_id=product_id),
+            label=f"Coinbase {product_id}"
+        )
+        if data and "price" in data:
+            return canonical, {
+                "price": safe_float(data["price"]),
+                "volume_24h": safe_float(data.get("volume")),
+                "bid": safe_float(data.get("bid")),
+                "ask": safe_float(data.get("ask")),
+            }
+        return canonical, None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(fetch_one, canon, pid): canon
+            for canon, pid in COINBASE_SYMBOLS.items()
+        }
+        for future in as_completed(futures):
+            canon, data = future.result()
+            if data:
+                usdt_sym = TRACKED_ASSETS[canon]
+                result[usdt_sym] = data
+
+    return result
+
+
+def fetch_kraken_data():
+    """Fetch Kraken spot prices in a single batch request."""
+    query_pairs = ",".join(info[0] for info in KRAKEN_SYMBOLS.values())
+    raw = fetch_json(KRAKEN_TICKER_URL, params={"pair": query_pairs}, label="Kraken batch")
+
+    result = {}
+    if not raw or "result" not in raw:
+        return result
+
+    kraken_result = raw["result"]
+
+    for canonical, (query_pair, response_keys) in KRAKEN_SYMBOLS.items():
+        ticker = None
+        for key in response_keys:
+            if key in kraken_result:
+                ticker = kraken_result[key]
+                break
+
+        if ticker:
+            usdt_sym = TRACKED_ASSETS[canonical]
+            last_price = safe_float(ticker.get("c", [None])[0])
+            volume_24h = safe_float(ticker.get("v", [None])[0])
+            open_price = safe_float(ticker.get("o"))
+            pct_change = None
+            if last_price and open_price and open_price > 0:
+                pct_change = round(((last_price - open_price) / open_price) * 100, 4)
+
+            result[usdt_sym] = {
+                "price": last_price,
+                "volume_24h": volume_24h,
+                "price_change_pct_24h": pct_change,
+                "bid": safe_float(ticker.get("b", [None])[0]),
+                "ask": safe_float(ticker.get("a", [None])[0]),
+            }
+
+    return result
+
+
+def fetch_hyperliquid_data():
+    """Fetch Hyperliquid perp data via metaAndAssetCtxs (POST)."""
+    raw = fetch_json(
+        HYPERLIQUID_INFO_URL,
+        method="POST",
+        json_body={"type": "metaAndAssetCtxs"},
+        label="Hyperliquid metaAndAssetCtxs"
+    )
+
+    result = {}
+    if not raw or not isinstance(raw, list) or len(raw) < 2:
+        return result
+
+    meta = raw[0]
+    asset_ctxs = raw[1]
+    universe = meta.get("universe", [])
+
+    name_to_idx = {}
+    for i, asset_def in enumerate(universe):
+        name = asset_def.get("name", "")
+        name_to_idx[name] = i
+
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        hl_names = HYPERLIQUID_NAME_MAP.get(canonical, [canonical])
+        ctx = None
+        for hl_name in hl_names:
+            idx = name_to_idx.get(hl_name)
+            if idx is not None and idx < len(asset_ctxs):
+                ctx = asset_ctxs[idx]
+                break
+
+        if ctx:
+            mid_px = safe_float(ctx.get("midPx"))
+            mark_px = safe_float(ctx.get("markPx"))
+            prev_day_px = safe_float(ctx.get("prevDayPx"))
+            pct_change = None
+            price = mid_px or mark_px
+            if price and prev_day_px and prev_day_px > 0:
+                pct_change = round(((price - prev_day_px) / prev_day_px) * 100, 4)
+
+            result[usdt_sym] = {
+                "price": price,
+                "mark_price": mark_px,
+                "funding": safe_float(ctx.get("funding")),
+                "volume_24h": safe_float(ctx.get("dayNtlVlm")),
+                "open_interest": safe_float(ctx.get("openInterest")),
+                "price_change_pct_24h": pct_change,
+            }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Fetchers — NEW exchanges
+# ---------------------------------------------------------------------------
+
+def fetch_dydx_data():
+    """Fetch dYdX v4 perpetual market data.
+    GET https://indexer.dydx.trade/v4/perpetualMarkets
+    Symbols: BTC-USD, ETH-USD, etc.
+    """
+    raw = fetch_json(DYDX_MARKETS_URL, label="dYdX v4 markets")
+    result = {}
+
+    if not raw or "markets" not in raw:
+        return result
+
+    markets = raw["markets"]
+
+    # dYdX symbol mapping: BTC -> BTC-USD
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        dydx_sym = f"{canonical}-USD"
+        market = markets.get(dydx_sym)
+        if market:
+            price = safe_float(market.get("oraclePrice"))
+            result[usdt_sym] = {
+                "price": price,
+                "funding": safe_float(market.get("nextFundingRate")),
+                "volume_24h": safe_float(market.get("volume24H")),
+                "open_interest": safe_float(market.get("openInterest")),
+            }
+
+    return result
+
+
+def fetch_drift_data():
+    """Fetch Drift Protocol price data.
+    GET https://price-api-mainnet.drift.trade/v2/prices
+    Returns a dict of market names to price info.
+    """
+    raw = fetch_json(DRIFT_PRICES_URL, label="Drift prices")
+    result = {}
+
+    if not raw:
+        return result
+
+    # Drift may return various formats. Try to handle dict keyed by symbol.
+    # Common keys: "BTC", "ETH", "SOL" or "BTC-PERP", "ETH-PERP"
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        # Try different key formats
+        for key_format in [canonical, f"{canonical}-PERP", f"{canonical}-USD"]:
+            if key_format in raw:
+                entry = raw[key_format]
+                if isinstance(entry, dict):
+                    price = safe_float(entry.get("price") or entry.get("oraclePrice"))
+                    result[usdt_sym] = {
+                        "price": price,
+                        "funding": safe_float(entry.get("fundingRate")),
+                    }
+                elif isinstance(entry, (int, float, str)):
+                    result[usdt_sym] = {
+                        "price": safe_float(entry),
+                    }
+                break
+
+    return result
+
+
+def fetch_bybit_data():
+    """Fetch Bybit linear perp tickers.
+    GET https://api.bybit.com/v5/market/tickers?category=linear
+    Symbol: BTCUSDT, ETHUSDT
+    """
+    raw = fetch_json(BYBIT_TICKERS_URL, label="Bybit linear tickers")
+    result = {}
+
+    if not raw or "result" not in raw:
+        return result
+
+    tickers = raw["result"].get("list", [])
+    wanted = set(TRACKED_ASSETS.values())
+    wanted.add("MATICUSDT")
+
+    for item in tickers:
+        sym = item.get("symbol", "")
+        if sym in wanted:
+            key = "POLUSDT" if sym == "MATICUSDT" else sym
+            price = safe_float(item.get("lastPrice"))
+            funding = safe_float(item.get("fundingRate"))
+            volume = safe_float(item.get("volume24h"))
+            # Bybit volume24h is in base currency; turnover24h is in quote
+            turnover = safe_float(item.get("turnover24h"))
+            pct_change = safe_float(item.get("price24hPcnt"))
+            if pct_change is not None:
+                pct_change = round(pct_change * 100, 4)  # convert from decimal to %
+
+            result.setdefault(key, {})
+            result[key]["price"] = price
+            result[key]["funding"] = funding
+            result[key]["volume_24h"] = turnover  # quote volume
+            result[key]["price_change_pct_24h"] = pct_change
+            result[key]["open_interest"] = safe_float(item.get("openInterestValue"))
+
+    return result
+
+
+def fetch_okx_data():
+    """Fetch OKX swap tickers.
+    GET https://www.okx.com/api/v5/market/tickers?instType=SWAP
+    Symbol: BTC-USDT-SWAP, ETH-USDT-SWAP
+    """
+    raw = fetch_json(OKX_TICKERS_URL, label="OKX swap tickers")
+    result = {}
+
+    if not raw or "data" not in raw:
+        return result
+
+    # Build mapping: BTC-USDT-SWAP -> BTCUSDT
+    okx_map = {}
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        okx_map[f"{canonical}-USDT-SWAP"] = usdt_sym
+    # Also handle MATIC for POL
+    okx_map["MATIC-USDT-SWAP"] = "POLUSDT"
+
+    for item in raw["data"]:
+        inst_id = item.get("instId", "")
+        usdt_sym = okx_map.get(inst_id)
+        if usdt_sym:
+            price = safe_float(item.get("last"))
+            # OKX fundingRate is returned from a separate endpoint,
+            # but the tickers endpoint may include it
+            funding = safe_float(item.get("fundingRate"))
+            # volCcy24h is in base, vol24h is in contracts
+            vol_ccy = safe_float(item.get("volCcy24h"))
+            vol_quote = None
+            if vol_ccy and price:
+                vol_quote = round(vol_ccy * price, 2)
+
+            result[usdt_sym] = {
+                "price": price,
+                "funding": funding,
+                "volume_24h": vol_quote,
+                "price_change_pct_24h": None,  # OKX doesn't include this directly here
+            }
+
+    return result
+
+
+def fetch_mexc_data():
+    """Fetch MEXC contract tickers.
+    GET https://contract.mexc.com/api/v1/contract/ticker
+    Symbol: BTC_USDT, ETH_USDT
+    """
+    raw = fetch_json(MEXC_TICKERS_URL, label="MEXC contract tickers")
+    result = {}
+
+    if not raw or "data" not in raw:
+        return result
+
+    # Build mapping: BTC_USDT -> BTCUSDT
+    mexc_map = {}
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        mexc_map[f"{canonical}_USDT"] = usdt_sym
+    mexc_map["MATIC_USDT"] = "POLUSDT"
+
+    tickers = raw["data"]
+    if not isinstance(tickers, list):
+        return result
+
+    for item in tickers:
+        sym = item.get("symbol", "")
+        usdt_sym = mexc_map.get(sym)
+        if usdt_sym:
+            result[usdt_sym] = {
+                "price": safe_float(item.get("lastPrice")),
+                "funding": safe_float(item.get("fundingRate")),
+                "volume_24h": safe_float(item.get("volume24")),
+                "price_change_pct_24h": safe_float(item.get("riseFallRate")),
+            }
+
+    return result
+
+
+def fetch_gateio_data():
+    """Fetch Gate.io USDT futures tickers.
+    GET https://api.gateio.ws/api/v4/futures/usdt/tickers
+    Symbol: BTC_USDT, ETH_USDT
+    """
+    raw = fetch_json(GATEIO_TICKERS_URL, label="Gate.io futures tickers")
+    result = {}
+
+    if not raw or not isinstance(raw, list):
+        return result
+
+    # Build mapping: BTC_USDT -> BTCUSDT
+    gateio_map = {}
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        gateio_map[f"{canonical}_USDT"] = usdt_sym
+    gateio_map["MATIC_USDT"] = "POLUSDT"
+
+    for item in raw:
+        contract = item.get("contract", "")
+        usdt_sym = gateio_map.get(contract)
+        if usdt_sym:
+            price = safe_float(item.get("last"))
+            funding = safe_float(item.get("funding_rate"))
+            vol_quote = safe_float(item.get("volume_24h_quote"))
+
+            result[usdt_sym] = {
+                "price": price,
+                "funding": funding,
+                "volume_24h": vol_quote,
+                "price_change_pct_24h": safe_float(item.get("change_percentage")),
+            }
+
+    return result
+
+
+def fetch_kucoin_data():
+    """Fetch KuCoin Futures tickers.
+    GET https://api-futures.kucoin.com/api/v1/allTickers
+    Symbol: XBTUSDTM, ETHUSDTM
+    """
+    raw = fetch_json(KUCOIN_CONTRACTS_URL, label="KuCoin futures tickers")
+    result = {}
+
+    if not raw or "data" not in raw:
+        return result
+
+    tickers = raw["data"]
+    if not isinstance(tickers, list):
+        return result
+
+    # KuCoin uses XBTUSDTM for BTC, others are like ETHUSDTM
+    kucoin_map = {}
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        if canonical == "BTC":
+            kucoin_map["XBTUSDTM"] = usdt_sym
+        else:
+            kucoin_map[f"{canonical}USDTM"] = usdt_sym
+    kucoin_map["MATICUSDTM"] = "POLUSDT"
+
+    for item in tickers:
+        sym = item.get("symbol", "")
+        usdt_sym = kucoin_map.get(sym)
+        if usdt_sym:
+            result[usdt_sym] = {
+                "price": safe_float(item.get("price")),
+                "volume_24h": safe_float(item.get("volumeOf24h")),
+            }
+
+    return result
+
+
+def fetch_lighter_data():
+    """Fetch Lighter DEX (lighter.xyz) perp market data.
+    Zero-fee CLOB on ZK-rollup.  Two calls:
+      1. GET /api/v1/orderBookDetails?filter=perp — prices, volume, OI, leverage
+      2. GET /api/v1/fundings?market_id=X&resolution=1h — per-asset funding rate
+
+    Lighter symbols are bare names (BTC, ETH, SOL).
+    Funding rates are hourly; the endpoint requires resolution='1h'.
+    """
+    result = {}
+
+    # --- Step 1: prices / volume / OI from orderBookDetails ---
+    raw = fetch_json(LIGHTER_ORDERBOOK_URL, label="Lighter orderBookDetails")
+    if not raw or raw.get("code") != 200:
+        return result
+
+    markets = raw.get("order_book_details", [])
+    lighter_sym_map = {}  # symbol -> market entry
+    for m in markets:
+        sym = m.get("symbol", "")
+        usdt_sym = TRACKED_ASSETS.get(sym)
+        if usdt_sym:
+            min_imf = m.get("min_initial_margin_fraction", 0)
+            max_lev = round(10000 / min_imf, 1) if min_imf and min_imf > 0 else None
+            last_price = safe_float(m.get("last_trade_price"))
+            result[usdt_sym] = {
+                "price": last_price,
+                "mark_price": last_price,
+                "index_price": last_price,
+                "volume_24h": safe_float(m.get("daily_quote_token_volume")),
+                "open_interest": safe_float(m.get("open_interest")),
+                "max_leverage": max_lev,
+            }
+            lighter_sym_map[sym] = usdt_sym
+
+    # --- Step 2: funding rates (one call per asset) ---
+    now_ts = int(time.time())
+    start_ts = now_ts - 3600  # last hour
+    for canonical, market_id in LIGHTER_MARKET_IDS.items():
+        usdt_sym = TRACKED_ASSETS.get(canonical)
+        if not usdt_sym or usdt_sym not in result:
+            continue
+        try:
+            url = (f"{LIGHTER_FUNDINGS_URL}?market_id={market_id}"
+                   f"&resolution=1h&start_timestamp={start_ts}"
+                   f"&end_timestamp={now_ts}&count_back=1")
+            fdata = fetch_json(url, label=f"Lighter funding {canonical}")
+            if fdata and fdata.get("code") == 200:
+                fundings = fdata.get("fundings", [])
+                if fundings:
+                    latest = fundings[-1]
+                    rate = safe_float(latest.get("rate"))
+                    direction = latest.get("direction", "")
+                    # Lighter convention: positive rate = longs pay shorts.
+                    # If direction is "short", negate so convention matches
+                    # other exchanges (positive = longs pay).
+                    if rate is not None and direction == "short":
+                        rate = -rate
+                    # Lighter uses 1-hour funding periods; other exchanges
+                    # use 8-hour.  Divide by 8 to normalise for comparison.
+                    if rate is not None:
+                        rate = round(rate / 8, 8)
+                    result[usdt_sym]["funding"] = rate
+        except Exception:
+            pass  # funding is best-effort; price data already captured
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Opportunity finder
+# ---------------------------------------------------------------------------
+
+def find_best_opportunities(assets_data, top_n=10):
+    """Analyze all assets across all exchanges and return top N signals.
+
+    Signal types:
+      - funding_divergence: large difference in funding rates between exchanges
+      - cross_exchange_spread: large price gap between any two exchanges
+    """
+    opportunities = []
+
+    for usdt_sym, data in assets_data.items():
+        # Collect all prices and funding rates across exchanges
+        prices = {}
+        fundings = {}
+        for exch in ALL_EXCHANGES:
+            exch_data = data.get(exch, {})
+            p = exch_data.get("price")
+            if p is not None and p > 0:
+                prices[exch] = p
+            f = exch_data.get("funding")
+            if f is not None:
+                fundings[exch] = f
+
+        # --- Funding divergence: all pairs of perp exchanges ---
+        funding_exchanges = [e for e in PERP_EXCHANGES if e in fundings]
+        for i in range(len(funding_exchanges)):
+            for j in range(i + 1, len(funding_exchanges)):
+                e1, e2 = funding_exchanges[i], funding_exchanges[j]
+                divergence = fundings[e1] - fundings[e2]
+                if abs(divergence) > 0.00005:
+                    if divergence < 0:
+                        direction = f"LONG on {e1}, SHORT on {e2}"
+                    else:
+                        direction = f"SHORT on {e1}, LONG on {e2}"
+                    opportunities.append({
+                        "asset": usdt_sym,
+                        "type": "funding_divergence",
+                        "magnitude": round(abs(divergence), 8),
+                        "direction": direction,
+                        "detail": f"{e1} FR={fundings[e1]:.6f}, {e2} FR={fundings[e2]:.6f}",
+                    })
+
+        # --- Cross-exchange spread: all pairs ---
+        price_exchanges = list(prices.keys())
+        for i in range(len(price_exchanges)):
+            for j in range(i + 1, len(price_exchanges)):
+                e1, e2 = price_exchanges[i], price_exchanges[j]
+                spread = calc_spread_pct(prices[e1], prices[e2])
+                if spread is not None and abs(spread) > 0.08:  # > 8 bps
+                    if spread > 0:
+                        direction = f"BUY on {e2}, SELL on {e1}"
+                    else:
+                        direction = f"BUY on {e1}, SELL on {e2}"
+                    opportunities.append({
+                        "asset": usdt_sym,
+                        "type": "cross_exchange_spread",
+                        "magnitude": round(abs(spread), 5),
+                        "direction": direction,
+                        "detail": f"{e1}=${prices[e1]:.4f} vs {e2}=${prices[e2]:.4f} ({spread:+.4f}%)",
+                    })
+
+    # Sort by magnitude descending, return top N
+    opportunities.sort(key=lambda x: x["magnitude"], reverse=True)
+    return opportunities[:top_n]
+
+
+# ---------------------------------------------------------------------------
+# Main assembly
+# ---------------------------------------------------------------------------
+
+def build_market_data():
+    """Fetch from all exchanges in parallel and assemble the output structure."""
+    t_start = time.time()
+
+    print("=" * 70)
+    print("  Multi-Exchange Price Scanner v2.1 — 5LLM Challenge")
+    print("  13 Exchanges | 20 Assets | stdlib only (urllib)")
+    print("=" * 70)
+    print()
+
+    exchange_fetchers = {
+        "aster":       fetch_aster_data,
+        "binance":     fetch_binance_data,
+        "coinbase":    fetch_coinbase_data,
+        "kraken":      fetch_kraken_data,
+        "hyperliquid": fetch_hyperliquid_data,
+        "dydx":        fetch_dydx_data,
+        "drift":       fetch_drift_data,
+        "bybit":       fetch_bybit_data,
+        "okx":         fetch_okx_data,
+        "mexc":        fetch_mexc_data,
+        "gateio":      fetch_gateio_data,
+        "kucoin":      fetch_kucoin_data,
+        "lighter":     fetch_lighter_data,
+    }
+
+    for i, name in enumerate(exchange_fetchers, 1):
+        print(f"  [{i:>2}/{len(exchange_fetchers)}] Fetching {name}...")
+
+    print()
+
+    exchange_data = {}
+    exchange_errors = []
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_map = {
+            pool.submit(fn): name
+            for name, fn in exchange_fetchers.items()
+        }
+        for future in as_completed(future_map):
+            name = future_map[future]
+            try:
+                exchange_data[name] = future.result(timeout=30)
+            except Exception as e:
+                exchange_errors.append(f"{name}: {e}")
+                exchange_data[name] = {}
+
+    if exchange_errors:
+        print("  Warnings:")
+        for err in exchange_errors:
+            print(f"    - {err}")
+        print()
+
+    # Report fetch status
+    for exch in ALL_EXCHANGES:
+        data = exchange_data.get(exch, {})
+        count = len(data)
+        status = "OK" if count > 0 else "EMPTY"
+        print(f"  {exch:>14s}: {count:>2d} assets [{status}]")
+    print()
+
+    # ---------------------------------------------------------------------------
+    # Assemble per-asset data
+    # ---------------------------------------------------------------------------
+    assets_output = {}
+
+    for canonical, usdt_sym in TRACKED_ASSETS.items():
+        asset_entry = {}
+
+        # --- Populate each exchange ---
+        for exch in ALL_EXCHANGES:
+            exch_info = exchange_data.get(exch, {}).get(usdt_sym, {})
+
+            entry = {"price": exch_info.get("price")}
+
+            # Add funding rate for perp exchanges
+            if exch in PERP_EXCHANGES:
+                entry["funding"] = exch_info.get("funding")
+
+            # Add volume if available
+            if exch_info.get("volume_24h") is not None:
+                entry["volume_24h"] = exch_info.get("volume_24h")
+
+            # Add any extra fields present
+            for extra_key in ["mark_price", "index_price", "open_interest",
+                              "price_change_pct_24h", "bid", "ask"]:
+                if exch_info.get(extra_key) is not None:
+                    entry[extra_key] = exch_info[extra_key]
+
+            asset_entry[exch] = entry
+
+        # --- Calculate spreads (all pairwise between exchanges that have prices) ---
+        spreads = {}
+        priced_exchanges = []
+        for exch in ALL_EXCHANGES:
+            p = asset_entry[exch].get("price")
+            if p is not None and p > 0:
+                priced_exchanges.append((exch, p))
+
+        max_abs_spread = 0
+        max_spread_val = None
+        max_spread_pair = ""
+
+        # Compute aster_vs_X spreads for backwards compatibility + all pairwise max
+        aster_price = asset_entry.get("aster", {}).get("price")
+        for exch in ALL_EXCHANGES:
+            if exch == "aster":
+                continue
+            exch_price = asset_entry.get(exch, {}).get("price")
+            spread = calc_spread_pct(aster_price, exch_price)
+            spreads[f"aster_vs_{exch}"] = spread
+            if spread is not None and abs(spread) > max_abs_spread:
+                max_abs_spread = abs(spread)
+                max_spread_val = spread
+                max_spread_pair = f"aster_vs_{exch}"
+
+        # Also check all non-aster pairs for max spread
+        for i in range(len(priced_exchanges)):
+            for j in range(i + 1, len(priced_exchanges)):
+                e1, p1 = priced_exchanges[i]
+                e2, p2 = priced_exchanges[j]
+                spread = calc_spread_pct(p1, p2)
+                if spread is not None and abs(spread) > max_abs_spread:
+                    max_abs_spread = abs(spread)
+                    max_spread_val = spread
+                    max_spread_pair = f"{e1}_vs_{e2}"
+
+        spreads["max_spread"] = max_spread_val
+        spreads["max_spread_pair"] = max_spread_pair
+
+        # Funding divergences (all perp exchange pairs)
+        for i, e1 in enumerate(PERP_EXCHANGES):
+            f1 = asset_entry.get(e1, {}).get("funding")
+            if f1 is None:
+                continue
+            for e2 in PERP_EXCHANGES[i + 1:]:
+                f2 = asset_entry.get(e2, {}).get("funding")
+                if f2 is None:
+                    continue
+                spreads[f"funding_div_{e1}_{e2}"] = round(f1 - f2, 8)
+
+        asset_entry["spreads"] = spreads
+
+        # --- Volume ranking across exchanges ---
+        volumes = {}
+        for exch in ALL_EXCHANGES:
+            v = asset_entry[exch].get("volume_24h")
+            if v is not None and v > 0:
+                volumes[exch] = v
+        volume_ranking = sorted(volumes.items(), key=lambda x: x[1], reverse=True)
+        asset_entry["volume_ranking"] = [
+            {"exchange": exch, "volume_24h": vol} for exch, vol in volume_ranking
+        ]
+
+        assets_output[usdt_sym] = asset_entry
+
+    # --- Best opportunities ---
+    best_opps = find_best_opportunities(assets_output, top_n=10)
+
+    # --- Assemble final output ---
+    now = datetime.now(timezone.utc)
+    output = {
+        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scanner_version": "2.1.0",
+        "exchanges_queried": ALL_EXCHANGES,
+        "exchange_count": len(ALL_EXCHANGES),
+        "assets_tracked": len(TRACKED_ASSETS),
+        "fetch_time_seconds": round(time.time() - t_start, 2),
+        "errors": exchange_errors if exchange_errors else None,
+        "assets": assets_output,
+        "best_opportunities": best_opps,
+    }
+
+    # --- Print summary to stdout ---
+    print("-" * 70)
+    print(f"  Scan completed in {output['fetch_time_seconds']}s")
+    print(f"  Timestamp: {output['timestamp']}")
+    print(f"  Exchanges: {len(ALL_EXCHANGES)} queried")
+    print("-" * 70)
+    print()
+
+    # ---------------------------------------------------------------------------
+    # Price comparison table — show all 12 exchanges
+    # Split into two tables for readability
+    # ---------------------------------------------------------------------------
+
+    # Table 1: Original 5 + dYdX + Drift + Lighter
+    group1 = ["aster", "binance", "coinbase", "kraken", "hyperliquid", "dydx", "drift", "lighter"]
+    group1_labels = ["Aster", "Binance", "Coinbase", "Kraken", "Hyperl.", "dYdX", "Drift", "Lighter"]
+
+    header1 = f"  {'Asset':<10}"
+    for lbl in group1_labels:
+        header1 += f" {lbl:>11}"
+    print(header1)
+    print("  " + "-" * (len(header1) - 2))
+
+    for canonical in sorted(TRACKED_ASSETS.keys()):
+        usdt_sym = TRACKED_ASSETS[canonical]
+        a = assets_output.get(usdt_sym, {})
+
+        def fmt_price(p):
+            if p is None:
+                return "---"
+            if p >= 1000:
+                return f"{p:,.0f}"
+            elif p >= 10:
+                return f"{p:.2f}"
+            elif p >= 1:
+                return f"{p:.4f}"
+            else:
+                return f"{p:.5f}"
+
+        line = f"  {canonical:<10}"
+        for exch in group1:
+            p = a.get(exch, {}).get("price")
+            line += f" {fmt_price(p):>11}"
+        print(line)
+
+    print()
+
+    # Table 2: CEX perps (Bybit, OKX, MEXC, Gate.io, KuCoin) + MaxSprd
+    group2 = ["bybit", "okx", "mexc", "gateio", "kucoin"]
+    group2_labels = ["Bybit", "OKX", "MEXC", "Gate.io", "KuCoin"]
+
+    header2 = f"  {'Asset':<10}"
+    for lbl in group2_labels:
+        header2 += f" {lbl:>11}"
+    header2 += f" {'MaxSprd':>10}"
+    print(header2)
+    print("  " + "-" * (len(header2) - 2))
+
+    for canonical in sorted(TRACKED_ASSETS.keys()):
+        usdt_sym = TRACKED_ASSETS[canonical]
+        a = assets_output.get(usdt_sym, {})
+        max_spr = a.get("spreads", {}).get("max_spread")
+
+        def fmt_price(p):
+            if p is None:
+                return "---"
+            if p >= 1000:
+                return f"{p:,.0f}"
+            elif p >= 10:
+                return f"{p:.2f}"
+            elif p >= 1:
+                return f"{p:.4f}"
+            else:
+                return f"{p:.5f}"
+
+        def fmt_spread(s):
+            if s is None:
+                return "---"
+            return f"{s:+.3f}%"
+
+        line = f"  {canonical:<10}"
+        for exch in group2:
+            p = a.get(exch, {}).get("price")
+            line += f" {fmt_price(p):>11}"
+        line += f" {fmt_spread(max_spr):>10}"
+        print(line)
+
+    # Funding rate comparison (all perp exchanges)
+    print()
+    funding_exchs = ["aster", "binance", "hyperl.", "dydx", "bybit", "okx", "mexc", "gateio", "lighter"]
+    funding_keys  = ["aster", "binance", "hyperliquid", "dydx", "bybit", "okx", "mexc", "gateio", "lighter"]
+    funding_labels = ["Aster", "Binance", "Hyperl.", "dYdX", "Bybit", "OKX", "MEXC", "Gate.io", "Lighter"]
+
+    fheader = f"  {'Asset':<10}"
+    for lbl in funding_labels:
+        fheader += f" {lbl:>10}"
+    print(fheader)
+    print("  " + "-" * (len(fheader) - 2))
+
+    for canonical in sorted(TRACKED_ASSETS.keys()):
+        usdt_sym = TRACKED_ASSETS[canonical]
+        a = assets_output.get(usdt_sym, {})
+
+        def fmt_fr(f):
+            if f is None:
+                return "---"
+            return f"{f:+.5f}"
+
+        line = f"  {canonical:<10}"
+        for fk in funding_keys:
+            fr = a.get(fk, {}).get("funding")
+            line += f" {fmt_fr(fr):>10}"
+        print(line)
+
+    # Best opportunities
+    if best_opps:
+        print()
+        print("  TOP OPPORTUNITIES (across all 13 exchanges):")
+        print("  " + "-" * 60)
+        for i, opp in enumerate(best_opps, 1):
+            print(f"  {i:>2}. [{opp['type']}] {opp['asset']}")
+            print(f"      Magnitude: {opp['magnitude']}")
+            print(f"      Direction: {opp['direction']}")
+            print(f"      {opp['detail']}")
+            print()
+
+    return output
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Multi-Exchange Price Scanner v2.1 for 5LLM Challenge")
+    parser.add_argument(
+        "--output", "-o",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "MARKET_DATA.json"),
+        help="Output JSON file path (default: MARKET_DATA.json in script directory)"
+    )
+    args = parser.parse_args()
+
+    output = build_market_data()
+
+    # Write JSON
+    output_path = args.output
+    with open(output_path, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    print(f"  Output written to: {output_path}")
+    print(f"  File size: {os.path.getsize(output_path):,} bytes")
+    print()
+    print("=" * 70)
+    print("  Done. Trading bots can now read MARKET_DATA.json")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+bridge-config-template.json:
+
+{
+  "bots": [
+    {
+      "name": "llm-deepseek",
+      "wallet": "0xbc32Ad654643D1E550313a75c7eeE391Aa53f7CD",
+      "aster_api_key": "7113020883db50753ba081599cc76429b0fb442dbf323ac92250c61fd1037a36",
+      "aster_api_secret": "c8cb069d497e5b04cb1f387598c4918e3eefbe9f42fbc6a7cec8faf220b1730f",
+      "state_file": "/Users/pip/.openclaw/workspace/agents/llm-deepseek/TRADE_STATE.md",
+      "max_notional": 65000,
+      "starting_capital": 500
+    },
+    {
+      "name": "llm-gemini",
+      "wallet": "0x1907346052D845Eb43564B8B2f58F905A1774e75",
+      "aster_api_key": "fa9363be17e3e6b94a03108809d0e81955adeb76203b01738304afd63c45eb2c",
+      "aster_api_secret": "9ac80efe9845d0d06613f7cae9d419511a0cfc6f061756edae8281c76a75affe",
+      "state_file": "/Users/pip/.openclaw/workspace/agents/llm-gemini/TRADE_STATE.md",
+      "max_notional": 65000,
+      "starting_capital": 500
+    },
+    {
+      "name": "llm-openai",
+      "wallet": "0xD0953627247903fdB7Aee164CCd0e8E03389684e",
+      "aster_api_key": "815fba5811f75fc5f552b7e8dc06305906902b41717b6bc5d5a9de21ced226c2",
+      "aster_api_secret": "c856f2d6ba0768e516c0d42f675a3dd5ab23e8d44d8056171abc42f6057e82ad",
+      "state_file": "/Users/pip/.openclaw/workspace/agents/llm-openai/TRADE_STATE.md",
+      "max_notional": 65000,
+      "starting_capital": 500
+    },
+    {
+      "name": "llm-minimax",
+      "wallet": "0x9d13d9e5197bd97e530C970881D18c0f9cC3C346",
+      "aster_api_key": "f16a6cd231601d4e7b7f4224b27482be02194ef73e5e5f72baa27051ca7a7975",
+      "aster_api_secret": "441237e59c555f2ece32a33d9e72780229e82fa7288bf301874d7e530b5cb5f4",
+      "state_file": "/Users/pip/.openclaw/workspace/agents/llm-minimax/TRADE_STATE.md",
+      "max_notional": 65000,
+      "starting_capital": 500
+    },
+    {
+      "name": "surgeon",
+      "wallet": "0xbc32Ad654643D1E550313a75c7eeE391Aa53f7CD",
+      "aster_api_key": "7113020883db50753ba081599cc76429b0fb442dbf323ac92250c61fd1037a36",
+      "aster_api_secret": "c8cb069d497e5b04cb1f387598c4918e3eefbe9f42fbc6a7cec8faf220b1730f",
+      "state_file": "/Users/pip/.openclaw/workspace/agents/surgeon/TRADE_STATE.md",
+      "max_notional": 15000,
+      "starting_capital": 730
+    },
+    {
+      "name": "triage",
+      "wallet": "0xbc32Ad654643D1E550313a75c7eeE391Aa53f7CD",
+      "aster_api_key": "7113020883db50753ba081599cc76429b0fb442dbf323ac92250c61fd1037a36",
+      "aster_api_secret": "c8cb069d497e5b04cb1f387598c4918e3eefbe9f42fbc6a7cec8faf220b1730f",
+      "state_file": "/Users/pip/.openclaw/workspace/agents/triage/TRADE_STATE.md",
+      "max_notional": 15000,
+      "starting_capital": 735
+    }
+  ]
+}
+
+and another page:
+
+The Deep Analysis Framework
+3 Prompt Templates That Turn Surface-Level AI Analysis Into Actionable Intelligence
+
+Most people ask AI "what happened?" — these prompts force it to explain WHY it happened, whether the reasoning was sound, and what to change next time.
+
+Why Most Analysis Is Useless
+The typical prompt:
+
+"Analyze this trade"
+Gets you something like:
+
+"BTC went up, good entry, consider tighter stops next time" — completely useless.
+The problem: You're asking AI what it thinks instead of giving it a framework to think through. Without structure, AI defaults to summarizing what happened — which you already know — instead of reconstructing why it happened and whether the reasoning was sound.
+
+These 3 templates fix that:
+
+Forcing reconstruction over description
+Separating process quality from outcome luck
+Demanding specificity — IF/THEN/BECAUSE rules, not vague advice
+Template 01
+The Autopsy — Single Trade Deep Dive
+Forensic reconstruction of one decision
+
+When to use
+After any individual trade (win or lose) when you want to understand exactly what happened and why.
+autopsy-prompt.txt
+Copy
+Analyze this trade as a forensic autopsy. Do NOT summarize — reconstruct.
+
+TRADE DATA:
+[paste trade log entry here]
+
+MARKET STATE AT ENTRY:
+[paste the market data snapshot from when the trade was opened]
+
+Walk through these steps IN ORDER:
+
+## 1. DECISION RECONSTRUCTION
+- What signals were available at the exact moment of entry?
+- Which signal was the PRIMARY trigger vs supporting evidence?
+- What was the confidence level, and what specific data justified it?
+- What alternative trades were available but NOT taken? Why were they rejected?
+
+## 2. THE COUNTER-CASE
+- At the time of entry, what was the strongest argument AGAINST this trade?
+- Was that counter-argument addressed, or ignored?
+- In hindsight, was the counter-argument valid?
+
+## 3. EXECUTION ANALYSIS
+- Was the entry price optimal, or was there slippage/delay?
+- Were stop and take-profit levels set correctly relative to ATR/volatility?
+- Was position sizing appropriate for the conviction level?
+- If the trade was managed (partial closes, stop adjustments), was each
+  management decision correct?
+
+## 4. OUTCOME vs THESIS
+- Did the trade win/lose FOR THE REASON the thesis predicted?
+- Or did it win/lose for a completely different reason?
+  // Lucky win = bad trade. Unlucky loss = possibly good trade.
+- If the exact same setup appeared again tomorrow, should the trade be
+  taken? Why or why not?
+
+## 5. ONE ACTIONABLE RULE
+- Based on this single trade, write ONE specific rule (not vague advice)
+  that would improve future performance.
+- Format: "IF [specific condition], THEN [specific action],
+  BECAUSE [specific evidence from this trade]"
+Why Each Section Matters
+Section 1 — Decision Reconstruction
+Forces the AI to work through the actual decision tree, not just describe the outcome. You get the reasoning chain that led to the entry, which is the only thing you can actually improve next time.
+Section 2 — The Counter-Case
+Most traders never consider what could go wrong. This section catches blind spots. If the counter-argument was valid and ignored, that's a systematic flaw you can fix.
+Section 3 — Execution Analysis
+Separates strategy quality from execution quality. You can have the right idea and still lose from bad execution. This section isolates whether the problem was the plan or the follow-through.
+Section 4 — Outcome vs Thesis
+The most important section. A trade that wins for the wrong reason teaches nothing. A trade that loses despite correct execution is actually a good trade. This is where real learning happens.
+Section 5 — Actionable Rule
+Forces specificity. "Be more careful" is not a rule. "IF divergence < 1.5% AND no persistence across 2 snapshots, THEN skip, BECAUSE Trade #7 showed sub-1.5% signals are noise" — THAT's a rule.
+Template 02
+The Post-Mortem — Full Session Analysis
+Pattern recognition across a batch of trades
+
+When to use
+After a batch of trades — a full day, a challenge run, or a strategy test period.
+post-mortem-prompt.txt
+Copy
+You are a hedge fund risk analyst reviewing a junior trader's session.
+Be brutally honest. Your job is to find patterns the trader can't see
+about themselves.
+
+SESSION DATA:
+[paste full trade log with all trades]
+
+FINAL P&L: [X]
+WIN RATE: [X]%
+PROFIT FACTOR: [X]
+
+## PHASE 1: PATTERN EXTRACTION (Before Opinions)
+
+List every trade in a table:
+| # | Asset | Direction | Entry Time | Hold Time | Result | Signal Used |
+
+Then answer:
+- What was the average hold time for winners vs losers?
+- Were there clusters of trades (multiple trades in short succession)?
+- Did the trader show a directional bias? (% long vs % short)
+- Did trade sizing change after wins or losses? How?
+- Were there any "revenge trades" (immediate re-entry after a loss
+  on the same asset)?
+
+## PHASE 2: THE THREE BEST AND THREE WORST DECISIONS
+
+Not the three biggest wins/losses — the three BEST and WORST DECISIONS.
+A decision can be:
+- Entering a trade
+- NOT entering a trade // sometimes the best decision is doing nothing
+- Managing a trade (moving stops, taking partial profits)
+- Exiting a trade
+
+For each decision, explain:
+- What made it good/bad IN CONTEXT (not just because of the outcome)
+- What information was available at the time
+- What a perfect trader would have done differently
+
+## PHASE 3: BEHAVIORAL DIAGNOSIS
+
+Based on the pattern data, diagnose which behavioral patterns appeared
+(cite specific trades as evidence):
+
+1. Loss Aversion — Held losers longer than winners hoping for recovery
+2. Recency Bias — Traded based on last 1-2 candles, ignoring broader trend
+3. Action Bias — Traded when there was no clear signal, just to "do something"
+4. Anchoring — Fixated on a specific price target regardless of changing conditions
+5. Herding — Took the "obvious" trade that everyone would take
+6. Escalation of Commitment — Added to losing position or increased leverage
+   after losses
+7. Gambler's Fallacy — Assumed reversal was "due" after a run of losses/wins
+8. Survivorship Bias — Only referenced winning examples when justifying trades
+
+If NONE appeared, say so and explain what was done RIGHT.
+
+## PHASE 4: IMPROVEMENT PROTOCOL
+
+Write exactly 3 rule changes for the next session:
+- Specific enough to be programmed (no "be more careful")
+- Tied to evidence from THIS session
+- Format: RULE: [action] | TRIGGER: [condition] | EVIDENCE: [trade #s]
+
+Then answer: // The expected value question
+"If this trader runs the exact same session 100 times with the same
+market conditions, what is their expected win rate and why?"
+Why Each Phase Matters
+Phase 1 — Pattern Extraction
+Raw data BEFORE opinions. Most analysis jumps straight to conclusions. This forces the AI to lay out the facts first, so its conclusions are evidence-based instead of narrative-driven.
+Phase 2 — Best/Worst Decisions
+This is the key innovation — separating DECISIONS from OUTCOMES. Asking for "best decisions" instead of "biggest wins" forces evaluation of process quality, not luck.
+Phase 3 — Behavioral Diagnosis
+Gives the AI a diagnostic checklist instead of letting it freestyle. Without this, you get generic advice. With it, you get specific diagnoses backed by trade-level evidence.
+Phase 4 — Improvement Protocol
+The RULE/TRIGGER/EVIDENCE format prevents vague advice. And the "100 times" question forces the AI to think about expected value, not just this one result.
+Template 03
+The Feedback Loop — Continuous Self-Improvement
+Compounding knowledge that makes every session smarter
+
+When to use
+Embed this directly into your agent's instructions so it builds a compounding knowledge base over time.
+feedback-loop-prompt.txt
+Copy
+## SELF-IMPROVEMENT PROTOCOL
+
+After EVERY session (win or lose), append to LEARNINGS.md:
+
+### Session [DATE] — [RESULT]
+
+What I predicted: [1 sentence — what I expected and why]
+What actually happened: [1 sentence — what occurred]
+Prediction accuracy: [CORRECT / PARTIALLY CORRECT / WRONG]
+If wrong, why: [Signal wrong? Timing wrong? Thesis right but execution poor?]
+
+Decision I'm most proud of: [why — process-based, not outcome-based]
+Decision I most regret: [why — would I make the same call with the same info?]
+
+Pattern check (honest self-assessment):
+- Did I hold losers too long? [Y/N + evidence]
+- Did I cut winners too early? [Y/N + evidence]
+- Did I trade when I should have waited? [Y/N + evidence]
+- Did I wait when I should have traded? [Y/N + evidence]
+- Did I follow my own rules exactly? [Y/N + which rule broke]
+
+One rule update for next session:
+IF [condition] THEN [action] BECAUSE [evidence from today]
+
+---
+// CRITICAL: This is the self-correcting mechanism
+IMPORTANT: Read your last 3 LEARNINGS entries before any decision.
+If the same mistake appears twice, SKIP any trade that could repeat
+it, even if the signal looks strong.
+Why This Works
+Compounding Knowledge Base
+After 5-10 sessions, the LEARNINGS file becomes a personalized playbook. Each entry adds context that makes the next session's decisions more informed.
+"Read Your Last 3 Entries"
+Forces the agent to actually USE its history instead of starting fresh every time. Without this instruction, AI agents treat each session as completely independent.
+The "Same Mistake Twice" Rule
+Creates a self-correcting mechanism. The agent gets MORE cautious about its specific weaknesses over time, building a natural immune system against repeated errors.
+Universal Format
+Works for both AI agents AND human traders. The structure is the same whether you're reviewing your own trades or instructing an autonomous agent to review its own.
+The Foundation
+Why This Works
+5 principles that separate useful analysis from AI noise
+
+Principle 01
+Reconstruction Over Description
+"Walk through the decision tree" — not "summarize what happened"
+
+Surface
+"BTC went up 2%, the trade was profitable"
+Deep
+"At 14:32 the primary signal was funding divergence at 1.2% across 3 exchanges, while the counter-signal was declining volume. The entry was taken because divergence persisted across 2 snapshots despite the volume concern."
+Principle 02
+Process Over Outcome
+A lucky win is a bad trade. An unlucky loss can be a good trade.
+
+Surface
+"Won $50, good trade"
+Deep
+"Won $50, but the thesis was wrong — price moved in our direction due to a whale buy, not the funding convergence we predicted. If we repeat this trade 100 times, we lose money."
+Principle 03
+Diagnostic Frameworks Over Open Questions
+Give the AI a checklist, not a blank canvas.
+
+Surface
+"What went wrong?"
+Deep
+"Check for: loss aversion, recency bias, action bias, anchoring, herding, escalation, gambler's fallacy, survivorship bias. Cite specific trades as evidence."
+Principle 04
+Specificity Over Vagueness
+IF/THEN/BECAUSE format prevents fluffy advice.
+
+Surface
+"Use tighter stops next time"
+Deep
+"IF ATR < 0.5% AND hold time > 45 min, THEN reduce position by 50% at 30 min mark, BECAUSE Trades #3, #7, #11 all reversed after 30 min in low-volatility conditions"
+Principle 05
+Compounding Feedback Loops
+Every session makes the next one smarter.
+
+Surface
+One-off analysis that's never referenced again
+Deep
+LEARNINGS.md that accumulates, gets read before every decision, and self-corrects by blocking repeated mistakes
+
+and another:
+
+OpenClaw • Rubicon Inner Circle
+Multi-Agent Challenge
+Setup Guide
+Run multiple AI agents head-to-head. Each gets its own model, strategy, and brain. Here's how to set it up.
+
+01
+What's a Multi-Agent Challenge?
+You create multiple agents on your OpenClaw — each running a different model or different strategy (or both). They all get the same market data and compete. A race between AI brains.
+
+Each agent is completely isolated. Separate memory, separate strategy, separate results. They don't see each other.
+
+02
+Step 1 — Write Your Strategy
+Do this before touching OpenClaw. Each agent needs a strategy file called a SOUL.md. You write this yourself — or use ChatGPT, Claude, or any LLM to help you craft it in a separate conversation.
+
+Don't ask OpenClaw to write it for you. It'll burn tokens on a generic strategy you'll need to redo. Write it, then hand it over.
+
+Here's the exact SOUL we used for The Surgeon — it made +$1,189 (+11.9%) in under 3 hours. Copy it, modify it, or use it as a template:
+
+# THE SURGEON — Mark/Index Divergence Scalper
+
+## Identity
+You are THE SURGEON. You exploit the gap between mark price and
+index price on perpetual futures. Divergence is temporary.
+Convergence is guaranteed. You live in the gap.
+
+## CORE DIRECTIVE
+
+EVALUATE EVERY SPAWN. Read market data, find divergences, and
+trade if there is a signal. No cooldowns. No sit-outs.
+No hesitation. After a loss, immediately scan for the next signal.
+
+## ENTRY SIGNALS
+
+### Signal 1: Mark/Index Divergence (PRIMARY)
+- Mark > index by > 0.15%: SHORT (convergence is down)
+- Mark < index by > 0.15%: LONG (convergence is up)
+- At 0.25%+: MAXIMUM conviction, size accordingly
+
+### Signal 2: Extreme Funding Rate (STANDALONE)
+- Funding > +0.05% per 8h: SHORT (longs overcrowded)
+- Funding < -0.05% per 8h: LONG (shorts overcrowded)
+
+### Signal 3: Technical Confirmation (SIZE MODIFIER)
+- RSI oversold + negative funding: confirms LONG, size up
+- RSI overbought + positive funding: confirms SHORT, size up
+
+You need Signal 1 OR Signal 2 to enter. Signal 3 scales size.
+
+## POSITION SIZING
+
+Leverage: 20-30x (25x default, 30x on dual-confirmation)
+Max 3 concurrent positions.
+
+- MAXIMUM (divergence >0.25% + funding confirms): 25-40% margin
+- HIGH (divergence >0.15% + any confirmation): 15-25% margin
+- MODERATE (funding extreme alone): 10-15% margin
+
+## EXIT SYSTEM
+
+- Stop Loss: -0.4% from entry. HARD. NO EXCEPTIONS.
+- TP1: +1.0% — close 25%, move stop to breakeven
+- TP2: +2.0% — close 25%, trail stop at +0.5%
+- TP3: +4.0% — close remaining 50%
+- Convergence Exit: If divergence closes to <0.03%, close immediately
+- Max hold: 60 minutes
+
+## SPAWN PROTOCOL
+
+1. Read TRADE_STATE.md — positions, balance
+2. Read MARKET_STATE.json — prices, funding, divergence
+3. Manage open positions (stops, TPs, exits)
+4. Scan for new divergences across all assets
+5. Enter if signal qualifies and slots available
+6. Update TRADE_STATE.md and append to TRADE_LOG.md
+
+## FILE DISCIPLINE
+
+- TRADE_STATE.md: Rewrite each spawn. Balance, positions.
+- TRADE_LOG.md: ALWAYS APPEND. NEVER OVERWRITE.
+
+The market shows me the wound. I cut. I close. I move on.
+Some other strategy ideas to test against each other:
+
+Momentum Rider — follows strong trends, trails stops
+Mean Reverter — fades sharp moves, buys dips
+Regime Detector — identifies trending vs. ranging, adapts
+Funding Farmer — collects funding payments, hedged
+03
+Step 2 — Create the Agent & Give It the SOUL
+Once your strategy is written, set up one agent at a time. Three ways to do it:
+
+Option 1 — Telegram
+Tell Your Agent in Chat
+Create a new agent called "team-alpha". Give it its own workspace and assign it [your model name].
+Done. Created agent "team-alpha".
+Save this as the SOUL.md for team-alpha: [paste your strategy here]
+Done. Saved SOUL.md for team-alpha.
+Set up a cron job for team-alpha. Every 5 minutes, isolated sessions, announce results to me on Telegram.
+Done. Cron job created — 5-min cycle, isolated, Telegram delivery.
+One agent done. Repeat with a different name, model, and strategy for your next agent.
+
+Option 2 — Claude Code (SSH / Terminal)
+Use Claude Code on Your Machine
+Open Claude Code (locally or SSH'd into your VPS) and tell it in plain English:
+
+Create an agent called "team-alpha" on my OpenClaw. Assign it [model]. Save this as its SOUL.md: [paste your strategy here] Then set up a cron job — every 5 minutes, isolated sessions, announce to Telegram.
+Claude Code runs the commands. You approve each step. Then do the next agent.
+
+Option 3 — Manual Terminal
+CLI Commands
+# 1. Create the agent
+openclaw agents add team-alpha --model provider/your-model
+
+# 2. Paste your SOUL.md into the agent's workspace
+# 3. Set up the cron
+openclaw cron add \
+  --name "Alpha Spawn" \
+  --cron "*/5 * * * *" \
+  --agent team-alpha \
+  --session isolated \
+  --message "Read MARKET_STATE.json, check TRADE_STATE.md, decide." \
+  --channel telegram \
+  --announce
+
+# Repeat for each agent
+04
+Step 3 — Understand Your Costs
+Each time an agent spawns (every 5 minutes), it uses tokens from your API provider. How much depends on which model you assigned to that agent.
+
+Model Tier	Examples	Per Spawn	Per Day
+Premium	Sonnet, GPT-4o, Gemini Pro	~$0.015–0.02	~$4–6
+Mid-Range	Haiku, GPT-4o-mini	~$0.001–0.006	~$0.30–1.60
+Budget	Gemini Flash, DeepSeek, MiniMax	~$0.0004–0.001	~$0.12–0.25
+Example: A 3-agent challenge with one mid-range + two budget models, spawning every 5 minutes for 24 hours, costs roughly $2–3/day in API costs.
+
+You decide the cost. Pick cheaper models if you want to run longer. Pick premium models if you want the best brains. Mix and match — that's the whole point of a challenge. Run /model in Telegram to see what you have registered.
+05
+Rate Limits — The 3 Rules
+When you run multiple agents, they're all hitting your API providers at the same time. Every provider has limits on how many requests you can make per minute. Here's what to know:
+
+Rule 1: Rate limits are per organization, not per key.
+Adding a second API key doesn't double your limit. All your agents share the same quota for each provider.
+
+Rule 2: Stagger your spawns.
+Don't fire all agents at the exact same second. Offset them by 10–15 seconds. In Telegram, just ask: "Stagger my cron schedules so agents don't all fire at once."
+
+Rule 3: Set up fallback models.
+If your primary model gets rate-limited, OpenClaw falls back to a cheaper model automatically. In Telegram: "Set up fallback models so my agents don't die if we hit rate limits."
+
+Common rate limit mistakes:
+• Running 5 agents on the same provider with no stagger
+• Google Gemini free tier only allows 250 requests per DAY — pay-as-you-go is recommended
+• OpenAI limits vary hugely by spend tier — new accounts have very low limits
+• A 529 error means the provider itself is overloaded (not your fault) — just wait
+06
+Things to Know Before You Start
+Isolated Sessions
+Always use isolated sessions for challenge agents. This means each spawn starts fresh — no leftover context from the last run. Keeps things clean and prevents weird errors.
+
+If you're setting up via Telegram, just say "use isolated sessions" and your agent will handle it.
+
+State Files Are Memory
+Between spawns, agents forget everything. The only way they remember their positions is by reading and writing state files (like TRADE_STATE.md and TRADE_LOG.md).
+
+Make sure your SOUL tells the agent to read its state at the start and update it at the end of every spawn.
+
+One Channel Per Cron Job
+Each cron job delivers to one channel only (Telegram OR WhatsApp, not both). If you want both, create two cron jobs with the same schedule.
+
+Also: always use an explicit channel name like telegram. Never use "last" — it silently fails.
+
+It's --cron, Not --schedule
+If you're using terminal commands, the flag for scheduling is --cron. Using --schedule won't work. This trips up a lot of people.
+
+VPS or Local — Both Work
+Running on a VPS? Make sure your gateway runs in screen, tmux, or pm2 so it survives SSH disconnects. Your agents keep running 24/7.
+
+Running locally? Just keep your terminal open. Agents pause when you close it and resume when you're back.
+
+07
+Quick Start
+1. Write your strategy (use ChatGPT/Claude to help)
+2. Create the agent — give it a name and model
+3. Paste in your strategy as its SOUL
+4. Set up the cron — how often, isolated sessions, Telegram delivery
+5. Repeat for each agent (different name, model, strategy)
+6. Watch the results come in
+
+You write the strategy. OpenClaw executes it.
+
+And another strategy:
+
+Strategy Guide
+Profit From
+Weak Altcoins
+Short the worst performers. Hedge with BTC. Let bad tokenomics do the work. A step-by-step breakdown of Sylvan's relative shorts strategy.
+
+"When the market goes up, these tokens go up less. When the market goes down, they go down more. The difference is your profit."
+
+— Sylvan
+Sylvan's Actual Results
+
+WLD Short +2063% ROIWLD +2,063%
+PENGU Short +2164% ROIPENGU +2,164%
+DOGE Short +602% ROIDOGE +602%
+RENDER Short +562% ROIRENDER +562%
+
+01
+Find High Inflation Tokens
+→
+
+02
+Chart It vs OTHERS
+→
+
+03
+Choose Your Hedge
+→
+
+04
+Open the Trade
+→
+
+05
+Set Your Stop Loss
+→
+
+06
+Things to Remember
+→
+Go
+→
+01
+Step One
+Find High Inflation Tokens
+Tokens with heavy unlock schedules have constant sell pressure baked in. More supply hitting the market = more dilution = structural underperformance. That's the edge you're trading.
+
+🔎
+Tokenomist.ai
+Unlock schedules & inflation rates
+↗
+📊
+CryptoRank
+Upcoming unlocks & vesting
+↗
+💰
+CoinMarketCap
+Market cap, FDV, circulating supply
+↗
+🤖
+AI (ChatGPT / Claude)
+"Find high inflation crypto tokens"
+↗
+Filter for tokens over ~$200M market cap so you can short them on futures with decent liquidity.
+
+💡
+Don't be too rigid on $200M. A token at $80M mcap with $800M FDV has 90% of supply still locked. That dilution will hammer it regardless of the lower mcap. The key metric: the gap between market cap and FDV — bigger gap = more inflation coming.
+← Back
+Next: Chart It →
+02
+Step Two
+Chart It vs OTHERS
+You're not looking at the USD chart. You're looking at how the token performs against all other altcoins using a ratio chart on TradingView.
+
+BINANCE:GALAUSDT / CRYPTOCAP:OTHERS
+GALA/USDT — Standard Price
+For Stop Losses
+Standard USD price — use this for setting stop losses, not for finding the trade
+GALA vs OTHERS — Relative Performance
+THE ONE THAT MATTERS
+Chart going DOWN = GALA underperforming everything else = your signal to short
+You can change the symbol in either chart — try BINANCE:ARBUSDT/CRYPTOCAP:OTHERS or BINANCE:OPUSDT/CRYPTOCAP:OTHERS
+
+✓
+Chart going down = good. That means the token is already underperforming the rest of the altcoin market. You're riding an existing trend, not trying to predict one.
+✓
+The steeper the downtrend, the better the setup. A slow bleed is fine, but a clear consistent decline means the inflation pressure is doing its thing.
+📌
+You're not betting GALA goes down in USD. You're betting it does worse than the rest of the market. If everything pumps 50% but GALA only pumps 20%, you still profit. That's the power of the hedge.
+← Back
+Next: Choose Hedge →
+03
+Step Three
+Choose Your Hedge
+Most of the time BTC is the hedge. But some tokens correlate more with SOL, ETH, or BNB — especially if they trade primarily on DeFi paired with those assets.
+
+■
+Default: BTC — works for most tokens. This is what Sylvan uses the vast majority of the time. Simple, liquid, proven.
+■
+Exception: If the token trades mostly on DeFi and is paired with SOL/BNB/ETH, it might move more with those. Match the hedge to what it correlates with most.
+💡
+This step is quick — for 90% of setups, just go with BTC. Don't overthink it. The hedge just needs to capture the broad market direction so you're only exposed to the underperformance.
+← Back
+Next: Execute →
+04
+Step Four
+Open the Trade
+Short the weak token, long BTC for the exact same USD position size. You're market neutral.
+
+SHORT — Bet Against
+G
+GALA
+Pair
+GALAUSDT
+Direction
+SHORT ↓
+Position Size
+$1,000 USD
+Margin Mode
+Cross
+=
+LONG — The Hedge
+₿
+BTC
+Pair
+BTCUSDT
+Direction
+LONG ↑
+Position Size
+$1,000 USD
+Margin Mode
+Cross
+🎯
+Position Size ≠ Margin
+The $1,000 shown above is your position size — the total USD value you're controlling. It's NOT how much money you deposited.
+
+Your Margin
+$20
+what you deposit
+×
+Leverage
+50x
+multiplier
+=
+Position Size
+$1,000
+what you control
+⚠️
+The key rule: Both sides must have the same position size. $1,000 short GALA = $1,000 long BTC. The leverage you use on each side can be different — what matters is the position sizes match.
+📉
+Market Dumps
+GALA drops harder than BTC
+
+✓ Profit
+📈
+Market Pumps
+BTC pumps more than GALA
+
+✓ Profit
+😐
+Sideways
+GALA bleeds from inflation
+
+✓ Profit
+⚠️
+GALA Outperforms
+That's why we set a stop
+
+✗ Loss
+Cross Margin = Use a Separate Account
+"Cross" can tap your entire account as margin. Simple fix — don't run this on your main account.
+
+Sub-Accounts
+Create a separate sub-account
+Fund it with only what you want to risk. Available on Bybit, Binance, OKX, and most major exchanges.
+Separate Vaults / Portfolios
+Use an independent vault
+Platforms like Hyperliquid let you create isolated vaults. Main portfolio stays untouched.
+← Back
+Next: Stop Loss →
+05
+Step Five
+Set Your Stop Loss
+Only on the short position. Measure the token's normal weekly volatility and set your stop just above that range.
+
+1
+Open the GALA/USD chart (not the /OTHERS chart)
+2
+Measure normal intraweek volatility with the TradingView measuring tool
+3
+GALA = about 35% weekly range
+4
+Current price + 35% = your stop loss level
+Current Price
+$0.0046
+Entry point
+→
++ Weekly Vol (35%)
+$0.0016
+Volatility buffer
+→
+Stop Loss
+$0.0062
+Set just above
+The logic: Give it room to be volatile without stopping you out. If it rips past that range, something fundamentally changed — get out. As price moves in your favour, trail the stop down to lock in gains progressively.
+
+← Back
+Final Notes →
+⚠️
+Important
+Things to Remember
+⏱️
+Not Set & Forget, Not Day Trading
+Check in periodically and trail your stop. But you're not staring at screens all day. The edge is structural — inflation works over weeks and months, not minutes.
+
+🏗️
+Structural Edge
+You're trading WITH the inflation pressure. New supply hitting the market every week does the heavy lifting. You just positioned yourself to profit from it.
+
+📐
+Size Right
+Use sub-accounts or vaults. Don't over-leverage. This strategy works with patience — let inflation compound the edge over time.
+
+🔄
+Trail Your Stops
+As the trade moves your way, bring the stop down. Lock in gains progressively. Never let a winner turn into a loser.
+
+↑ Back to Top
+Rubicon Inner Circle — Strategy Guide by Sylvan
+
+And another strategy:
+
+Copy Trading Strategy
+Copy Profitable LPs
+With One Click
+Learn how to copy successful liquidity providers on Meteora. We're joining in and learning together.
+
+Meteora
+LP Agent
+Let's Go →
+01
+Why This Exists
+The Challenge with LP (Liquidity Providing)
+Liquidity providing can be profitable, but it's confusing as hell to get started.
+
+😤 The Problem
+What even IS liquidity providing?
+Complex and confusing, no idea where to start
+Hard to track market dynamics
+Manual monitoring is time-consuming
+Missing optimal entry and exit points
+✨ The Solution
+Copy wallets with 80%+ win rates
+One-click position deployment
+Automated entry and exit
+Real-time market analysis
+Let the experts do the hard work
+← Back
+Meet LP Agent →
+02
+The Tool
+What is LP Agent?
+Benji's friend has been using this tool to make ~2 SOL/day. We're joining and learning this together.
+
+LP Agent
+LP Agent
+AI-powered liquidity farming on Meteora (Solana)
+
+📊
+Smart LP Leaderboard
+🎯
+One-Click Copy
+🤖
+AI Suggestions
+⚡
+Auto-Compound
+Swap Fee
+0%
+Fee on Profits
+8%
+🚀 Launch App
+𝕏 Twitter
+← Back
+See The Proof →
+03
+The Proof
+This Is What We're Copying
+Real wallet, real profits. 90% win rate, 209 SOL total profit. This is the kind of performance we're following.
+
+Profitable Wallet Stats
+4,615 closed positions with a 90.46% win rate. Total profit: 209.80 SOL. This is what copy trading lets you follow.
+← Back
+Find More Wallets →
+04
+Find Winners
+LP Agent's Leaderboard
+LP Agent's UI for finding copy trading wallets. Sort by profit, win rate, or activity.
+
+LP Agent Leaderboard
+Win Rate
+% profitable positions
+EV
+Expected value per position
+Fee Earned
+Total fees (SOL)
+Total Pools
+Pools entered
+Positions
+7D / 30D / All
+💡
+Sort by Total Profit to find top performers. Check Last Activity to make sure they're still active.
+← Back
+Important Warnings →
+⚠️
+Before You Start
+Read these warnings. Understand the risks. Then proceed.
+
+🆕
+Use a fresh wallet. Create a new account in Phantom. Don't connect your main wallet with all your funds.
+🔓
+You're delegating authority. LP Agent can trade without your approval for each transaction. That's how auto-copy works.
+💸
+Only deposit what you can lose. LP Agent is a newer platform, not battle-tested. Cool niche tool, treat it accordingly.
+← Back
+I Understand, Continue →
+06
+Setup
+Connect & Fund Your Wallet
+Four steps to get started. LP Agent creates an "embedded wallet" for you.
+
+1
+Go to LP Agent
+Visit lpagent.io → Launch App
+→
+2
+Connect a NEW Phantom Wallet
+Fresh account only, keep your main wallet separate
+→
+3
+Delegate Authority
+LP Agent creates your embedded wallet and asks for permissions
+→
+4
+Fund Your Embedded Wallet
+Send SOL or USDC to the embedded wallet address shown in LP Agent
+← Back
+Copy a Trade →
+07
+Execute
+Copy Your First Trade
+Click a wallet from the leaderboard, check their stats, hit Copy LP, configure your settings.
+
+‹›
+Leaderboard
+Step 1
+Browse the Leaderboard
+Find a wallet with good stats. Click on it to view their profile.
+Wallet Stats
+Step 2
+Review Their Stats
+Check win rate, total profit, profit history. This wallet: 90.46% win rate, 209 SOL profit.
+Copy LP Button
+Step 3
+Click Copy LP
+Find the green "Copy LP" button at the top of their profile.
+Copy Settings
+Step 4
+Configure Settings
+Set TP, SL, Copy %, select strategies. Hit Copy when ready.
+Copied Wallets
+Step 5
+Manage Your Copies
+View all your copied wallets, settings, and PnL in Copied Wallets tab.
+Copy %
+Percentage of their position size. I'm using 10-20% as a conservative start.
+Take Profit
+Auto-close at target gain. I've set 15% for my learning curve.
+Stop Loss
+Auto-close to limit losses. I'm using 10-15% conservatively.
+Copy Strategy
+Spot, Curve, BidAsk, Custom. I've selected all for flexibility.
+📺 Video Tutorial
+LP Agent's official walkthrough:
+
+
+← Back
+Best Practices →
+08
+Pro Tips
+Best Practices
+We'll learn these together. Tips from LP Agent's docs.
+
+⚙️ Recommended Settings
+Minimum Market Cap: $5M (avoids rug pulls)
+Stop Loss: 15% (protect your capital)
+Avg Position Age: Copy wallets with 20+ min positions
+
+Research First
+Study the wallet's style. Small caps or big caps? Fast entries or longer holds?
+Avoid Fast Traders
+Some traders exit in seconds. Copy lag makes this unprofitable. Look for 20+ min holds.
+Start Small
+Begin with 1-5% of your intended investment. Learn their patterns for 1-2 weeks.
+Enable Rug Check
+Always enable rug pull protection to avoid honeypot tokens.
+🚫
+Common Mistakes: Copying without research, ignoring risk settings, starting too large, not monitoring performance, chasing quick gains.
+← Back
+You're Ready →
+🎉
+Let's Go
+You're Ready
+You now know how to find, evaluate, and copy profitable LPs.
+
+Start Small, Learn Together
+I'm figuring this out alongside you. Test with a small amount, see how it goes, and let's chat about it in the Telegram.
+
+📊 What to Watch
+Check your LP Agent dashboard regularly. When your copied wallet closes a position, consider doing the same.
+
+🔄 Auto-Copy Option
+You can enable auto-copy to mirror ALL future positions from a wallet. Great for hands-off once you've found reliable performers.
+
+← Back
+Open LP Agent →
+Part of the Rubicon Inner Circle educational content
+
+🤖 Launch LP Agent
+
+https://lpagent.io/
+
+Connect your wallet to unlock Smart LP suggestions tailored to your portfolio for optimal profits!
+Connect Wallet
+Filters
+
+Min Total Positions Opened
+50
+
+Min Avg Position Age
+0.2
+hrs
+
+Min Win Rate
+80
+%
+
+Min Expected Value
+0
+SOL
+
+Min Profit
+0
+SOL
+
+Min Avg Monthly Profit
+0
+SOL
+
+Max First Activity
+
+Pick a date
+Last Activity
+
+7D
+
+7D
+Clear
+Filter
+Sort
+Total Profit
+↓
+Win Rate
+Avg Position Age
+Total Positions
+Total Pools
+Expected Value
+Avg Invested
+Avg Monthly Profit
+Fee Earned
+Last Activity
+Card
+Table
+Solscan
+Jup Portfolio
+DXMgiG...h4ZZ
+
+Win Rate
+83.18%
+Fee Earned
+78.08SOL
+Total Pools
+222
+
+EV
+0.09SOL
+Avg Age
+8.2h
+Avg Invested
+6.03SOL
+Avg Monthly Profit
+3.29SOL
+Time
+Total Positions
+Total Profit
+7D
+41
+7.88SOL
+30D
+178
+11.98SOL
+ALL
+360
+19.75SOL
+First Activity
+10/12/2025
+Last Activity
+an hour ago
+Solscan
+Jup Portfolio
+GgpU7a...N96e
+
+Win Rate
+83.57%
+Fee Earned
+146.15SOL
+Total Pools
+500
+
+EV
+0.02SOL
+Avg Age
+2.4h
+Avg Invested
+1.86SOL
+Avg Monthly Profit
+2.75SOL
+Time
+Total Positions
+Total Profit
+7D
+15
+-0.09SOL
+30D
+182
+0.28SOL
+ALL
+2424
+19.27SOL
+First Activity
+10/11/2025
+Last Activity
+15 hours ago
+Solscan
+Jup Portfolio
+GkFKcy...tHZu
+
+Win Rate
+85.85%
+Fee Earned
+178.29SOL
+Total Pools
+907
+
+EV
+0.02SOL
+Avg Age
+3.0h
+Avg Invested
+3.92SOL
+Avg Monthly Profit
+1.75SOL
+Time
+Total Positions
+Total Profit
+7D
+30
+1.22SOL
+30D
+95
+0.28SOL
+ALL
+3847
+19.26SOL
+First Activity
+06/04/2025
+Last Activity
+12 hours ago
+Solscan
+Jup Portfolio
+7uf8Ct...nh1w
+
+Win Rate
+85.51%
+Fee Earned
+77.86SOL
+Total Pools
+174
+
+EV
+0.07SOL
+Avg Age
+3.0h
+Avg Invested
+9.51SOL
+Avg Monthly Profit
+3.82SOL
+Time
+Total Positions
+Total Profit
+7D
+13
+0.69SOL
+30D
+77
+1.24SOL
+ALL
+507
+19.12SOL
+First Activity
+12/30/2025
+Last Activity
+3 days ago
+Solscan
+Jup Portfolio
+9Bp8Rk...c98L
+
+Win Rate
+87.46%
+Fee Earned
+63.38SOL
+Total Pools
+226
+
+EV
+0.05SOL
+Avg Age
+3.2h
+Avg Invested
+4.02SOL
+Avg Monthly Profit
+5.98SOL
+Time
+Total Positions
+Total Profit
+7D
+42
+2.58SOL
+30D
+185
+5.09SOL
+ALL
+751
+17.93SOL
+First Activity
+02/06/2026
+Last Activity
+6 hours ago
+Solscan
+Jup Portfolio
+4tAxrx...uo4N
+
+Win Rate
+82.44%
+Fee Earned
+569.57SOL
+Total Pools
+815
+
+EV
+< 0.01SOL
+Avg Age
+1.5h
+Avg Invested
+5.34SOL
+Avg Monthly Profit
+4.48SOL
+Time
+Total Positions
+Total Profit
+7D
+194
+-6.18SOL
+30D
+1169
+-5.35SOL
+ALL
+9187
+17.91SOL
+First Activity
+01/28/2026
+Last Activity
+3 hours ago
+Solscan
+Jup Portfolio
+7BezLm...Rnwr
+
+Win Rate
+88.04%
+Fee Earned
+121.57SOL
+Total Pools
+219
+
+EV
+0.04SOL
+Avg Age
+1.5h
+Avg Invested
+6.21SOL
+Avg Monthly Profit
+1.63SOL
+Time
+Total Positions
+Total Profit
+7D
+2
+-0.50SOL
+30D
+18
+-2.03SOL
+ALL
+876
+17.90SOL
+First Activity
+04/25/2025
+Last Activity
+04/14/2026
+Solscan
+Jup Portfolio
+Eqoc4D...kZ2W
+
+Win Rate
+90.47%
+Fee Earned
+69.71SOL
+Total Pools
+102
+
+EV
+0.04SOL
+Avg Age
+7.4h
+Avg Invested
+9.67SOL
+Avg Monthly Profit
+5.96SOL
+Time
+Total Positions
+Total Profit
+7D
+249
+2.91SOL
+30D
+876
+5.96SOL
+ALL
+1548
+17.89SOL
+First Activity
+02/28/2026
+Last Activity
+3 hours ago
+Solscan
+Jup Portfolio
+4YCCcW...WbAd
+
+Win Rate
+82.31%
+Fee Earned
+34.56SOL
+Total Pools
+170
+
+EV
+0.12SOL
+Avg Age
+10.3h
+Avg Invested
+2.77SOL
+Avg Monthly Profit
+1.25SOL
+Time
+Total Positions
+Total Profit
+7D
+8
+0.57SOL
+30D
+9
+0.74SOL
+ALL
+435
+17.44SOL
+First Activity
+01/05/2025
+Last Activity
+16 hours ago
+Solscan
+Jup Portfolio
+8xmK8N...nWHS
+
+Win Rate
+88.39%
+Fee Earned
+59.82SOL
+Total Pools
+311
+
+EV
+0.04SOL
+Avg Age
+4.2h
+Avg Invested
+2.81SOL
+Avg Monthly Profit
+2.81SOL
+Time
+Total Positions
+Total Profit
+7D
+14
+0.41SOL
+30D
+73
+3.30SOL
+ALL
+745
+16.87SOL
+First Activity
+11/29/2025
+Last Activity
+a day ago
+Solscan
+Jup Portfolio
+3TXwWE...MfFM
+
+Win Rate
+83.91%
+Fee Earned
+226.85SOL
+Total Pools
+174
+
+EV
+0.05SOL
+Avg Age
+1.9h
+Avg Invested
+12.50SOL
+Avg Monthly Profit
+3.33SOL
+Time
+Total Positions
+Total Profit
+7D
+17
+-0.64SOL
+30D
+214
+12.23SOL
+ALL
+522
+16.64SOL
+First Activity
+12/06/2025
+Last Activity
+18 hours ago
+Solscan
+Jup Portfolio
+3yRqz4...h3dn
+
+Win Rate
+80.22%
+Fee Earned
+130.45SOL
+Total Pools
+327
+
+EV
+0.02SOL
+Avg Age
+22.7h
+Avg Invested
+3.21SOL
+Avg Monthly Profit
+1.64SOL
+Time
+Total Positions
+Total Profit
+7D
+31
+-2.16SOL
+30D
+259
+-3.14SOL
+ALL
+1721
+16.39SOL
+First Activity
+07/09/2025
+Last Activity
+3 hours ago
+Showing 1 to 12 of 247 wallets
+
+These wallets are available, do we have the ability to track and/copy them in our app without lpagent? if i invested 500 with one - where and how and what would it be?
+
+
+

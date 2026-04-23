@@ -1,0 +1,322 @@
+﻿===== OPENCLAW =====
+Sun Apr 19 11:12:13 UTC 2026
+## VERSION
+/usr/bin/openclaw
+OpenClaw 2026.4.15 (041266a)
+## CONFIG (redacted)
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/root/.openclaw/workspace",
+      "models": {
+        "openrouter/openai/gpt-4.1": {},
+        "openrouter/google/gemini-2.5-pro": {},
+        "openrouter/anthropic/claude-sonnet-4": {},
+        "openrouter/anthropic/claude-sonnet-4.6": {},
+        "openrouter/anthropic/claude-opus-4.6": {}
+      },
+      "model": "openrouter/openai/gpt-4.1",
+      "thinkingDefault": "low",
+      "contextTokens": 128000,
+      "compaction": {
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 4000
+        },
+        "reserveTokens": 32000,
+        "keepRecentTokens": 20000,
+        "model": "openrouter/anthropic/claude-sonnet-4-6"
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "model": {
+          "primary": "openrouter/openai/gpt-4.1",
+          "fallbacks": [
+            "openrouter/google/gemini-2.5-pro"
+          ]
+        },
+        "heartbeat": {
+          "every": "30m"
+        },
+        "tools": {
+          "alsoAllow": [
+            "lcm_describe",
+            "lcm_expand",
+            "lcm_expand_query",
+            "lcm_grep",
+            "agents_list"
+          ]
+        }
+      },
+      {
+        "id": "cody",
+        "heartbeat": {
+          "every": "15m"
+        }
+      },
+      {
+        "id": "schemy",
+        "heartbeat": {
+          "every": "30m"
+        }
+      },
+      {
+        "id": "audrey",
+        "heartbeat": {
+          "every": "60m"
+        }
+      }
+    ]
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "REDACTED"
+    },
+    "port": 18789,
+    "bind": "lan",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "controlUi": {
+      "allowInsecureAuth": true,
+      "allowedOrigins": [
+        "http://100.71.74.12:18789"
+      ],
+      "dangerouslyDisableDeviceAuth": true
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send",
+        "sms.search"
+      ]
+    }
+  },
+  "session": {
+    "dmScope": "main",
+    "mainKey": "main"
+  },
+  "tools": {
+    "profile": "coding",
+    "web": {
+      "search": {
+        "provider": "searxng"
+      }
+    },
+    "media": {
+      "audio": {
+        "enabled": true,
+        "maxBytes": 20971520,
+        "echoTranscript": false,
+        "echoFormat": "Heard: \"{transcript}\"",
+        "models": [
+          {
+            "type": "cli",
+            "command": "python3",
+            "args": [
+              "/root/.openclaw/workspace/scripts/elevenlabs_stt.py",
+              "{{MediaPath}}"
+            ],
+            "timeoutSeconds": 15
+          }
+        ]
+      }
+    }
+  },
+  "auth": {
+    "profiles": {
+      "openrouter:default": {
+        "provider": "openrouter",
+        "mode": "api_key"
+      }
+    }
+  },
+  "channels": {
+    "whatsapp": {
+      "selfChatMode": true,
+      "dmPolicy": "allowlist",
+      "allowFrom": [
+        "+971585858488"
+      ],
+      "enabled": false
+    },
+    "telegram": {
+      "enabled": true,
+      "botToken": "8587868857:AAHpwDgZC-TgbMIXE40g8wqDFkaFV61yLoM"
+    }
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "session-memory": {
+          "enabled": true
+        },
+        "boot-md": {
+          "enabled": true
+        },
+        "command-logger": {
+          "enabled": true
+        }
+      }
+    },
+    "allowRequestSessionKey": true,
+    "allowedSessionKeyPrefixes": [
+      "agent:",
+      "hook:",
+      "paperclip:"
+    ]
+  },
+  "wizard": {
+    "lastRunAt": "2026-04-09T20:08:22.673Z",
+    "lastRunVersion": "2026.4.9",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.4.11",
+    "lastTouchedAt": "2026-04-15T22:04:37.555Z"
+  },
+  "plugins": {
+    "slots": {
+      "contextEngine": "lossless-claw"
+    },
+    "entries": {
+      "openrouter": {
+        "enabled": true
+      },
+      "lossless-claw": {
+        "enabled": true,
+        "config": {
+          "freshTailCount": 64,
+          "leafChunkTokens": 80000,
+          "contextThreshold": 0.75,
+          "summaryModel": "openai/gpt-4.1-mini"
+        }
+      },
+      "google": {
+        "enabled": true
+      },
+      "anthropic": {
+        "enabled": true
+      },
+      "elevenlabs": {
+        "enabled": true
+      }
+    }
+  },
+  "env": {
+    "FELO_API_KEY": "REDACTED",
+    "ELEVENLABS_API_KEY": "REDACTED",
+    "ELEVENLABS_VOICE_ID": "JBFqnCBsd6RMkjVDRZzb",
+    "ELEVENLABS_VOICE_NAME": "George"
+  },
+  "skills": {
+    "entries": {
+      "model-usage": {
+        "enabled": true
+      }
+    }
+  },
+  "messages": {
+    "tts": {
+      "auto": "always",
+      "provider": "microsoft",
+      "providers": {
+        "microsoft": {
+          "enabled": true,
+          "voice": "en-US-GuyNeural",
+          "lang": "en-US",
+          "outputFormat": "audio-24khz-48kbitrate-mono-mp3",
+          "rate": "+15%"
+        },
+        "elevenlabs": {
+          "apiKey": "REDACTED",
+          "voiceId": "JBFqnCBsd6RMkjVDRZzb",
+          "modelId": "eleven_multilingual_v2",
+## AGENTS
+[plugins] plugins.allow is empty; discovered non-bundled plugins may auto-load: lossless-claw (/root/.openclaw/extensions/lossless-claw/dist/index.js). Set plugins.allow to explicit trusted ids.
+[plugins] lossless-claw: loaded without install/load-path provenance; treat as untracked local code and pin trust via plugins.allow or install records (/root/.openclaw/extensions/lossless-claw/dist/index.js)
+Agents:
+- main (default)
+  Workspace: ~/.openclaw/workspace
+  Agent dir: ~/.openclaw/agents/main/agent
+  Model: openrouter/openai/gpt-4.1
+  Routing rules: 0
+  Routing: default (no explicit rules)
+  Providers:
+    - Telegram default: configured
+- cody
+  Identity: None. Cody doesn't do emojis. Cody (IDENTITY.md)
+  Workspace: ~/.openclaw/workspace/cody
+  Agent dir: ~/.openclaw/agents/cody/agent
+  Model: openrouter/openai/gpt-4.1
+  Routing rules: 0
+- schemy
+  Identity: None Schemy (IDENTITY.md)
+  Workspace: ~/.openclaw/workspace/schemy
+  Agent dir: ~/.openclaw/agents/schemy/agent
+  Model: openrouter/openai/gpt-4.1
+  Routing rules: 0
+- audrey
+  Identity: None Audrey (IDENTITY.md)
+  Workspace: ~/.openclaw/workspace/audrey
+  Agent dir: ~/.openclaw/agents/audrey/agent
+  Model: openrouter/openai/gpt-4.1
+  Routing rules: 0
+Routing rules map channel/account/peer to an agent. Use --bindings for full rules.
+Channel status reflects local config/creds. For live health: openclaw channels status --probe.
+## SKILLS-CAP
+[plugins] plugins.allow is empty; discovered non-bundled plugins may auto-load: lossless-claw (/root/.openclaw/extensions/lossless-claw/dist/index.js). Set plugins.allow to explicit trusted ids.
+[plugins] lossless-claw: loaded without install/load-path provenance; treat as untracked local code and pin trust via plugins.allow or install records (/root/.openclaw/extensions/lossless-claw/dist/index.js)
+{"id":"model.run","transports":["local","gateway"],"description":"Run a one-shot text inference turn through the agent runtime."}
+{"id":"model.list","transports":["local"],"description":"List known models from the model catalog."}
+{"id":"model.inspect","transports":["local"],"description":"Inspect one model catalog entry."}
+{"id":"model.providers","transports":["local"],"description":"List model providers discovered from the catalog."}
+{"id":"model.auth.login","transports":["local"],"description":"Run the existing provider auth login flow."}
+{"id":"model.auth.logout","transports":["local"],"description":"Remove saved auth profiles for one provider."}
+{"id":"model.auth.status","transports":["local"],"description":"Show configured model auth state."}
+{"id":"image.generate","transports":["local"],"description":"Generate raster images with configured image providers."}
+{"id":"image.edit","transports":["local"],"description":"Generate edited images from one or more input files."}
+{"id":"image.describe","transports":["local"],"description":"Describe one image file through media-understanding providers."}
+{"id":"image.describe-many","transports":["local"],"description":"Describe multiple image files independently."}
+{"id":"image.providers","transports":["local"],"description":"List image generation providers."}
+{"id":"audio.transcribe","transports":["local"],"description":"Transcribe one audio file."}
+{"id":"audio.providers","transports":["local"],"description":"List audio transcription providers."}
+{"id":"tts.convert","transports":["local","gateway"],"description":"Convert text to speech."}
+{"id":"tts.voices","transports":["local"],"description":"List voices for a speech provider."}
+{"id":"tts.providers","transports":["local","gateway"],"description":"List speech providers."}
+{"id":"tts.status","transports":["gateway"],"description":"Show gateway-managed TTS state."}
+{"id":"tts.enable","transports":["local","gateway"],"description":"Enable TTS in prefs."}
+{"id":"tts.disable","transports":["local","gateway"],"description":"Disable TTS in prefs."}
+{"id":"tts.set-provider","transports":["local","gateway"],"description":"Set the active TTS provider."}
+{"id":"video.generate","transports":["local"],"description":"Generate video files with configured video providers."}
+{"id":"video.describe","transports":["local"],"description":"Describe one video file through media-understanding providers."}
+{"id":"video.providers","transports":["local"],"description":"List video generation and description providers."}
+{"id":"web.search","transports":["local"],"description":"Run provider-backed web search."}
+{"id":"web.fetch","transports":["local"],"description":"Fetch URL content through configured web fetch providers."}
+{"id":"web.providers","transports":["local"],"description":"List web search and fetch providers."}
+{"id":"embedding.create","transports":["local"],"description":"Create embeddings through embedding providers."}
+{"id":"embedding.providers","transports":["local"],"description":"List embedding providers."}
+## SKILLS-LIST
+[plugins] plugins.allow is empty; discovered non-bundled plugins may auto-load: lossless-claw (/root/.openclaw/extensions/lossless-claw/dist/index.js). Set plugins.allow to explicit trusted ids.
+[plugins] lossless-claw: loaded without install/load-path provenance; treat as untracked local code and pin trust via plugins.allow or install records (/root/.openclaw/extensions/lossless-claw/dist/index.js)
+error: unknown command 'skill'
+(Did you mean skills?)
+## MCP
+No MCP servers configured in /root/.openclaw/openclaw.json.
+## MEMORY
+error: unknown command 'list'
+## CRON
+No cron jobs.
+## CHANNELS

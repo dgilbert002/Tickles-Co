@@ -92,10 +92,21 @@ MEMU_LLM_MODEL = os.environ.get("MEMU_LLM_MODEL", "openrouter/openai/gpt-4.1")
 MEMU_EMBED_MODEL = os.environ.get("MEMU_EMBED_MODEL", "all-MiniLM-L6-v2")
 
 # --- Exchange API keys (never log these) -------------------------------------
-BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY", "")
-BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET", "")
-BLOFIN_API_KEY = os.environ.get("BLOFIN_API_KEY", "")
-BLOFIN_API_SECRET = os.environ.get("BLOFIN_API_SECRET", "")
+BYBIT_SANDBOX = _get_bool_from_env("BYBIT_SANDBOX", True)
+if BYBIT_SANDBOX:
+    BYBIT_API_KEY = os.environ.get("BYBIT_DEMO_API_KEY", os.environ.get("BYBIT_API_KEY", ""))
+    BYBIT_API_SECRET = os.environ.get("BYBIT_DEMO_API_SECRET", os.environ.get("BYBIT_API_SECRET", ""))
+else:
+    BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY", "")
+    BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET", "")
+BLOFIN_API_KEY = os.environ.get("BLOFIN_API_KEY", os.environ.get("BLOFIN_DEMO_API_KEY", ""))
+BLOFIN_API_SECRET = os.environ.get("BLOFIN_API_SECRET", os.environ.get("BLOFIN_DEMO_API_SECRET", ""))
+
+# --- Capital.com -------------------------------------------------------------
+CAPITAL_EMAIL = os.environ.get("CAPITAL_EMAIL", "")
+CAPITAL_PASSWORD = os.environ.get("CAPITAL_PASSWORD", "")
+CAPITAL_API_KEY = os.environ.get("CAPITAL_API_KEY", "")
+CAPITAL_ENV = os.environ.get("CAPITAL_ENV", "demo")
 
 # --- Exchange settings --------------------------------------------------------
 BYBIT_SANDBOX = _get_bool_from_env("BYBIT_SANDBOX", True)

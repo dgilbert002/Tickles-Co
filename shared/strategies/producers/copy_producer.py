@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from shared.copy.store import CopyStore
+from shared.copy_trader_trader.store import CopyStore
 from shared.strategies.protocol import KIND_COPY, StrategyIntent
 
 

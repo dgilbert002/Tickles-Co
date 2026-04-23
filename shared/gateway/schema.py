@@ -44,6 +44,7 @@ class TickChannel(str, Enum):
     L1 = "l1"
     MARK = "mark"
     FUNDING = "funding"
+    CANDLE = "candle"
 
 
 def safe_symbol(symbol: str) -> str:
@@ -165,6 +166,22 @@ class MarkPrice(BaseModel):
     timestamp: datetime
     mark_price: Decimal
     index_price: Optional[Decimal] = None
+
+
+class Candle(BaseModel):
+    """One OHLCV candle (ccxt watchOHLCV or native)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    exchange: str
+    symbol: str
+    timestamp: datetime
+    timeframe: str
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Optional[Decimal] = None
 
 
 class GatewayStats(BaseModel):

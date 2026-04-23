@@ -55,6 +55,17 @@ shared/logs/
 logs/
 *.log
 *.sql.bak
+_otp_log.jsonl
+test_output.txt
+*.m3_backup
+*.m0_backup
+*.m4_backup
+*.bak-*
+
+# --- Runtime / temp test files at repo root ---
+test_capital_switching.py
+test_switching_robustness.py
+var/
 
 # --- OSS reference clones (Phase 12.9 of master plan — local-only) ---
 _references/

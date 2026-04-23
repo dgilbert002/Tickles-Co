@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Tickles cost reconciler daily at 00:05 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:05:00 UTC
+Persistent=true
+Unit=tickles-cost-reconciler.service
+
+[Install]
+WantedBy=timers.target

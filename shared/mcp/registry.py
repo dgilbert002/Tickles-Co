@@ -1,4 +1,4 @@
-"""In-process MCP tool registry.
+﻿"""In-process MCP tool registry.
 
 This is the runtime counterpart of `public.mcp_tools`. Tool handlers
 are Python callables (sync or async) that accept a dict of params and
@@ -12,9 +12,48 @@ wiring those pieces together.
 from __future__ import annotations
 
 import inspect
+import logging as _logging
+import threading
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .protocol import McpTool, ToolHandler
+
+
+def warmup_memory_background(logger: _logging.Logger) -> None:
+    """Eager-load SentenceTransformer embedders in a background thread.
+
+    Fixes the '60s cold-start timeout' for the first agent call to
+    `memory.*` or `memu.*` tools. Each subsystem (ScopedMemory, MemU)
+    is warmed independently so one failure does not block the other.
+    """
+
+    def _warmup() -> None:
+        # --- Tier 1/2: ScopedMemory (mem0 + Qdrant) ---
+        try:
+            from shared.utils.mem0_config import ScopedMemory
+
+            logger.info("[warmup] eager-loading ScopedMemory(rubicon) embedders...")
+            m = ScopedMemory("rubicon", agent_id="warmup")
+            # mem0 requires user_id and/or agent_id for search.
+            # Passing both ensures the search succeeds and fully
+            # exercises the embedder + Qdrant path.
+            m.search("warmup", user_id="rubicon", agent_id="rubicon_warmup")
+            logger.info("[warmup] ScopedMemory ready.")
+        except Exception as exc:
+            logger.warning("[warmup] ScopedMemory load failed: %s", exc)
+
+        # --- Tier 3: MemU (Postgres + pgvector) ---
+        try:
+            from shared.memu.client import MemU
+
+            logger.info("[warmup] eager-loading MemU embedder...")
+            u = MemU()
+            u.search("warmup")
+            logger.info("[warmup] MemU ready. All memory systems warm.")
+        except Exception as exc:
+            logger.warning("[warmup] MemU load failed: %s", exc)
+
+    threading.Thread(target=_warmup, name="mcp-warmup", daemon=True).start()
 
 
 class ToolRegistry:
@@ -281,3 +320,117 @@ async def _empty_list() -> List[Dict[str, Any]]:
 
 async def _empty_snapshot() -> Dict[str, Any]:
     return {"available": False}
+
+
+# ---------------------------------------------------------------------
+# M0.5 / M5 shared registration helper.
+#
+# Previously this lived in `bin/tickles_mcpd.py` which meant the stdio
+# entrypoint (`bin/tickles_mcp_stdio.py`) was still missing these six
+# tools — stdio clients (OpenClaw surgeons, Claude Desktop) saw 35 tools
+# while the HTTP daemon showed 41. Extracting the helper here keeps
+# the 6 `build_*_tool` factories and their wiring in one file and
+# guarantees both entry points publish the same catalogue.
+#
+# `services.list` gets a real in-memory provider (SERVICE_REGISTRY is
+# pure Python, no DB). The other five return safe `not_implemented`
+# envelopes until their upstream (Postgres pool / backtest submitter /
+# dashboard / regime store) is wired in M1-M2.
+# ---------------------------------------------------------------------
+
+
+def register_builtin_providers(
+    reg: "ToolRegistry",
+    logger: Optional[Any] = None,
+) -> None:
+    """Register the 6 built-in-tool providers on `reg` in-place.
+
+    Called by both the HTTP daemon and the stdio entrypoint so every
+    MCP client sees the same tool catalogue.
+
+    Args:
+        reg: the ToolRegistry to register tools into.
+        logger: optional logger for status/warning messages. Falls
+            back to a module-level stderr-capable placeholder if None.
+    """
+    log = logger if logger is not None else _logging.getLogger(
+        "tickles.mcp.registry.builtins"
+    )
+
+    # 1. Start the background warmup thread for memory systems (M4.5b)
+    warmup_memory_background(log)
+
+    # 2. services.list — real provider (pure Python, no DB).
+    try:
+        from shared.services.registry import (
+            SERVICE_REGISTRY,
+            register_builtin_services,
+        )
+        register_builtin_services()
+
+        async def _services_provider():
+            return [s.to_dict() for s in SERVICE_REGISTRY.list_services()]
+
+        tool, handler = build_services_list_tool(_services_provider)
+        reg.register(tool, handler)
+        log.info(
+            "[register_builtin_providers] wired services.list (real, n=%d)",
+            len(SERVICE_REGISTRY),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "[register_builtin_providers] services.list wire failed: %s",
+            exc,
+        )
+
+    # 3. strategy.intents.recent — stub until Postgres pool is wired (M1).
+    async def _intents_stub(limit):  # type: ignore[no-untyped-def]
+        return []  # tool contract requires a list
+
+    tool, handler = build_strategy_intents_tool(_intents_stub)
+    reg.register(tool, handler)
+
+    # 4. backtest.submit — stub until submitter is wired (M1).
+    async def _submit_stub(spec):  # type: ignore[no-untyped-def]
+        return {
+            "status": "not_implemented",
+            "reason": "backtest.submit provider awaits M1 wiring",
+            "spec_echo": spec,
+        }
+
+    tool, handler = build_backtest_submit_tool(_submit_stub)
+    reg.register(tool, handler)
+
+    # 5. backtest.status — stub until Postgres pool is wired (M1).
+    async def _status_stub(key):  # type: ignore[no-untyped-def]
+        return {
+            "status": "not_implemented",
+            "reason": "backtest.status provider awaits M1 wiring",
+            "key": key,
+        }
+
+    tool, handler = build_backtest_status_tool(_status_stub)
+    reg.register(tool, handler)
+
+    # 6. dashboard.snapshot — stub until dashboard_cli snapshot is wired.
+    async def _snapshot_stub():  # type: ignore[no-untyped-def]
+        return {
+            "status": "not_implemented",
+            "reason": "dashboard.snapshot provider awaits M1 wiring",
+            "available": False,
+        }
+
+    tool, handler = build_dashboard_snapshot_tool(_snapshot_stub)
+    reg.register(tool, handler)
+
+    # 7. regime.current — stub until regime store is wired.
+    async def _regime_stub():  # type: ignore[no-untyped-def]
+        return {
+            "status": "not_implemented",
+            "reason": "regime.current provider awaits M1 wiring",
+            "label": None,
+            "confidence": None,
+        }
+
+    tool, handler = build_regime_current_tool(_regime_stub)
+    reg.register(tool, handler)

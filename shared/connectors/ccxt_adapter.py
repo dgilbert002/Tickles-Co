@@ -35,11 +35,16 @@ class CCXTAdapter(BaseExchangeAdapter):
     """
 
     def __init__(
-        self, exchange_id: str, use_sandbox: bool = False, config: Optional[Dict[str, Any]] = None
+        self,
+        exchange_id: str,
+        use_sandbox: bool = False,
+        config: Optional[Dict[str, Any]] = None,
+        account_name: str = "main"
     ):
         self._exchange_id = exchange_id.lower()
         self._use_sandbox = use_sandbox
         self._config = config or {}
+        self._account_name = account_name
         self._exchange: Optional[ccxt.Exchange] = None
         self._lock = asyncio.Lock()
 
@@ -187,6 +192,7 @@ class CCXTAdapter(BaseExchangeAdapter):
             trades_count=None,  # fetch_ohlcv doesn't provide this
             data_source="api",
             candle_data_hash=data_hash,
+            exchange=self._exchange_id,
         )
 
     async def get_market_status(self, symbol: str) -> MarketStatus:
@@ -233,6 +239,104 @@ class CCXTAdapter(BaseExchangeAdapter):
                 "Failed to load markets from %s: %s", self._exchange_id, e, exc_info=True
             )
             raise
+
+    async def fetch_balance(self) -> Dict[str, Any]:
+        """Fetch account balance from the exchange using CCXT."""
+        exchange = await self._get_exchange()
+        try:
+            balance = await exchange.fetch_balance()
+            return balance
+        except (NetworkError, ExchangeError) as e:
+            logger.error(
+                "Failed to fetch balance from %s: %s", self._exchange_id, e, exc_info=True
+            )
+            raise
+
+    async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        """Fetch current ticker (bid/ask/last) for a symbol."""
+        exchange = await self._get_exchange()
+        try:
+            ticker = await exchange.fetch_ticker(symbol)
+            return {
+                "bid": ticker.get("bid"),
+                "ask": ticker.get("ask"),
+                "last": ticker.get("last"),
+                "spread": (ticker["ask"] - ticker["bid"]) if ticker.get("ask") and ticker.get("bid") else None,
+                "timestamp": ticker.get("timestamp"),
+            }
+        except (NetworkError, ExchangeError) as e:
+            logger.error("Failed to fetch ticker for %s from %s: %s", symbol, self._exchange_id, e)
+            raise
+
+    async def fetch_funding_rate(self, symbol: str) -> Dict[str, Any]:
+        """Fetch current funding rate for a symbol."""
+        exchange = await self._get_exchange()
+        try:
+            if not exchange.has.get("fetchFundingRate"):
+                return {"symbol": symbol, "rate": 0.0, "next_funding_time": None}
+            rate = await exchange.fetch_funding_rate(symbol)
+            return {
+                "symbol": symbol,
+                "rate": rate.get("fundingRate"),
+                "next_funding_time": rate.get("nextFundingTimestamp"),
+            }
+        except (NetworkError, ExchangeError) as e:
+            logger.error("Failed to fetch funding rate for %s from %s: %s", symbol, self._exchange_id, e)
+            return {"symbol": symbol, "rate": 0.0, "next_funding_time": None}
+
+    async def fetch_sentiment(self, symbol: str) -> Dict[str, Any]:
+        """Fetch market sentiment (not universally supported in CCXT)."""
+        return {"symbol": symbol, "long_pct": 50.0, "short_pct": 50.0, "num_buyers": 0, "num_sellers": 0}
+
+    async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch currently active/pending orders."""
+        exchange = await self._get_exchange()
+        try:
+            orders = await exchange.fetch_open_orders(symbol)
+            return orders
+        except (NetworkError, ExchangeError) as e:
+            logger.error("Failed to fetch open orders from %s: %s", self._exchange_id, e)
+            raise
+
+    async def fetch_closed_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch recently closed/filled orders."""
+        exchange = await self._get_exchange()
+        try:
+            orders = await exchange.fetch_closed_orders(symbol)
+            return orders
+        except (NetworkError, ExchangeError) as e:
+            logger.error("Failed to fetch closed orders from %s: %s", self._exchange_id, e)
+            raise
+
+    async def fetch_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch currently open positions."""
+        exchange = await self._get_exchange()
+        try:
+            if not exchange.has.get("fetchPositions"):
+                return []
+            positions = await exchange.fetch_positions(symbols=[symbol] if symbol else None)
+            return positions
+        except (NetworkError, ExchangeError) as e:
+            logger.error("Failed to fetch positions from %s: %s", self._exchange_id, e)
+            raise
+
+    async def fetch_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch trade/transaction history."""
+        exchange = await self._get_exchange()
+        try:
+            trades = await exchange.fetch_my_trades(symbol)
+            return trades
+        except (NetworkError, ExchangeError) as e:
+            logger.error("Failed to fetch trades from %s: %s", self._exchange_id, e)
+            raise
+
+    async def get_market_hours(self, symbol: str) -> Dict[str, Any]:
+        """Crypto markets are 24/7."""
+        return {
+            "timezone": "UTC",
+            "schedule": [{"day": i, "open": "00:00", "close": "23:59"} for i in range(7)],
+            "is_open": True,
+        }
 
     async def close(self) -> None:
         """Close the underlying CCXT exchange connection if it exists."""

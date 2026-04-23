@@ -35,12 +35,12 @@ import threading
 import traceback
 from typing import Any, Dict, Optional
 
-from backtest.candle_loader import load_candles_sync
-from backtest.ch_writer import ClickHouseWriter
-from backtest.engine import BacktestConfig, run_backtest
-from backtest.indicators import get as get_indicator
-from backtest.queue import BacktestQueue, HEARTBEAT_TTL_S
-from backtest.strategies import get as get_strategy
+from .candle_loader import load_candles_sync
+from .ch_writer import ClickHouseWriter
+from .engine import BacktestConfig, run_backtest
+from .indicators import get as get_indicator
+from .queue import BacktestQueue, HEARTBEAT_TTL_S
+from .strategies import get as get_strategy
 from shared.utils.db import get_shared_pool
 
 log = logging.getLogger("tickles.worker")

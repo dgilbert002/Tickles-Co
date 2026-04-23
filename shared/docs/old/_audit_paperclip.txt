@@ -1,0 +1,9 @@
+﻿===== PAPERCLIP =====
+Sun Apr 19 11:16:28 UTC 2026
+ENVFILE: /home/paperclip/.paperclip/instances/default/.env
+## ENV-KEYS-FIRST
+PAPERCLIP_AGENT_JWT_SECRET=
+USER=paperclip DB=paperclip pwlen=0
+## CONN
+Password for user paperclip: 
+psql: error: connection to server at "127.0.0.1", port 54329 failed: FATAL:  password authentication failed for user "paperclip"

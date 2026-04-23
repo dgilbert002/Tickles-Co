@@ -72,29 +72,45 @@ class CcxtExecutionAdapter:
     ) -> None:
         self._factory = client_factory
         self._sandbox = sandbox
-        self._clients: Dict[str, Any] = {}
+        self._clients: Dict[str, Any] = {} # Keyed by (exchange, account_name)
         self._known_orders: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
 
-    def _get_client(self, exchange: str) -> Any:
+    def _get_client(self, exchange: str, account_name: str = "main") -> Any:
         if not _CCXT_AVAILABLE:
             raise RuntimeError("ccxt is not installed; cannot use live adapter")
-        cached = self._clients.get(exchange)
+        
+        client_key = f"{exchange}:{account_name}"
+        cached = self._clients.get(client_key)
         if cached is not None:
             return cached
+            
         if self._factory is not None:
-            client = self._factory(exchange)
+            client = self._factory(exchange, account_name)
         else:
             if ccxt is None:
                 raise RuntimeError("ccxt module not available")
             cls = getattr(ccxt, exchange, None)
             if cls is None:
                 raise RuntimeError(f"ccxt has no exchange named {exchange!r}")
-            client = cls()
-            if self._sandbox and hasattr(client, "set_sandbox_mode"):
+            
+            from shared.utils.credentials import Credentials
+            creds = Credentials.get(exchange, account_name)
+            is_paper = Credentials.is_paper(exchange, account_name) or self._sandbox
+            
+            # Base config, enable rate limiting, use SWAP markets by default
+            exchange_config = {
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"},
+            }
+            exchange_config.update(creds)
+
+            client = cls(exchange_config)
+            if is_paper and hasattr(client, "set_sandbox_mode"):
                 client.set_sandbox_mode(True)
-        self._clients[exchange] = client
+                
+        self._clients[client_key] = client
         return client
 
     # ------------------------------------------------------------------
@@ -122,7 +138,8 @@ class CcxtExecutionAdapter:
         )]
 
         try:
-            client = self._get_client(intent.exchange)
+            account_name = (intent.metadata or {}).get("accountName", "main")
+            client = self._get_client(intent.exchange, account_name)
         except Exception as exc:
             updates.append(OrderUpdate(
                 client_order_id=client_id,
@@ -157,7 +174,12 @@ class CcxtExecutionAdapter:
             ))
             return updates
 
-        self._known_orders[client_id] = {"exchange": intent.exchange, "symbol": intent.symbol, "raw": raw}
+        self._known_orders[client_id] = {
+            "exchange": intent.exchange,
+            "symbol": intent.symbol,
+            "account_name": (intent.metadata or {}).get("accountName", "main"),
+            "raw": raw,
+        }
 
         updates.append(self._raw_to_update(client_id, raw, default_status=STATUS_ACCEPTED, default_event=EVENT_ACCEPTED))
         return updates
@@ -168,6 +190,7 @@ class CcxtExecutionAdapter:
         *,
         exchange: Optional[str] = None,
         symbol: Optional[str] = None,
+        account_name: str = "main",
     ) -> OrderUpdate:
         info = self._known_orders.get(client_order_id)
         ex = exchange or (info["exchange"] if info else None)
@@ -181,7 +204,9 @@ class CcxtExecutionAdapter:
                 message="ccxt: cancel requires exchange + symbol",
             )
         try:
-            client = self._get_client(ex)
+            # Prefer the account_name stored at submit time.
+            stored_account = (info or {}).get("account_name", account_name)
+            client = self._get_client(ex, stored_account)
             external_id = (info or {}).get("raw", {}).get("id")
             raw = await asyncio.to_thread(
                 client.cancel_order, external_id or client_order_id, sym
@@ -201,6 +226,7 @@ class CcxtExecutionAdapter:
     async def poll_updates(
         self,
         client_order_ids: Sequence[str],
+        account_name: str = "main",
     ) -> List[OrderUpdate]:
         out: List[OrderUpdate] = []
         for cid in client_order_ids:
@@ -208,7 +234,10 @@ class CcxtExecutionAdapter:
             if info is None:
                 continue
             try:
-                client = self._get_client(info["exchange"])
+                # Prefer the account_name stored at submit time so that
+                # polling always targets the correct exchange account.
+                stored_account = info.get("account_name", account_name)
+                client = self._get_client(info["exchange"], stored_account)
                 external_id = info.get("raw", {}).get("id")
                 raw = await asyncio.to_thread(client.fetch_order, external_id or cid, info["symbol"])
             except Exception as exc:

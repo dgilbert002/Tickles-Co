@@ -1,0 +1,437 @@
+﻿===== SKILLS =====
+Sun Apr 19 11:12:36 UTC 2026
+## INDEX
+total 28
+drwxr-xr-x  7 root root 4096 Apr 15 07:38 .
+drwxr-xr-x 14 root root 4096 Apr 18 20:53 ..
+drwx------  4 root root 4096 Apr 15 07:38 api-tester
+drwx------  4 root root 4096 Apr 15 07:38 code-review-sr
+drwx------  4 root root 4096 Apr 15 07:38 codebase-intelligence
+drwxr-xr-x  3 root root 4096 Apr 12 10:18 memclaw
+drwx------  3 root root 4096 Apr 15 07:38 sql-toolkit
+TOTAL: 5
+
+######## api-tester ########
+/root/.openclaw/workspace/skills/api-tester/scripts/test.js
+/root/.openclaw/workspace/skills/api-tester/_meta.json
+/root/.openclaw/workspace/skills/api-tester/SKILL.md
+/root/.openclaw/workspace/skills/api-tester/.clawhub/origin.json
+/root/.openclaw/workspace/skills/api-tester/index.js
+/root/.openclaw/workspace/skills/api-tester/package.json
+--SKILLMD--
+---
+name: api-tester
+description: Perform structured HTTP/HTTPS requests (GET, POST, PUT, DELETE) with custom headers and JSON body support. Use for API testing, health checks, or interacting with REST services programmatically without relying on curl.
+---
+
+# API Tester
+
+A lightweight, dependency-free HTTP client for OpenClaw.
+
+## Usage
+
+### Basic GET Request
+
+```javascript
+const api = require('skills/api-tester');
+const result = await api.request('GET', 'https://api.example.com/data');
+console.log(result.status, result.data);
+```
+
+### POST Request with JSON Body
+
+```javascript
+const api = require('skills/api-tester');
+const payload = { key: 'value' };
+const headers = { 'Authorization': 'Bearer <token>' };
+const result = await api.request('POST', 'https://api.example.com/submit', headers, payload);
+```
+
+### Return Format
+
+The `request` function returns a Promise resolving to:
+
+```javascript
+{
+  status: 200,          // HTTP status code
+  headers: { ... },     // Response headers
+  data: { ... },        // Parsed JSON body (if applicable) or raw string
+  raw: "...",           // Raw response body string
+  error: "..."          // Error message if request failed (network error, timeout)
+}
+```
+
+## Features
+
+- **Zero dependencies**: Uses Node.js built-in `http` and `https` modules.
+- **Auto-JSON**: Automatically stringifies request body and parses response body if Content-Type matches.
+- **Timeout support**: Default 10s timeout, configurable.
+- **Error handling**: Returns structured error object instead of throwing, ensuring safe execution.
+--package.json--
+{
+  "name": "api-tester",
+  "version": "1.0.0",
+  "description": "Structured API testing and HTTP client for OpenClaw.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node scripts/test.js"
+  }
+}
+--URLS--
+http://example.com
+http://invalid.url.that.does.not.exist
+https://api.example.com/data
+https://api.example.com/submit
+https://clawhub.ai
+https://www.google.com
+--ENV--
+--FRESH--
+
+######## code-review-sr ########
+/root/.openclaw/workspace/skills/code-review-sr/src/code-review.js
+/root/.openclaw/workspace/skills/code-review-sr/README.md
+/root/.openclaw/workspace/skills/code-review-sr/_meta.json
+/root/.openclaw/workspace/skills/code-review-sr/SKILL.md
+/root/.openclaw/workspace/skills/code-review-sr/LICENSE.md
+/root/.openclaw/workspace/skills/code-review-sr/.clawhub/origin.json
+--SKILLMD--
+---
+slug: "code-review-sr"
+name: "CodeReview Automated Code Review Assistant"
+description: "AI-powered code review that combines fast local static analysis with deep AI reasoning. Catches bugs, security vulnerabilities, performance issues, and style problems. Supports Anthropic, OpenAI, and Ollama models. Falls back to local regex analysis when offline."
+author: "@TheShadowRose"
+version: "1.0.4"
+tags: ["code-review", "ai", "static-analysis", "security"]
+license: "MIT"
+env:
+  ANTHROPIC_API_KEY: "Optional - for Anthropic/Claude models (or set CLAUDE_API_KEY)"
+  OPENAI_API_KEY: "Optional - for OpenAI/GPT models"
+  OLLAMA_HOST: "Optional - Ollama base URL, default http://localhost:11434"
+  OLLAMA_PORT: "Optional - Ollama port, default 11434"
+---
+
+# CodeReview ΓÇö AI-Powered Code Review Assistant
+
+Combines **fast local regex pattern matching** with **deep AI-powered analysis** to deliver thorough, actionable code reviews. Runs a local static analysis pre-pass first, then sends code and initial findings to an AI model for comprehensive review including bug detection, security analysis, performance suggestions, and style feedback.
+
+---
+
+## How It Works
+
+1. **Local Pre-Pass** ΓÇö Regex-based pattern matching runs instantly, catching hardcoded secrets, eval usage, SQL injection patterns, empty catch blocks, long functions, and more.
+2. **AI Deep Review** ΓÇö The full source code and local findings are sent to your chosen AI model (Anthropic, OpenAI, or Ollama) for deep reasoning about bugs, logic errors, performance, and architecture.
+3. **Graceful Fallback** ΓÇö If no API key is set or the AI call fails, you still get local static analysis results. Never blocks your workflow.
+
+## Usage
+
+```javascript
+const { CodeReview } = require('./src/code-review');
+
+// AI-powered review (default: anthropic/claude-haiku-4-5)
+const reviewer = new CodeReview({ model: 'anthropic/claude-haiku-4-5' });
+const result = await reviewer.review('./src/auth.js');
+
+console.log(result.score);        // 1-10
+console.log(result.issues);       // Array of issues with severity, line, type, message
+console.log(result.suggestions);  // Actionable improvement suggestions
+console.log(result.summary);      // Concise quality summary
+console.log(result.aiPowered);    // true
+
+// Review an entire directory
+const dirResult = await reviewer.reviewDir('./src', {
+  include: ['*.js', '*.ts'],
+  exclude: ['node_modules', '.git', 'dist'],
+  concurrency: 3
+});
+console.log(dirResult.averageScore);
+console.log(dirResult.totalIssues);
+```
+
+### Model Options
+
+| Provider | Example | API Key Env Var |
+|----------|---------|-----------------|
+| **Anthropic** | `anthropic/claude-haiku-4-5` | `ANTHROPIC_API_KEY` |
+| **OpenAI** | `openai/gpt-4o-mini` | `OPENAI_API_KEY` |
+| **Ollama** (local) | `ollama/llama3` | None required |
+
+```javascript
+// OpenAI
+const reviewer = new CodeReview({ model: 'openai/gpt-4o-mini' });
+
+// Local Ollama
+const reviewer = new CodeReview({ model: 'ollama/codellama' });
+
+// Local-only (no AI, regex patterns only)
+const reviewer = new CodeReview();
+const result = await reviewer.review('./src/app.js');
+--URLS--
+http://localhost:11434
+https://clawhub.ai
+https://github.com/TheShadowRose
+https://github.com/openclaw/openclaw
+https://ko-fi.com/theshadowrose
+https://promptbase.com/profile/shadowrose
+https://shadowyrose.gumroad.com
+https://twitter.com/TheShadowyRose
+https://www.fiverr.com/s/jjmlZ0v
+--ENV--
+--FRESH--
+
+######## codebase-intelligence ########
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/deps.py
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/analyze.py
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/ask_v2.py
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/diagram.py
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/indexer.py
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/ask.py
+/root/.openclaw/workspace/skills/codebase-intelligence/scripts/main.py
+/root/.openclaw/workspace/skills/codebase-intelligence/_meta.json
+/root/.openclaw/workspace/skills/codebase-intelligence/SKILL.md
+/root/.openclaw/workspace/skills/codebase-intelligence/.clawhub/origin.json
+--SKILLMD--
+---
+name: codebase-intelligence
+description: Intelligent codebase analysis and understanding with caching. Automatically explores project structure, identifies modules, analyzes dependencies, and answers questions about the codebase. Use when onboarding to a new project, before refactoring, or when you need to understand code relationships.
+---
+
+# Codebase Intelligence
+
+µÖ║Φâ╜Σ╗úτáüσ║ôσêåµ₧Éσ╖Ñσà╖∩╝îΦç¬σè¿τÉåΦºúΘí╣τ¢«τ╗ôµ₧äπÇüµ¿íσ¥ùΦ╛╣τòîσÆîΣ╛¥Φ╡ûσà│τ│╗πÇé
+
+**Version**: 1.0  
+**Features**: σó₧ΘçÅτ┤óσ╝òτ╝ôσ¡ÿπÇüτ¼ªσÅ╖µÉ£τ┤óπÇüµÖ║Φâ╜Θù«τ¡öπÇüµ₧╢µ₧äσ¢╛τöƒµêÉ
+
+---
+
+## Quick Start
+
+### 1. Θªûµ¼íτ┤óσ╝ò∩╝êΦç¬σè¿τ╝ôσ¡ÿ∩╝ë
+
+```bash
+cd /path/to/project
+python3 /path/to/codebase-intelligence/scripts/main.py analyze .
+```
+
+τ¼¼Σ╕Çµ¼íΣ╝Üσê¢σ╗║ `.codebase-intelligence/` τ¢«σ╜òσ╣╢τ╝ôσ¡ÿτ┤óσ╝òπÇéσÉÄτ╗¡µƒÑΦ»óτºÆσ╝Ç∩╝ü
+
+### 2. µÖ║Φâ╜Θù«τ¡ö
+
+```bash
+# µƒÑµë╛Σ╗úτáüΣ╜ìτ╜«
+python3 main.py ask "Where is authentication implemented?"
+
+# Σ║åΦºúσ╖ÑΣ╜£µ╡üτ¿ï
+python3 main.py ask "How does the user login flow work?"
+
+# µƒÑµë╛σªéΣ╜òΣ┐«µö╣
+python3 main.py ask "What files need to change to add OAuth?"
+```
+
+### 3. τ¼ªσÅ╖µÉ£τ┤ó
+
+```bash
+# µƒÑµë╛τ▒╗σ«ÜΣ╣ë
+python3 main.py analyze --symbol "UserManager" --symbol-type class
+
+# µƒÑµë╛σç╜µò░
+python3 main.py analyze --symbol "authenticate" --symbol-type func
+```
+
+### 4. Σ╛¥Φ╡ûσêåµ₧É
+
+```bash
+# µƒÑτ£ïµûçΣ╗╢Σ╛¥Φ╡ûΣ╗ÇΣ╣ê
+python3 main.py deps src/auth.py
+
+# µƒÑτ£ïΣ╗ÇΣ╣êΣ╛¥Φ╡ûΦ┐ÖΣ╕¬µûçΣ╗╢
+python3 main.py deps src/utils.py --reverse
+```
+
+### 5. τöƒµêÉµ₧╢µ₧äσ¢╛
+
+```bash
+# Mermaid σ¢╛
+python3 main.py diagram --format mermaid
+
+# µ╡üτ¿ïσ¢╛
+python3 main.py diagram --format mermaid-flow --entry-points main.py app.py
+```
+
+---
+
+--URLS--
+https://clawhub.ai
+--ENV--
+--FRESH--
+
+######## memclaw ########
+/root/.openclaw/workspace/skills/memclaw/scripts/run.mjs
+/root/.openclaw/workspace/skills/memclaw/clawhub.json
+/root/.openclaw/workspace/skills/memclaw/SKILL.md
+--SKILLMD--
+---
+name: memclaw
+description: "Use when users need to manage projects backed by Felo LiveDoc ΓÇö creating, opening, switching projects, saving artifacts, querying history, or managing tasks. Also triggers when calling any Felo Doc API operation: LiveDoc CRUD, resource management (add-doc, add-urls, upload, content, download), README operations, task management (create/update/delete tasks, task records, comments), or any other Felo LiveDoc API endpoint. Triggers on project-related intent combined with project/client/niche names."
+---
+
+# MemClaw
+
+The Agent's external brain for projects. Once active, the Agent continuously syncs tasks, artifacts, and knowledge to the corresponding LiveDoc, so anyone (including future sessions or colleagues) can open the project and immediately get full context.
+
+## Core Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Project | One project = one LiveDoc |
+| Active Project | Session-level state; all operations auto-sync here |
+| README | The Agent's memory of the project; Agent maintains proactively |
+| Artifacts | Key outputs; Agent asks before saving |
+| Tasks | Tracking records for substantive work; Agent maintains silently |
+| Registry | `~/.memclaw/workspaces.json`, maps project names to LiveDoc IDs |
+
+**Registry format:**
+```json
+{
+  "workspaces": {
+    "horror-niche": "abc123",
+    "client-zhang": "def456"
+  }
+}
+```
+
+## Script Shorthand
+
+In all commands below, `$SCRIPT` refers to:
+
+```
+node ./scripts/run.mjs
+```
+
+When unsure about a command's options, run `$SCRIPT <command> --help` or just `$SCRIPT --help` to see the full usage.
+
+## Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `create` | Create a new LiveDoc (`--name` required) |
+| `list` | List all LiveDocs |
+| `update <short_id>` | Update a LiveDoc |
+| `delete <short_id>` | Delete a LiveDoc |
+| `resources <short_id>` | List resources in a LiveDoc |
+| `resource <short_id> <resource_id>` | Get a single resource |
+| `add-doc <short_id>` | Create a text document resource (`--content` required) |
+| `add-urls <short_id>` | Add URL resources (`--urls` required, comma-separated, max 10) |
+| `upload <short_id>` | Upload a file resource (`--file` required, `--convert` optional) |
+| `remove-resource <short_id> <resource_id>` | Delete a resource |
+| `update-resource <short_id> <resource_id>` | Update resource title, snippet, or thumbnail |
+| `update-resource-content <short_id> <resource_id>` | Update Markdown content of an `ai_doc` resource (`--content` required) |
+| `content <short_id> <resource_id>` | Get text content of a resource |
+| `download <short_id> <resource_id>` | Download source file to disk |
+| `get-readme <short_id>` | Get README (returns `summary` + `content`) |
+| `update-readme <short_id>` | Create or replace README (`--content` or `--summary` required, at least one) |
+| `append-readme <short_id>` | Append content to README (`--content` required) |
+| `delete-readme <short_id>` | Delete README |
+| `tasks <short_id>` | List tasks (filter by `--status`, `--labels`) |
+| `create-task <short_id>` | Create a task (`--title` required; `--status` default 0, `--sort` default 0) |
+| `update-task <short_id> <task_id>` | Partially update a task |
+| `delete-task <short_id> <task_id>` | Delete a task |
+| `task-records <short_id> <task_id>` | List task records (comments + change history) |
+| `add-task-comment <short_id> <task_id>` | Add a comment to a task (`--content` required) |
+
+---
+--URLS--
+https://felo.ai/livedoc/SHORT_ID
+https://felo.ai/settings/api-keys
+https://github.com/Felo-Inc/memclaw
+https://github.com/Felo-Inc/memclaw/issues
+https://memclaw.felo.ai
+https://openapi.felo.ai
+https://openapi.felo.ai/docs/
+--ENV--
+process.env.FELO_API_BASE
+process.env.FELO_API_KEY
+process.env.HOME
+process.env.USERPROFILE
+--FRESH--
+
+######## sql-toolkit ########
+/root/.openclaw/workspace/skills/sql-toolkit/_meta.json
+/root/.openclaw/workspace/skills/sql-toolkit/SKILL.md
+/root/.openclaw/workspace/skills/sql-toolkit/.clawhub/origin.json
+--SKILLMD--
+---
+name: sql-toolkit
+description: Query, design, migrate, and optimize SQL databases. Use when working with SQLite, PostgreSQL, or MySQL ΓÇö schema design, writing queries, creating migrations, indexing, backup/restore, and debugging slow queries. No ORMs required.
+metadata: {"clawdbot":{"emoji":"≡ƒùä∩╕Å","requires":{"anyBins":["sqlite3","psql","mysql"]},"os":["linux","darwin","win32"]}}
+---
+
+# SQL Toolkit
+
+Work with relational databases directly from the command line. Covers SQLite, PostgreSQL, and MySQL with patterns for schema design, querying, migrations, indexing, and operations.
+
+## When to Use
+
+- Creating or modifying database schemas
+- Writing complex queries (joins, aggregations, window functions, CTEs)
+- Building migration scripts
+- Optimizing slow queries with indexes and EXPLAIN
+- Backing up and restoring databases
+- Quick data exploration with SQLite (zero setup)
+
+## SQLite (Zero Setup)
+
+SQLite is included with Python and available on every system. Use it for local data, prototyping, and single-file databases.
+
+### Quick Start
+
+```bash
+# Create/open a database
+sqlite3 mydb.sqlite
+
+# Import CSV directly
+sqlite3 mydb.sqlite ".mode csv" ".import data.csv mytable" "SELECT COUNT(*) FROM mytable;"
+
+# One-liner queries
+sqlite3 mydb.sqlite "SELECT * FROM users WHERE created_at > '2026-01-01' LIMIT 10;"
+
+# Export to CSV
+sqlite3 -header -csv mydb.sqlite "SELECT * FROM orders;" > orders.csv
+
+# Interactive mode with headers and columns
+sqlite3 -header -column mydb.sqlite
+```
+
+### Schema Operations
+
+```sql
+-- Create table
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Create with foreign key
+CREATE TABLE orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    total REAL NOT NULL CHECK(total >= 0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','shipped','cancelled')),
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Add column
+ALTER TABLE users ADD COLUMN phone TEXT;
+
+-- Create index
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+CREATE UNIQUE INDEX idx_users_email ON users(email);
+
+--URLS--
+https://clawhub.ai
+--ENV--
+--FRESH--
+===== END =====

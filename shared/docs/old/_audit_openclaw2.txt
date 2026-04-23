@@ -1,0 +1,78 @@
+﻿===== OPENCLAW-EXTRA =====
+Sun Apr 19 11:16:35 UTC 2026
+## MCP
+No MCP servers configured in /root/.openclaw/openclaw.json.
+## MEMORY
+## CRON
+## CHANNELS
+## SKILLS
+## SYSTEMD
+  paperclip.service                              loaded    active   running Paperclip (prod-static UI + tsx runtime)
+  tickles-bt-workers.service                     loaded    active   running Tickles V2 backtest worker pool
+  tickles-candle-daemon.service                  loaded    active   running Tickles V2 1m candle collector (CCXT)
+  tickles-catalog.service                        loaded    active   running Tickles V2 Data Catalog service
+  tickles-md-gateway.service                     loaded    active   running Tickles Market Data Gateway (CCXT Pro WebSocket -> Redis fan-out, Phase 17)
+## PROCS
+root     1033690  1.5  1.3 12341832 662332 ?     Ssl  Apr18  21:16  \_ openclaw-gateway
+papercl+   14550  0.0  0.0 225736  6856 ?        Ss   Apr09   0:00 postgres: autovacuum worker 
+mysql      49724  2.2  0.8 2537988 419320 ?      Ssl  Apr10 302:10 /usr/sbin/mysqld
+root      114844  1.1  0.4 2170080 220276 ?      Sl   Apr12 113:20      \_ ./qdrant
+root     1004660  0.0  0.1 1360744 61788 ?       Sl   Apr18   0:02          \_ /usr/local/bin/uv tool uvx mcp-server-qdrant
+root     1004682  0.0  0.5 1835600 279288 ?      Sl   Apr18   0:05              \_ /root/.cache/uv/archive-v0/Jg8rBu1IZkkICPa-HP8ZJ/bin/python /root/.cache/uv/archive-v0/Jg8rBu1IZkkICPa-HP8ZJ/bin/mcp-server-qdrant
+postgres  790582  0.0  0.0 223272 31524 ?        Ss   Apr16   2:06 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main -c config_file=/etc/postgresql/16/main/postgresql.conf
+postgres  790583  0.0  0.1 223864 86684 ?        Ss   Apr16   0:46  \_ postgres: 16/main: checkpointer 
+postgres  790584  0.0  0.0 223424 12584 ?        Ss   Apr16   0:23  \_ postgres: 16/main: background writer 
+postgres  790586  0.0  0.0 223272 10448 ?        Ss   Apr16   2:04  \_ postgres: 16/main: walwriter 
+postgres  790587  0.0  0.0 224876  9392 ?        Ss   Apr16   0:43  \_ postgres: 16/main: autovacuum launcher 
+postgres  790588  0.0  0.0 224852  8476 ?        Ss   Apr16   0:00  \_ postgres: 16/main: logical replication launcher 
+postgres 1177028  0.0  0.0 228392 32428 ?        Ss   13:10   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(38824) idle
+postgres 1177031  0.1  0.0 228392 33008 ?        Ss   13:10   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(38844) idle
+postgres 1177032  0.0  0.0 228392 32788 ?        Ss   13:10   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(38852) idle
+postgres 1177974  0.1  0.0 228520 31120 ?        Ss   13:16   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(50876) idle
+postgres 1177975  0.1  0.0 228520 30976 ?        Ss   13:16   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(50882) idle
+postgres 1177976  0.2  0.0 228524 31272 ?        Ss   13:16   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(50896) idle
+postgres 1178219  0.1  0.0 228524 29812 ?        Ss   13:17   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(38594) idle
+postgres 1178220  1.0  0.0 228524 31460 ?        Ss   13:17   0:00  \_ postgres: 16/main: admin tickles_shared 127.0.0.1(38598) idle
+papercl+ 1013787  0.0  0.1 1047448 63960 ?       Ssl  Apr18   0:00 node /home/paperclip/paperclip/server/node_modules/.bin/../tsx/dist/cli.mjs src/index.ts
+papercl+ 1013807  0.9  0.4 65542040 227864 ?     Sl   Apr18  14:00  \_ /usr/bin/node --require /home/paperclip/paperclip/node_modules/.pnpm/tsx@4.21.0/node_modules/tsx/dist/preflight.cjs --import file:///home/paperclip/paperclip/node_modules/.pnpm/tsx@4.21.0/node_modules/tsx/dist/loader.mjs src/index.ts
+papercl+ 1013840  0.0  0.0 225552 26408 ?        S    Apr18   0:12      \_ /home/paperclip/paperclip/node_modules/.pnpm/@embedded-postgres+linux-x64@18.1.0-beta.16/node_modules/@embedded-postgres/linux-x64/native/bin/postgres -D /home/paperclip/.paperclip/instances/default/db -p 54329
+papercl+ 1013841  0.0  0.0 225692  8956 ?        Ss   Apr18   0:00          \_ postgres: io worker 0
+papercl+ 1013842  0.0  0.0 225692  5164 ?        Ss   Apr18   0:00          \_ postgres: io worker 2
+papercl+ 1013843  0.0  0.0 225692  6104 ?        Ss   Apr18   0:00          \_ postgres: io worker 1
+papercl+ 1013844  0.0  0.0 225816 15712 ?        Ss   Apr18   0:01          \_ postgres: checkpointer 
+papercl+ 1013845  0.0  0.0 225692  7604 ?        Ss   Apr18   0:05          \_ postgres: background writer 
+papercl+ 1013847  0.0  0.0 225692  9348 ?        Ss   Apr18   0:08          \_ postgres: walwriter 
+papercl+ 1013848  0.0  0.0 227164  8732 ?        Ss   Apr18   0:06          \_ postgres: autovacuum launcher 
+## PORTS
+LISTEN 0      4096                  100.71.74.12:8080       0.0.0.0:*    users:(("tailscaled",pid=8152,fd=32))                  
+LISTEN 0      4096                  100.71.74.12:8443       0.0.0.0:*    users:(("tailscaled",pid=8152,fd=25))                  
+LISTEN 0      4096                       0.0.0.0:6333       0.0.0.0:*    users:(("docker-proxy",pid=114801,fd=8))               
+LISTEN 0      200                      127.0.0.1:54329      0.0.0.0:*    users:(("postgres",pid=1013840,fd=9))                  
+LISTEN 0      50                       127.0.0.1:3306       0.0.0.0:*    users:(("mysqld",pid=49724,fd=22))                     
+LISTEN 0      511                      127.0.0.1:3100       0.0.0.0:*    users:(("node",pid=1013807,fd=43))                     
+LISTEN 0      70                       127.0.0.1:33060      0.0.0.0:*    users:(("mysqld",pid=49724,fd=20))                     
+LISTEN 0      511                        0.0.0.0:18789      0.0.0.0:*    users:(("openclaw-gatewa",pid=1033690,fd=25))          
+LISTEN 0      511                      127.0.0.1:8080       0.0.0.0:*    users:(("node",pid=165258,fd=22))                      
+LISTEN 0      200                      127.0.0.1:5432       0.0.0.0:*    users:(("postgres",pid=790582,fd=7))                   
+LISTEN 0      4096   [fd7a:115c:a1e0::2836:4a0c]:8443          [::]:*    users:(("tailscaled",pid=8152,fd=27))                  
+LISTEN 0      200                          [::1]:54329         [::]:*    users:(("postgres",pid=1013840,fd=8))                  
+LISTEN 0      4096   [fd7a:115c:a1e0::2836:4a0c]:8080          [::]:*    users:(("tailscaled",pid=8152,fd=33))                  
+LISTEN 0      4096                          [::]:6333          [::]:*    users:(("docker-proxy",pid=114808,fd=8))               
+LISTEN 0      200                          [::1]:5432          [::]:*    users:(("postgres",pid=790582,fd=6))                   
+## TS
+100.71.74.12  vmi3220412  gilbert.dean@  linux    -                                                            
+100.101.64.5  gti14       gilbert.dean@  windows  active; direct 5.30.202.155:41641, tx 150351720 rx 16744604  
+## OR-USAGE-KEY
+{"error":{"message":"Missing Authentication header","code":401}}
+## MEMU-POSTGRES-5432
+ΓùÅ postgresql.service - PostgreSQL RDBMS
+     Loaded: loaded (/usr/lib/systemd/system/postgresql.service; enabled; preset: enabled)
+     Active: active (exited) since Thu 2026-04-16 22:25:42 CEST; 2 days ago
+   Main PID: 789699 (code=exited, status=0/SUCCESS)
+        CPU: 42ms
+## QDRANT
+{"result":{"collections":[{"name":"mem0migrations"},{"name":"tickles_shared"}]},"status":"ok","time":0.00027893}## MYSQL-TICKLES
+Database (tickles_%)
+tickles_jarvais
+tickles_shared
+===== END =====

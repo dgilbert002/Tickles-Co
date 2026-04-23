@@ -31,6 +31,22 @@ class Candle:
     trades_count: Optional[int]
     data_source: str
     candle_data_hash: str
+    exchange: Optional[str] = None
+
+    def to_gateway_model(self) -> Any:
+        """Convert to the Pydantic model used by the streaming gateway."""
+        from shared.gateway.schema import Candle as GatewayCandle
+        return GatewayCandle(
+            exchange=self.exchange or "unknown",
+            symbol=self.instrument_id,
+            timeframe=self.timeframe,
+            timestamp=self.timestamp,
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+        )
 
 @dataclass(frozen=True)
 class Instrument:
@@ -94,6 +110,71 @@ class BaseExchangeAdapter(ABC):
 
         Returns:
             List of Instrument dataclasses.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_balance(self) -> Dict[str, Any]:
+        """Fetch account balance from the exchange.
+
+        Returns:
+            Dict containing balance information (standardized format).
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        """Fetch current ticker (bid/ask/last) for a symbol.
+
+        Returns:
+            Dict with 'bid', 'ask', 'last', 'spread', 'timestamp'.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_funding_rate(self, symbol: str) -> Dict[str, Any]:
+        """Fetch current funding or overnight holding rate.
+
+        Returns:
+            Dict with 'symbol', 'rate', 'next_funding_time'.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_sentiment(self, symbol: str) -> Dict[str, Any]:
+        """Fetch market sentiment (buyers vs sellers) if available.
+
+        Returns:
+            Dict with 'symbol', 'long_pct', 'short_pct', 'num_buyers', 'num_sellers'.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch currently active/pending orders."""
+        ...
+
+    @abstractmethod
+    async def fetch_closed_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch recently closed/filled orders."""
+        ...
+
+    @abstractmethod
+    async def fetch_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch currently open positions."""
+        ...
+
+    @abstractmethod
+    async def fetch_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch trade/transaction history."""
+        ...
+
+    @abstractmethod
+    async def get_market_hours(self, symbol: str) -> Dict[str, Any]:
+        """Get detailed market open/close schedule for a symbol.
+
+        Returns:
+            Dict with 'timezone', 'schedule' (list of open/close per day), 'is_open'.
         """
         ...
 

@@ -1,0 +1,38 @@
+{
+  "id": "trading",
+  "name": "Trading company",
+  "description": "Layer-1 infrastructure (database + memory + vector) plus Layer-2 trading add-ons: Treasury registration, venue allow-list, Rule-1 parity enforcement, and per-trade autopsy/post-mortem/feedback routines. Ships with a single CEO agent (Claude Sonnet 4 on OpenRouter) so the company is runnable the moment provisioning finishes — hire more agents yourself via the 'Hire agent' wizard.",
+  "category": "trading",
+  "layer2_trading": true,
+  "rule_one_mode": "advisory",
+  "memu_subscriptions": [
+    "trade_insights",
+    "risk_events",
+    "market_regime_changes"
+  ],
+  "venues": [
+    "bybit_demo"
+  ],
+  "skills": [
+    "ccxt-pro",
+    "indicator-library",
+    "backtest-submit"
+  ],
+  "agents": [
+    {
+      "urlKey": "ceo",
+      "name": "CEO",
+      "role": "ceo",
+      "model": "openrouter/anthropic/claude-sonnet-4",
+      "soul": "apex",
+      "skills": ["ccxt-pro", "indicator-library", "backtest-submit"],
+      "budgetMonthlyCents": 20000,
+      "clone_openclaw_from": "cody"
+    }
+  ],
+  "routines": [
+    { "kind": "autopsy",       "trigger": "on_trade_close" },
+    { "kind": "postmortem",    "trigger": "daily_23_utc" },
+    { "kind": "feedback_loop", "trigger": "weekly_sunday_20_utc" }
+  ]
+}

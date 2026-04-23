@@ -231,20 +231,33 @@ class MemU:
                 cols = [c[0] for c in cur.description]
                 return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-        where = "WHERE kind = %s" if kind else ""
-        args = (kind,) if kind else ()
-        with self.conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT id, kind, content, metadata, created_at,
-                       embedding <=> %s::vector AS distance
-                FROM insights
-                {where}
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """,
-                args + (embed, embed, k),
+        # Positional-parameter layout for the vector query:
+        #   1st %s -> embed   (in SELECT ... AS distance)
+        #   2nd %s -> kind    (in optional WHERE)  -- skipped when no kind
+        #   3rd %s -> embed   (in ORDER BY)
+        #   4th %s -> k       (in LIMIT)
+        # Bug (pre-2026-04-20): `args + (embed, embed, k)` placed `kind`
+        # before the first embed, which made Postgres try to cast "warning"
+        # to vector and raised `malformed vector literal`. Fixed by slotting
+        # the kind AFTER the first embed so the tuple aligns with the SQL.
+        if kind:
+            sql = (
+                "SELECT id, kind, content, metadata, created_at, "
+                "       embedding <=> %s::vector AS distance "
+                "FROM insights WHERE kind = %s "
+                "ORDER BY embedding <=> %s::vector LIMIT %s"
             )
+            params: tuple = (embed, kind, embed, k)
+        else:
+            sql = (
+                "SELECT id, kind, content, metadata, created_at, "
+                "       embedding <=> %s::vector AS distance "
+                "FROM insights "
+                "ORDER BY embedding <=> %s::vector LIMIT %s"
+            )
+            params = (embed, embed, k)
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 

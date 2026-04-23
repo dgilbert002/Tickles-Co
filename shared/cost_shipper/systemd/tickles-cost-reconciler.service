@@ -1,0 +1,11 @@
+[Unit]
+Description=Tickles cost reconciler — daily drift check against OpenRouter
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/tickles/secrets.env
+Environment=PAPERCLIP_URL=http://127.0.0.1:3100
+ExecStart=/usr/bin/python3 /opt/tickles/shared/cost_shipper/reconciler.py --day-back 1
+StandardOutput=journal
+StandardError=journal
