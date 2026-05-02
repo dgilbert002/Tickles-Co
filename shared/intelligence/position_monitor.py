@@ -48,6 +48,7 @@ for p in (_ROOT, _SHARED):
 
 from shared.utils.config import load_env
 from shared.utils.db import DatabasePool, get_shared_pool
+from shared.utils.instrument_normaliser import normalise_venue, to_canonical_symbol
 
 from shared.intelligence.position_quant import (
     check_sl_tp_hit,
@@ -137,6 +138,123 @@ async def fetch_open_positions(
     )
 
 
+async def _resolve_instrument_id(
+    pool: DatabasePool,
+    raw_symbol: str,
+    raw_exchange: Optional[str],
+) -> Optional[int]:
+    """Resolve a tracked_positions symbol/exchange pair to instruments.id.
+
+    Resolution order (D6 — slash-form canonical, no ambiguity):
+      1. Canonicalise inputs via to_canonical_symbol/normalise_venue.
+      2. Exact match on instruments(symbol, exchange) using canonical values.
+      3. Fallback to instrument_aliases.alias_value scoped by exchange.
+      4. Fallback to instrument_aliases.alias_value any-exchange (lowest id).
+      5. Fallback to instruments.symbol any-exchange match (legacy data).
+
+    Args:
+        pool: Shared Postgres pool.
+        raw_symbol: Symbol as stored on the position (may be legacy form).
+        raw_exchange: Exchange as stored on the position (may be alias form).
+
+    Returns:
+        instruments.id or None when no resolution is possible.
+    """
+    canonical_symbol = to_canonical_symbol(raw_symbol)
+    canonical_exchange = normalise_venue(raw_exchange) if raw_exchange else ""
+
+    if not canonical_symbol:
+        return None
+
+    try:
+        if canonical_exchange:
+            row = await pool.fetch_one(
+                """
+                SELECT id FROM public.instruments
+                WHERE symbol = $1 AND exchange = $2 AND is_active = TRUE
+                ORDER BY id
+                LIMIT 1
+                """,
+                (canonical_symbol, canonical_exchange),
+            )
+            if row:
+                return int(row["id"])
+
+            row = await pool.fetch_one(
+                """
+                SELECT a.instrument_id AS id
+                FROM public.instrument_aliases a
+                JOIN public.instruments i ON i.id = a.instrument_id
+                WHERE a.alias_value = $1
+                  AND i.exchange = $2
+                  AND i.is_active = TRUE
+                ORDER BY a.instrument_id
+                LIMIT 1
+                """,
+                (canonical_symbol, canonical_exchange),
+            )
+            if row:
+                return int(row["id"])
+
+            # Legacy raw symbol (e.g. 'BTCUSDT') stored on the position
+            # may not have been canonicalised yet — try it verbatim too.
+            if raw_symbol and raw_symbol != canonical_symbol:
+                row = await pool.fetch_one(
+                    """
+                    SELECT a.instrument_id AS id
+                    FROM public.instrument_aliases a
+                    JOIN public.instruments i ON i.id = a.instrument_id
+                    WHERE a.alias_value = $1
+                      AND i.exchange = $2
+                      AND i.is_active = TRUE
+                    ORDER BY a.instrument_id
+                    LIMIT 1
+                    """,
+                    (raw_symbol, canonical_exchange),
+                )
+                if row:
+                    return int(row["id"])
+
+        # Any-exchange alias fallback
+        row = await pool.fetch_one(
+            """
+            SELECT a.instrument_id AS id
+            FROM public.instrument_aliases a
+            JOIN public.instruments i ON i.id = a.instrument_id
+            WHERE a.alias_value = $1 AND i.is_active = TRUE
+            ORDER BY a.instrument_id
+            LIMIT 1
+            """,
+            (canonical_symbol,),
+        )
+        if row:
+            return int(row["id"])
+
+        # Last-resort: any-exchange canonical-symbol match on instruments
+        row = await pool.fetch_one(
+            """
+            SELECT id FROM public.instruments
+            WHERE symbol = $1 AND is_active = TRUE
+            ORDER BY id
+            LIMIT 1
+            """,
+            (canonical_symbol,),
+        )
+        if row:
+            return int(row["id"])
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception(
+            "Instrument resolution failed for symbol=%s exchange=%s canonical=%s: %s",
+            raw_symbol,
+            raw_exchange,
+            canonical_symbol,
+            exc,
+        )
+        return None
+
+    return None
+
+
 async def fetch_latest_price(
     pool: DatabasePool,
     symbol: str,
@@ -145,52 +263,52 @@ async def fetch_latest_price(
 ) -> Optional[float]:
     """Fetch the most recent close price for an instrument.
 
+    Resolves the instrument via canonical slash-form symbol + alias table
+    (see _resolve_instrument_id) before reading the latest candle. This
+    repairs Bug C — the symbol-format mismatch that defeated the JOIN
+    when positions were stored as 'BTCUSDT' but candles indexed
+    'BTC/USDT'.
+
     Args:
         pool: Shared Postgres pool.
-        symbol: Instrument symbol (e.g., 'XAUUSD').
-        instrument_exchange: Exchange/instrument_exchange name (e.g., 'capital', 'binance').
+        symbol: Instrument symbol as stored on the position.
+        instrument_exchange: Exchange / venue as stored on the position.
         timeframe: Candle timeframe (default from env).
 
     Returns:
-        Latest close price, or None if no candles found.
+        Latest close price, or None if the instrument cannot be resolved
+        or no candles exist for the timeframe.
     """
-    # Try with instrument_exchange first
-    if instrument_exchange:
+    instrument_id = await _resolve_instrument_id(pool, symbol, instrument_exchange)
+    if instrument_id is None:
+        logger.debug(
+            "fetch_latest_price: unresolved instrument symbol=%s exchange=%s tf=%s",
+            symbol,
+            instrument_exchange,
+            timeframe,
+        )
+        return None
+
+    try:
         row = await pool.fetch_one(
             """
             SELECT close
             FROM public.candles
-            WHERE instrument_id = (
-                SELECT id FROM public.instruments
-                WHERE symbol = $1 AND exchange = $2 AND is_active = TRUE
-                LIMIT 1
-            )
-            AND timeframe = $3
+            WHERE instrument_id = $1 AND timeframe = $2
             ORDER BY "timestamp" DESC
             LIMIT 1
             """,
-            (symbol, instrument_exchange, timeframe),
+            (instrument_id, timeframe),
         )
-        if row:
-            return float(row["close"])
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception(
+            "fetch_latest_price: candle query failed instrument_id=%s tf=%s: %s",
+            instrument_id,
+            timeframe,
+            exc,
+        )
+        return None
 
-    # Fallback: any exchange
-    row = await pool.fetch_one(
-        """
-        SELECT close
-        FROM public.candles
-        WHERE instrument_id = (
-            SELECT id FROM public.instruments
-            WHERE symbol = $1 AND is_active = TRUE
-            ORDER BY id
-            LIMIT 1
-        )
-        AND timeframe = $2
-        ORDER BY "timestamp" DESC
-        LIMIT 1
-        """,
-        (symbol, timeframe),
-    )
     if row:
         return float(row["close"])
     return None
