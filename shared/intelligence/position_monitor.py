@@ -93,6 +93,7 @@ class PositionSnapshot:
     current_price: float
     unrealized_pnl: float
     pnl_pct: float
+    distance_to_entry_pct: float
     distance_to_sl: Optional[float]
     distance_to_sl_pct: Optional[float]
     distance_to_tp: Optional[float]
@@ -435,11 +436,19 @@ def _build_snapshot(
     # SL/TP hit check
     sl_hit, tp_hit = check_sl_tp_hit(direction, current_price, sl_val, tp_val)
 
+    # Distance from current price to entry, signed % (positive = above entry).
+    # Direction-agnostic — sign tells the analyst which side of entry we're on.
+    if entry > 0:
+        distance_to_entry_pct = ((current_price / entry) - 1.0) * 100.0
+    else:
+        distance_to_entry_pct = 0.0
+
     return PositionSnapshot(
         position_id=position["id"],
         current_price=current_price,
         unrealized_pnl=unrealized_pnl_usd,
         pnl_pct=pnl_pct,
+        distance_to_entry_pct=distance_to_entry_pct,
         distance_to_sl=dist["distance_to_sl"],
         distance_to_sl_pct=dist["distance_to_sl_pct"],
         distance_to_tp=dist["distance_to_tp"],
@@ -471,20 +480,21 @@ async def write_position_update(
         """
         INSERT INTO public.position_updates (
             position_id, price, unrealized_pnl_usd, unrealized_pnl_pct,
-            distance_to_sl_pct, distance_to_tp1_pct,
+            distance_to_entry_pct, distance_to_sl_pct, distance_to_tp1_pct,
             time_in_trade_minutes, timestamp
         ) VALUES (
             $1, $2, $3, $4,
-            $5, $6,
-            $7, $8
+            $5, $6, $7,
+            $8, $9
         )
         RETURNING id
         """,
         (
             snapshot.position_id,
             snapshot.current_price,
-            snapshot.unrealized_pnl_usd,
+            snapshot.unrealized_pnl,
             snapshot.pnl_pct,
+            snapshot.distance_to_entry_pct,
             snapshot.distance_to_sl_pct,
             snapshot.distance_to_tp_pct,
             int(snapshot.hours_open * 60),
