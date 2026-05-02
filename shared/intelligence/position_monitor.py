@@ -50,6 +50,10 @@ from shared.utils.config import load_env
 from shared.utils.db import DatabasePool, get_shared_pool
 from shared.utils.instrument_normaliser import normalise_venue, to_canonical_symbol
 
+from shared.intelligence.fee_calc import (
+    RealizedPnlBreakdown,
+    compute_realized_pnl_db,
+)
 from shared.intelligence.position_quant import (
     check_sl_tp_hit,
     compute_distance_to_sl_tp,
@@ -113,7 +117,16 @@ class PositionSnapshot:
 async def fetch_open_positions(
     pool: DatabasePool, batch_size: int
 ) -> List[Dict[str, Any]]:
-    """Fetch open or partially-closed positions from tracked_positions.
+    """Fetch open or partially-exited positions from tracked_positions.
+
+    F2: SELECT extended with ``expiry_at`` and ``signal_timestamp`` so
+    ``_process_one`` can detect time-based expiry and feed an accurate
+    open timestamp into the D7 funding-day calculation.
+
+    Status filter aligned with the schema check constraint, which permits
+    only ``'open' | 'partial_exit' | 'closed' | 'expired' | 'invalidated'
+    | 'cancelled'`` — the previous ``'partial_close'`` filter was a dead
+    string that never matched any row.
 
     Args:
         pool: Shared Postgres pool.
@@ -129,9 +142,10 @@ async def fetch_open_positions(
                direction, entry_price, position_size, leverage,
                stop_loss, take_profit_1,
                status, created_at, updated_at,
-               lowest_price, highest_price
+               lowest_price, highest_price,
+               expiry_at, signal_timestamp
         FROM public.tracked_positions
-        WHERE status IN ('open', 'partial_close')
+        WHERE status IN ('open', 'partial_exit')
         ORDER BY created_at DESC
         LIMIT $1
         """,
@@ -512,21 +526,56 @@ async def update_position_outcome(
     exit_price: float,
     realized_pnl: float,
     now: datetime,
+    realized_pnl_final: Optional[float] = None,
 ) -> int:
-    """Mark a position as closed with outcome.
+    """Mark a position as closed with outcome and write D7-compliant P&L.
+
+    The schema has TWO P&L columns:
+      * ``realized_pnl_usd`` — NOT NULL, default 0; running tally column.
+      * ``realized_pnl_usd_final`` — NULLable; canonical settlement column
+        used by post-mortems and the orphan-backfill acceptance check.
+
+    F2 writes BOTH on every close so downstream code can rely on
+    ``realized_pnl_usd_final IS NOT NULL`` as the "this position has been
+    fully accounted for" sentinel without losing the legacy column.
+
+    The valid ``outcome`` values per the check constraint are::
+
+        tp1_hit, tp2_hit, tp3_hit, sl_hit, breakeven,
+        expired, manual_close, invalidated
+
+    Callers that pass an outcome outside that set will fail the constraint;
+    that is intentional — silent fallback would mask wiring bugs.
 
     Args:
         pool: Shared Postgres pool.
-        position_id: tracked_positions.id.
-        status: New status ('closed', 'breakeven', etc.).
-        outcome: 'stop_loss', 'take_profit', 'manual_close', 'expired'.
-        exit_price: Price at which position exited.
-        realized_pnl: Final P&L.
-        now: Close timestamp.
+        position_id: ``tracked_positions.id``.
+        status: New status (typically ``'closed'``).
+        outcome: One of the constraint-allowed outcome strings above.
+        exit_price: Price at which the position exited.
+        realized_pnl: Running-tally P&L (written to ``realized_pnl_usd``).
+        now: Close timestamp (also written to ``closed_at``).
+        realized_pnl_final: D7-settled net P&L. When provided, written to
+            ``realized_pnl_usd_final``; when None, that column is left
+            untouched (preserves any prior partial-exit settlement).
 
     Returns:
         Affected row count.
     """
+    if realized_pnl_final is None:
+        return await pool.execute(
+            """
+            UPDATE public.tracked_positions
+            SET status = $1,
+                outcome = $2,
+                exit_price = $3,
+                realized_pnl_usd = $4,
+                closed_at = $5,
+                updated_at = $5
+            WHERE id = $6
+            """,
+            (status, outcome, exit_price, realized_pnl, now, position_id),
+        )
     return await pool.execute(
         """
         UPDATE public.tracked_positions
@@ -534,10 +583,20 @@ async def update_position_outcome(
             outcome = $2,
             exit_price = $3,
             realized_pnl_usd = $4,
-            updated_at = $5
-        WHERE id = $6
+            realized_pnl_usd_final = $5,
+            closed_at = $6,
+            updated_at = $6
+        WHERE id = $7
         """,
-        (status, outcome, exit_price, realized_pnl, now, position_id),
+        (
+            status,
+            outcome,
+            exit_price,
+            realized_pnl,
+            realized_pnl_final,
+            now,
+            position_id,
+        ),
     )
 
 
@@ -596,6 +655,93 @@ class PositionMonitor:
     async def _ensure_pool(self) -> DatabasePool:
         return await get_shared_pool()
 
+    async def _settle_close(
+        self,
+        pool: DatabasePool,
+        position: Dict[str, Any],
+        snapshot: PositionSnapshot,
+        outcome: str,
+        exit_price: float,
+        now: datetime,
+    ) -> Optional[RealizedPnlBreakdown]:
+        """Compute D7-compliant net P&L and persist the close.
+
+        Resolves ``instruments.id`` from the position's symbol+exchange,
+        looks up the fee profile, and runs ``compute_realized_pnl_db``.
+        On success, writes both ``realized_pnl_usd`` (running tally =
+        net_pnl) and ``realized_pnl_usd_final`` (D7-settled net) to
+        ``tracked_positions``. On failure (no instrument or no profile),
+        logs an error and returns None so the caller can defer the close.
+
+        Args:
+            pool: Shared Postgres pool.
+            position: Row from ``tracked_positions``.
+            snapshot: Snapshot used as the unrealized-P&L fallback.
+            outcome: Constraint-allowed outcome string.
+            exit_price: Settlement price.
+            now: Close timestamp (UTC, tz-aware).
+
+        Returns:
+            ``RealizedPnlBreakdown`` on success, None when the fee profile
+            cannot be loaded (position is left open for human review).
+        """
+        try:
+            instrument_id = await _resolve_instrument_id(
+                pool,
+                position["instrument_symbol"],
+                position.get("instrument_exchange"),
+            )
+            if instrument_id is None:
+                logger.error(
+                    "F2 cannot settle position %s: instrument unresolved "
+                    "(symbol=%s exchange=%s)",
+                    position["id"],
+                    position["instrument_symbol"],
+                    position.get("instrument_exchange"),
+                )
+                return None
+
+            opened_at = position.get("signal_timestamp") or position["created_at"]
+            breakdown = await compute_realized_pnl_db(
+                pool,
+                instrument_id=instrument_id,
+                direction=position["direction"],
+                entry_price=position["entry_price"],
+                exit_price=exit_price,
+                qty=position["position_size"],
+                leverage=position.get("leverage") or 1,
+                opened_at=opened_at,
+                closed_at=now,
+            )
+            if breakdown is None:
+                logger.error(
+                    "F2 cannot settle position %s: no fee profile for "
+                    "instrument_id=%s",
+                    position["id"],
+                    instrument_id,
+                )
+                return None
+
+            net_pnl_float = float(breakdown.net_pnl_usd)
+            await update_position_outcome(
+                pool,
+                position["id"],
+                "closed",
+                outcome,
+                exit_price,
+                net_pnl_float,
+                now,
+                realized_pnl_final=net_pnl_float,
+            )
+            return breakdown
+        except Exception as exc:
+            logger.exception(
+                "F2 settle failed for position %s: %s",
+                position["id"],
+                exc,
+            )
+            return None
+
     async def _process_one(
         self,
         pool: DatabasePool,
@@ -603,6 +749,17 @@ class PositionMonitor:
         now: datetime,
     ) -> Dict[str, Any]:
         """Process a single open position: fetch price, compute, write update.
+
+        F2 adds two settlement paths, both routed through ``_settle_close``
+        so every close emits D7-compliant fee/spread/funding-aware P&L:
+
+          * **expiry**: when ``position.expiry_at`` is non-null and ``now``
+            is past it, settle at the current price with outcome ``expired``.
+            Checked BEFORE SL/TP so an already-expired contract is closed
+            even if the latest candle happens to also brush an SL/TP level.
+          * **SL/TP hit**: outcomes mapped to constraint-allowed values
+            (``tp1_hit`` / ``sl_hit``) — the previous ``take_profit`` /
+            ``stop_loss`` strings would have failed the check constraint.
 
         Args:
             pool: Shared Postgres pool.
@@ -650,23 +807,55 @@ class PositionMonitor:
             best_price=price if snapshot.mfe_pct > 0 else None,
         )
 
-        # Check SL/TP hit
-        if snapshot.sl_hit or snapshot.tp_hit:
-            outcome = "take_profit" if snapshot.tp_hit else "stop_loss"
-            realized = snapshot.unrealized_pnl
-            await update_position_outcome(
-                pool, pos_id, "closed", outcome, price, realized, now
+        # Expiry check (F2): runs before SL/TP so an expired position
+        # always settles via the time-based path, not the level-based one.
+        expiry_at = position.get("expiry_at")
+        if expiry_at is not None and now >= expiry_at:
+            breakdown = await self._settle_close(
+                pool, position, snapshot, "expired", price, now
             )
-            logger.info(
-                "Position %s closed via %s at price=%.4f pnl=%.2f",
-                pos_id, outcome, price, realized
-            )
+            if breakdown is not None:
+                logger.info(
+                    "Position %s closed via expired at price=%.4f net_pnl=%s",
+                    pos_id, price, breakdown.net_pnl_usd,
+                )
+                return {
+                    "position_id": pos_id,
+                    "status": "closed",
+                    "outcome": "expired",
+                    "update_id": update_id,
+                    "realized_pnl": float(breakdown.net_pnl_usd),
+                }
             return {
                 "position_id": pos_id,
-                "status": "closed",
-                "outcome": outcome,
+                "status": "settle_deferred",
+                "reason": "expired_no_profile",
                 "update_id": update_id,
-                "realized_pnl": realized,
+            }
+
+        # SL/TP hit check (F2: outcomes constraint-aligned, P&L D7-compliant).
+        if snapshot.sl_hit or snapshot.tp_hit:
+            outcome = "tp1_hit" if snapshot.tp_hit else "sl_hit"
+            breakdown = await self._settle_close(
+                pool, position, snapshot, outcome, price, now
+            )
+            if breakdown is not None:
+                logger.info(
+                    "Position %s closed via %s at price=%.4f net_pnl=%s",
+                    pos_id, outcome, price, breakdown.net_pnl_usd,
+                )
+                return {
+                    "position_id": pos_id,
+                    "status": "closed",
+                    "outcome": outcome,
+                    "update_id": update_id,
+                    "realized_pnl": float(breakdown.net_pnl_usd),
+                }
+            return {
+                "position_id": pos_id,
+                "status": "settle_deferred",
+                "reason": f"{outcome}_no_profile",
+                "update_id": update_id,
             }
 
         # Phase 8 §G: agent_opinion generation removed from PositionMonitor.
@@ -697,16 +886,20 @@ class PositionMonitor:
         monitored = 0
         closed = 0
         no_price = 0
+        settle_deferred = 0
 
         for pos in positions:
             if self._stop.is_set():
                 break
             try:
                 result = await self._process_one(pool, pos, now)
-                if result["status"] == "closed":
+                status = result["status"]
+                if status == "closed":
                     closed += 1
-                elif result["status"] == "no_price_data":
+                elif status == "no_price_data":
                     no_price += 1
+                elif status == "settle_deferred":
+                    settle_deferred += 1
                 else:
                     monitored += 1
             except Exception as exc:
@@ -714,10 +907,15 @@ class PositionMonitor:
 
         self._cycle_count += 1
         logger.info(
-            "Cycle %s: monitored=%s closed=%s no_price=%s",
-            self._cycle_count, monitored, closed, no_price
+            "Cycle %s: monitored=%s closed=%s no_price=%s settle_deferred=%s",
+            self._cycle_count, monitored, closed, no_price, settle_deferred,
         )
-        return {"monitored": monitored, "closed": closed, "no_price": no_price}
+        return {
+            "monitored": monitored,
+            "closed": closed,
+            "no_price": no_price,
+            "settle_deferred": settle_deferred,
+        }
 
     async def run_forever(self) -> None:
         """Main loop: run cycles until stopped."""
