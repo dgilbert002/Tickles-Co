@@ -353,8 +353,14 @@ def _build_snapshot(
     position: Dict[str, Any],
     current_price: float,
     now: datetime,
-) -> PositionSnapshot:
+) -> Optional[PositionSnapshot]:
     """Compute all metrics for a position at the current price.
+
+    F7 — NULL guard: returns ``None`` when entry_price or position_size
+    is missing on the source row (D8 orphan signals). The caller MUST
+    treat ``None`` as "missing_levels" — skip writing a snapshot, do
+    not crash, do not silently fabricate values. Backfill of these
+    orphan rows is the responsibility of F9 (backfill script).
 
     Args:
         position: Row dict from tracked_positions.
@@ -362,11 +368,34 @@ def _build_snapshot(
         now: Snapshot timestamp.
 
     Returns:
-        PositionSnapshot with all computed fields.
+        PositionSnapshot with all computed fields, or ``None`` when the
+        position is missing required levels (entry_price or position_size).
     """
     direction = position["direction"]
-    entry = float(position["entry_price"])
-    qty = float(position["position_size"])
+    raw_entry = position.get("entry_price")
+    raw_qty = position.get("position_size")
+    if raw_entry is None or raw_qty is None:
+        logger.info(
+            "Position %s skipped (missing_levels): entry_price=%s position_size=%s",
+            position.get("id"),
+            raw_entry,
+            raw_qty,
+        )
+        return None
+
+    try:
+        entry = float(raw_entry)
+        qty = float(raw_qty)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "Position %s skipped (unparseable levels): entry_price=%r position_size=%r err=%s",
+            position.get("id"),
+            raw_entry,
+            raw_qty,
+            exc,
+        )
+        return None
+
     lev = float(position.get("leverage") or 1.0)
     sl = position.get("stop_loss")
     tp = position.get("take_profit_1")
@@ -589,8 +618,16 @@ class PositionMonitor:
             logger.warning("No price data for position %s (symbol=%s, epic=%s)", pos_id, symbol, epic)
             return {"position_id": pos_id, "status": "no_price_data"}
 
-        # Build snapshot
+        # Build snapshot — F7 NULL guard returns None for orphan signals
+        # (entry_price/position_size NULL). These are real trader signals
+        # awaiting F9 backfill; we must not crash, must not fabricate.
         snapshot = _build_snapshot(position, price, now)
+        if snapshot is None:
+            return {
+                "position_id": pos_id,
+                "status": "missing_levels",
+                "instrument_symbol": symbol,
+            }
 
         # Write position_update
         update_id = await write_position_update(pool, snapshot)
