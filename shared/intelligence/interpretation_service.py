@@ -1140,6 +1140,38 @@ async def create_tracked_position_from_interpretation(
         )
         return None
 
+    # F5 — entry_price sanity guard.
+    #
+    # Pre-F5, the pipeline would silently insert tracked_positions with
+    # entry_price IS NULL whenever the LLM/quant track failed to extract
+    # a level. That produced 77 orphan rows (PHASE_X0_POSITION_PIPELINE
+    # diagnosis 2026-05-02) which then crashed PositionMonitor on every
+    # cycle until F7 added the NULL guard.
+    #
+    # New default: refuse the insert and emit a structured WARN with the
+    # full signal context so F9's backfill script can find these and
+    # resolve P&L from raw_signal_text + candle history. The env-var
+    # override exists so F9 itself can insert + immediately backfill in a
+    # single transaction without tripping its own guard.
+    allow_null_entry = os.environ.get("ALLOW_NULL_ENTRY_PRICE", "0") == "1"
+    if (entry_price is None or float(entry_price) <= 0.0) and not allow_null_entry:
+        logger.warning(
+            "F5 reject tracked_position: entry_price missing/invalid "
+            "news_item_id=%s media_item_id=%s trader=%s symbol=%s exchange=%s "
+            "direction=%s detection_method=%s correlation_id=%s "
+            "raw_signal_text=%r",
+            news_item_id,
+            media_item_id,
+            trader_profile_id,
+            instrument_symbol,
+            instrument_exchange,
+            direction,
+            detection_method,
+            correlation_id or "",
+            (raw_signal_text or "")[:240],
+        )
+        return None
+
     now = datetime.now(timezone.utc)
 
     # Phase 6: normalise instrument symbol for cross-venue lookups
