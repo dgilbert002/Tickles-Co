@@ -1,0 +1,24 @@
+[Unit]
+Description=Tickles PostMortem Service (F3 — closed positions -> LLM causal postmortems)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+Environment=POSTMORTEM_INTERVAL_S=60
+Environment=POSTMORTEM_BATCH=10
+Environment=POSTMORTEM_CANDLE_LIMIT=50
+ExecStart=/usr/bin/python3 -m shared.intelligence.postmortem_service
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tickles/postmortem.log
+StandardError=append:/var/log/tickles/postmortem.log
+SyslogIdentifier=tickles-postmortem
+
+[Install]
+WantedBy=multi-user.target

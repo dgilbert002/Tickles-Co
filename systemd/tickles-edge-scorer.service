@@ -1,0 +1,21 @@
+[Unit]
+Description=Tickles Edge Scorer Service (per-trade edge scoring)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/usr/bin/python3 -m shared.scripts.run_edge_scorer_service
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/var/log/tickles/edge_scorer.log
+StandardError=append:/var/log/tickles/edge_scorer.log
+SyslogIdentifier=tickles-edge-scorer
+
+[Install]
+WantedBy=multi-user.target

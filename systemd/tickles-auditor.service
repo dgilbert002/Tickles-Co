@@ -1,0 +1,21 @@
+[Unit]
+Description=Tickles Automated Auditor (Rule-1 Parity Checks, Phase 21)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/usr/bin/python3 -m shared.cli.auditor_cli run --interval 300
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tickles-auditor
+
+[Install]
+WantedBy=multi-user.target

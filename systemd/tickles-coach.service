@@ -1,0 +1,24 @@
+[Unit]
+Description=Tickles Coach Service (Phase 11 — prompt A/B testing and promotion)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+Environment=COACH_PROMOTION_LIFT_THRESHOLD=0.05
+Environment=COACH_PROMOTION_MIN_TRADES=50
+Environment=LOG_LEVEL=INFO
+ExecStart=/usr/bin/python3 -m shared.intelligence.coach_service
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/var/log/tickles/coach.log
+StandardError=append:/var/log/tickles/coach.log
+SyslogIdentifier=tickles-coach
+
+[Install]
+WantedBy=multi-user.target

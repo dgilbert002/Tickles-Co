@@ -1,0 +1,23 @@
+[Unit]
+Description=Tickles Interpretation Service (media -> dual-track LLM -> tracked_positions)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+Environment=INTERPRETATION_BATCH=10
+Environment=INTERPRETATION_INTERVAL_S=15
+ExecStart=/usr/bin/python3 -m shared.intelligence.interpretation_service
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tickles/interpretation.log
+StandardError=append:/var/log/tickles/interpretation.log
+SyslogIdentifier=tickles-interpretation
+
+[Install]
+WantedBy=multi-user.target

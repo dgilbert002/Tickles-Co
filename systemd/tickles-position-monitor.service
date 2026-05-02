@@ -1,0 +1,23 @@
+[Unit]
+Description=Tickles Position Monitor (F1/F6/F7/F8/F11 — snapshot loop, expiry close)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+Environment=POSITION_MONITOR_INTERVAL_S=60
+Environment=POSITION_MONITOR_BATCH=50
+ExecStart=/usr/bin/python3 -m shared.intelligence.position_monitor
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tickles/position_monitor.log
+StandardError=append:/var/log/tickles/position_monitor.log
+SyslogIdentifier=tickles-position-monitor
+
+[Install]
+WantedBy=multi-user.target
