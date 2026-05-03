@@ -1,0 +1,32 @@
+{
+  "model_resolved": "anthropic/claude-4-sonnet-20250522",
+  "content": "{\n  \"message_type\": \"commentary\",\n  \"instrument\": \"HYPE/USDT\",\n  \"summary\": \"HYPE showing bullish breakout from descending triangle, approaching resistance zone around 42.5-43k with fibonacci levels marked\",\n  \"sentiment\": \"bullish\"\n}",
+  "timestamp_utc": "2026-05-03T15:16:43.067889+00:00",
+  "usage": {
+    "prompt_tokens": 2271,
+    "completion_tokens": 74,
+    "total_tokens": 2345,
+    "cost": 0.007923,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.007923,
+      "upstream_inference_prompt_cost": 0.006813,
+      "upstream_inference_completions_cost": 0.00111
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "extra": {
+    "operation": "vision_primary",
+    "correlation_id": "sig-b22730b55b26"
+  }
+}

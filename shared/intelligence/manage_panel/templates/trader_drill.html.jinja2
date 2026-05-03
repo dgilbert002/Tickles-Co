@@ -1,0 +1,61 @@
+{% extends "base.html.jinja2" %}
+{% block title %}{{ profile.get('display_name','Trader') }} — Tickles Manage{% endblock %}
+{% block content %}
+<h1>{{ profile.get('display_name','Trader') }} <span class="subtitle">{{ profile.get('handle_normalized','') }}</span></h1>
+
+<h2>Recent Signals (7d)</h2>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Symbol</th>
+      <th>LLM</th>
+      <th>Quant</th>
+      <th>Consensus</th>
+      <th>Cost</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for sig in signals %}
+    <tr>
+      <td>{{ sig['created_at'] | fmt_dt('%m-%d %H:%M') }}</td>
+      <td>{{ sig.get('symbol','—') }}</td>
+      <td class="dir-{{ sig.get('llm_direction','') }}">{{ sig.get('llm_direction','—') }}</td>
+      <td class="dir-{{ sig.get('quant_direction','') }}">{{ sig.get('quant_direction','—') }}</td>
+      <td class="dir-{{ sig.get('consensus_direction','') }}">{{ sig.get('consensus_direction','—') }}</td>
+      <td>${{ "%.4f"|format(sig.get('total_cost_usd',0)) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="empty">No signals in the last 7 days.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Recent Positions (30d)</h2>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Opened</th>
+      <th>Closed</th>
+      <th>Symbol</th>
+      <th>Dir</th>
+      <th>Outcome</th>
+      <th>P&L</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in positions %}
+    <tr>
+      <td>{{ p['created_at'] | fmt_dt('%m-%d %H:%M') }}</td>
+      <td>{{ p['closed_at'] | fmt_dt('%m-%d %H:%M') if p.get('closed_at') else '—' }}</td>
+      <td>{{ p.get('instrument_symbol','—') }}</td>
+      <td class="dir-{{ p.get('direction','') }}">{{ p.get('direction','—') }}</td>
+      <td class="outcome-{{ p.get('outcome','') }}">{{ p.get('outcome','—') }}</td>
+      <td class="{% if (p.get('realized_pnl_usd') or 0) >= 0 %}ok{% else %}warn{% endif %}">${{ "%.2f"|format(p.get('realized_pnl_usd',0)) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="empty">No positions in the last 30 days.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

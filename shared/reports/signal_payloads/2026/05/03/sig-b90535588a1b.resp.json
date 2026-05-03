@@ -1,0 +1,32 @@
+{
+  "model_resolved": "anthropic/claude-4-sonnet-20250522",
+  "content": "```json\n{\n  \"message_type\": \"commentary\",\n  \"instrument\": \"AVAX/USD\",\n  \"summary\": \"AVAX attempting to break resistance around 9.31 level with complex support/resistance structure and potential inverse head & shoulders pattern\",\n  \"sentiment\": \"neutral\"\n}\n```",
+  "timestamp_utc": "2026-05-03T15:15:31.348373+00:00",
+  "usage": {
+    "prompt_tokens": 2192,
+    "completion_tokens": 75,
+    "total_tokens": 2267,
+    "cost": 0.007701,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.007701,
+      "upstream_inference_prompt_cost": 0.006576,
+      "upstream_inference_completions_cost": 0.001125
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "extra": {
+    "operation": "vision_primary",
+    "correlation_id": "sig-b90535588a1b"
+  }
+}

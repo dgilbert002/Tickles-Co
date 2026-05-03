@@ -1,0 +1,41 @@
+{% extends "base.html.jinja2" %}
+{% block title %}Users — Tickles Manage{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Channel</th>
+      <th>Platform</th>
+      <th>Handle</th>
+      <th>Display Name</th>
+      <th>Enabled</th>
+      <th>Track</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for u in users %}
+    <tr>
+      <td>{{ u['id'] }}</td>
+      <td>{{ u.get('channel_name','') or u.get('channel_external_id','') }}</td>
+      <td>{{ u.get('platform','') }}</td>
+      <td>{{ u.get('handle_normalized','') }}</td>
+      <td>{{ u.get('display_name','') or u.get('handle_normalized','') }}</td>
+      <td class="{% if u['is_enabled'] %}ok{% else %}warn{% endif %}">{{ '✓' if u['is_enabled'] else '✗' }}</td>
+      <td>{{ '✓' if u.get('track_signals') else '✗' }}</td>
+      <td>
+        {% if u['is_enabled'] %}
+        <button class="btn-warn" onclick="disableUser({{ u['id'] }})">Disable</button>
+        {% else %}
+        <button class="btn-ok" onclick="enableUser({{ u['id'] }})">Enable</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="empty">No users configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

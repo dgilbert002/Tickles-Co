@@ -1,0 +1,39 @@
+{% extends "base.html.jinja2" %}
+{% block title %}Sources — Tickles Manage{% endblock %}
+{% block content %}
+<h1>Sources</h1>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Type</th>
+      <th>Name</th>
+      <th>Slug</th>
+      <th>Enabled</th>
+      <th>Description</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in sources %}
+    <tr>
+      <td>{{ s['id'] }}</td>
+      <td>{{ s['source_type'] }}</td>
+      <td>{{ s['source_name'] }}</td>
+      <td>{{ s['source_slug'] }}</td>
+      <td class="{% if s['is_enabled'] %}ok{% else %}warn{% endif %}">{{ '✓' if s['is_enabled'] else '✗' }}</td>
+      <td>{{ s.get('description','') }}</td>
+      <td>
+        {% if s['is_enabled'] %}
+        <button class="btn-warn" onclick="disableSource({{ s['id'] }})">Disable</button>
+        {% else %}
+        <button class="btn-ok" onclick="enableSource({{ s['id'] }})">Enable</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="empty">No sources configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

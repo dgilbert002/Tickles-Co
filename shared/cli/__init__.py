@@ -1,40 +1,23 @@
+"""Backward-compat alias package for ``shared.candles.cli``.
+
+The real CLI modules live under ``shared.candles.cli`` (historically nested
+under the candles tree). A swathe of test files import them as
+``shared.cli.X`` — the new flat name.
+
+Each public CLI submodule has a thin shim file in this directory
+(``altdata_cli.py``, ``backtest_cli.py``, ...) that re-exports from the
+real module and, when run as ``python -m shared.cli.X``, hands off to the
+real module's ``__main__`` entry point via ``runpy``.
+
+Generation: when a new module is added to ``shared/candles/cli/``, also
+add a one-line shim under ``shared/cli/`` (or regenerate them all via the
+loop in ``shared/scripts/`` — left as an exercise for whoever next adds a
+CLI).
 """
-shared.cli — operator CLIs for The Platform.
+from __future__ import annotations
 
-One package, one CLI per service family. Every CLI follows the same pattern:
-
-    python -m shared.cli.<name> [subcommand] [flags]
-
-Phase 13 (foundations cleanup) ships the scaffolding — `status` subcommands
-work end-to-end, action subcommands print a clearly labelled "lands in Phase N"
-stub and exit 2 (EX_USAGE). Later phases fill in the bodies without changing
-flag surfaces, so any automation wired today keeps working.
-
-Convention:
-    exit 0  = success
-    exit 1  = failure (backend unreachable, invalid state, etc.)
-    exit 2  = command recognised but not yet implemented in this phase
-"""
-
-__all__ = [
-    "gateway_cli",
-    "validator_cli",
-    "forward_test_cli",
-    "assets_cli",
-    "sufficiency_cli",
-    "candles_cli",
-    "indicators_cli",
-    "engines_cli",
-    "features_cli",
-    "auditor_cli",
-    "services_cli",
-    "enrichment_cli",
-    "services_catalog_cli",
-    "treasury_cli",
-    "execution_cli",
-    "regime_cli",
-    "guardrails_cli",
-    "altdata_cli",
-    "events_cli",
-    "souls_cli",
-]
+# No eager imports here. The shim files in this directory are real .py
+# modules on disk, which makes both ``from shared.cli import X`` and
+# ``python -m shared.cli.X`` work uniformly through Python's normal
+# import machinery. Pre-populating sys.modules in __init__ would break
+# runpy's loader-name check on subprocess invocations.

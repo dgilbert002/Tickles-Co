@@ -17,6 +17,22 @@ IMPORTANT: mem0's OpenAILLM hard-codes a priority check for OPENROUTER_API_KEY
   in os.environ. When set, it ignores our api_key/openai_base_url config and
   always routes to OpenRouter. We neutralize that env var below so mem0 respects
   our configured provider.
+
+ISOLATION VERIFICATION NOTE (2026-04-26)
+=========================================
+Memory isolation between namespaces (dev vs trading companies) is enforced
+at FIVE layers: collection_name, vector store object, mem0 client, user_id,
+agent_id. All five are verified by shared/tests/test_mem0_isolation.py.
+
+GOTCHA: Semantic search in a SPARSE collection (few points) will return
+the closest matches available even when none are semantically relevant.
+A search for "X" in a collection containing only "Y" memories will return
+"Y" results — this is NOT an isolation leak. It is normal vector search
+behavior in low-cardinality collections.
+
+To verify isolation, check the user_id field on returned payloads, NOT
+the count of returned results. See test_mem0_isolation.py for the
+correct verification pattern.
 """
 
 import os
@@ -53,7 +69,7 @@ _OPENROUTER_API_KEY_SAVED = os.environ.pop("OPENROUTER_API_KEY", "")
 
 MEM0_MODEL = os.environ.get("MEM0_MODEL", "deepseek/deepseek-chat")
 MEM0_FALLBACK_MODELS = [
-    "deepseek/deepseek-chat",
+    "openai/gpt-4o-mini",
     "google/gemini-2.0-flash-001",
 ]
 
@@ -119,12 +135,29 @@ class ScopedMemory:
         }
 
     def add(self, text: str, **kwargs):
-        """Add memory with automatic LLM fallback. Embeddings are always local."""
+        """Add memory with automatic LLM fallback. Embeddings are always local.
+
+        Uses infer=False to bypass LLM extraction, storing raw text directly.
+        This avoids silent failures when the LLM provider is unavailable.
+        """
         last_err = None
         for model in self.models_to_try:
             try:
                 mem = Memory.from_config(self._build_config(model))
-                result = mem.add(text, **kwargs)
+                # infer=False bypasses LLM extraction; embeddings are still computed locally.
+                result = mem.add(text, infer=False, **kwargs)
+                # Some providers return empty results on auth/model errors instead of raising.
+                # Treat empty results as a failure so the fallback chain continues.
+                results = result.get("results", []) if isinstance(result, dict) else []
+                if not results:
+                    logger.warning(
+                        "[mem0] add EMPTY | model=%s | collection=%s | result=%s",
+                        model,
+                        self.collection_name,
+                        result,
+                    )
+                    last_err = RuntimeError(f"add returned empty results for model {model}")
+                    continue
                 logger.info("[mem0] add OK | model=%s | collection=%s", model, self.collection_name)
                 return result
             except Exception as e:
@@ -155,18 +188,48 @@ def get_memory(company: str, agent: str) -> tuple:
     """Get a scoped memory instance for a company/agent pair.
 
     Args:
-        company: Company name (e.g., "jarvais", "shared")
+        company: Company name (e.g., "rubicon", "shared")
         agent: Agent name (e.g., "cody", "schemy", "ceo")
 
     Returns:
         (ScopedMemory, agent_id) tuple
 
     Example:
-        memory, agent_id = get_memory("jarvais", "cody")
+        memory, agent_id = get_memory("rubicon", "cody")
         memory.add("candle_service.py uses instrument_id FK",
-                    user_id="jarvais", agent_id=agent_id)
+                    user_id="rubicon", agent_id=agent_id)
         results = memory.search("what does candle_service do",
-                                user_id="jarvais", agent_id=agent_id)
+                                user_id="rubicon", agent_id=agent_id)
     """
     agent_id = f"{company}_{agent}"
     return ScopedMemory(company, agent_id), agent_id
+
+
+def get_dev_memory(agent: str = "default") -> tuple:
+    """Get memory scoped to the development environment.
+
+    Completely isolated from trading agent memory.
+
+    The dev namespace uses Qdrant collection 'tickles_dev' with
+    user_id='dev'. This is intentionally separate from any trading
+    company namespace (e.g. tickles_rubicon, tickles_jarvais).
+
+    Args:
+        agent: Subscope within dev memory.
+               Examples: "roo", "architect", "code", "subagent_vision"
+
+    Returns:
+        Tuple of (ScopedMemory, agent_id) — same shape as get_memory().
+
+    Use this for:
+        - Dev session decisions (Roo, Architect, Code, Debug, Orchestrator modes)
+        - Build progress and architectural choices
+        - Bug fixes and refactoring notes
+        - Anything related to BUILDING the platform
+
+    Do NOT use this for:
+        - Live trading signals
+        - Trader scorecards or positions
+        - Anything related to running trading agents
+    """
+    return get_memory(company="dev", agent=agent)

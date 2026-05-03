@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import os
+import re as _re
 import signal
 import sys
 import time
@@ -112,12 +113,31 @@ class InterpretationConfig:
 
 @dataclass
 class LlmResult:
-    """Result from the LLM vision track."""
+    """Result from the LLM vision track.
+
+    Phase J (2026-05-03) — extended for dual extraction. The LLM now returns
+    both ``trader_trades`` (what the human marked on the chart) and
+    ``chart_hacker_trades`` (chart_hacker's own independent analysis). The old
+    ``direction`` / ``confidence`` / ``levels`` fields are retained as a
+    "primary signal" view derived from the dominant trade in either array
+    (trader takes precedence) so existing callers keep working.
+    """
 
     direction: str = "unclear"
     confidence: float = 0.0
     reasoning: str = ""
     levels: Dict[str, Any] = field(default_factory=dict)
+    instrument: str = ""  # LLM-identified trading pair from the chart
+    timeframe: str = ""   # LLM-identified chart timeframe
+    # Phase J — full Lens-style dual extraction
+    trader_trades:       List[Dict[str, Any]] = field(default_factory=list)
+    chart_hacker_trades: List[Dict[str, Any]] = field(default_factory=list)
+    chart_analysis:      Dict[str, Any]       = field(default_factory=dict)
+    ai_agreement:        float                = 0.0
+    ai_comment:          str                  = ""
+    trader_market_view:  str                  = ""
+    chart_hacker_market_view: str             = ""
+    # Existing model/audit fields
     model_used: str = ""
     model_resolved: str = ""
     cost_usd: float = 0.0
@@ -152,6 +172,203 @@ class ConsensusResult:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Phase J — chart_hacker actor identity (cached)
+# ---------------------------------------------------------------------------
+_CHART_HACKER_PROFILE_ID: Optional[int] = None
+
+
+async def _get_chart_hacker_profile_id(pool: DatabasePool) -> Optional[int]:
+    """Resolve chart_hacker's trader_profiles.id (memoised).
+
+    The migration 2026_05_03_phase_j seeds a row with platform='api' and
+    handle_normalized='chart_hacker'. We look it up by those keys so we
+    don't depend on a hardcoded id.
+    """
+    global _CHART_HACKER_PROFILE_ID
+    if _CHART_HACKER_PROFILE_ID is not None:
+        return _CHART_HACKER_PROFILE_ID
+    try:
+        row = await pool.fetch_one(
+            "SELECT id FROM public.trader_profiles "
+            "WHERE platform = $1 AND handle_normalized = $2",
+            ("api", "chart_hacker"),
+        )
+        if row:
+            _CHART_HACKER_PROFILE_ID = int(row["id"])
+            return _CHART_HACKER_PROFILE_ID
+    except Exception as exc:
+        logger.warning("get chart_hacker profile id failed: %s", exc)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Phase J — Current price lookup (fallback when entry is missing)
+# ---------------------------------------------------------------------------
+async def _lookup_current_price(
+    pool: DatabasePool,
+    symbol: str,
+    exchange: str = "bybit",
+) -> Optional[float]:
+    """Fetch the latest 1m candle close for ``symbol`` on ``exchange``.
+
+    Used as a fallback when the trader/chart_hacker provides direction +
+    symbol but no explicit entry price (e.g. text-only "long TIA"). We use
+    the latest known price as the entry so the position can still be
+    tracked. If no candle is available, return None and let the caller
+    decide whether to skip or proceed.
+
+    Args:
+        pool: Shared Postgres pool.
+        symbol: Slash-form symbol (e.g. 'BTC/USDT').
+        exchange: Exchange/venue string.
+
+    Returns:
+        Latest close price as float, or None if no candle found.
+    """
+    if not symbol:
+        return None
+    try:
+        row = await pool.fetch_one(
+            """
+            SELECT c.close
+              FROM public.candles c
+              JOIN public.instruments i ON i.id = c.instrument_id
+             WHERE i.symbol = $1
+               AND i.exchange = $2
+               AND i.is_active = TRUE
+               AND c.timeframe = '1m'::timeframe_t
+             ORDER BY c.timestamp DESC
+             LIMIT 1
+            """,
+            (symbol, exchange),
+        )
+    except Exception as exc:
+        logger.debug("price lookup failed for %s@%s: %s", symbol, exchange, exc)
+        return None
+    if not row:
+        return None
+    try:
+        return float(row["close"])
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Phase J — Memory recall before LLM call
+# ---------------------------------------------------------------------------
+async def _recall_relevant_memories(
+    company: str,
+    symbol: Optional[str],
+    direction: Optional[str],
+    trader_handle: Optional[str],
+    limit_self: int = 4,
+    limit_trader: int = 3,
+) -> str:
+    """Pull chart_hacker's relevant past lessons from mem0.
+
+    Returns a formatted string ready to inject into the LLM prompt's
+    ``{recall_context}`` slot. On any failure, returns an empty string —
+    memory recall is best-effort and must never block analysis.
+
+    Two streams are queried (same agent_id, different metadata.about tags):
+      * self  — chart_hacker's own past calls and outcomes
+      * trader — chart_hacker's accumulated observations about THIS trader
+
+    Args:
+        company: Company slug (e.g. 'rubicon').
+        symbol: Trading pair if known.
+        direction: 'long' / 'short' if known.
+        trader_handle: The trader's handle for trader-specific recall.
+        limit_self: Max self-memories to recall.
+        limit_trader: Max trader-observation memories to recall.
+
+    Returns:
+        Formatted recall context string, or "" on failure / no results.
+    """
+    try:
+        from shared.utils.mem0_config import get_memory
+    except Exception:
+        return ""
+
+    query_parts = [p for p in (symbol, direction) if p]
+    self_query = " ".join(query_parts) if query_parts else "chart pattern setup"
+    trader_query = (
+        f"{trader_handle} {symbol or ''} {direction or ''}".strip()
+        if trader_handle
+        else None
+    )
+
+    blocks: List[str] = []
+    try:
+        mem, agent_id = get_memory(company, "chart_hacker")
+    except Exception as exc:
+        logger.debug("mem0 recall: get_memory failed for %s/chart_hacker: %s", company, exc)
+        return ""
+
+    def _to_text(items: Any) -> List[str]:
+        """Normalise mem0 search return into a list of memory strings."""
+        if not items:
+            return []
+        # mem0 returns either {"results": [...]} or [...]
+        if isinstance(items, dict):
+            items = items.get("results") or items.get("memories") or []
+        out: List[str] = []
+        for it in items:
+            if isinstance(it, dict):
+                m = it.get("memory") or it.get("content") or it.get("text") or ""
+                if m:
+                    out.append(str(m).strip())
+            elif isinstance(it, str):
+                out.append(it.strip())
+        return out[:8]  # hard cap
+
+    # Self-recall — chart_hacker's own past lessons
+    try:
+        self_items = await asyncio.to_thread(
+            mem.search,
+            self_query,
+            user_id=company,
+            agent_id=agent_id,
+            limit=limit_self,
+        )
+        self_lines = _to_text(self_items)
+        if self_lines:
+            blocks.append("Your own past lessons:\n- " + "\n- ".join(self_lines))
+    except Exception as exc:
+        logger.debug("mem0 self-recall failed: %s", exc)
+
+    # Trader-observation recall — what you've learned about this trader
+    if trader_query:
+        try:
+            trader_items = await asyncio.to_thread(
+                mem.search,
+                trader_query,
+                user_id=company,
+                agent_id=agent_id,
+                limit=limit_trader,
+            )
+            trader_lines = _to_text(trader_items)
+            if trader_lines:
+                blocks.append(
+                    f"Your past observations about {trader_handle}:\n- "
+                    + "\n- ".join(trader_lines)
+                )
+        except Exception as exc:
+            logger.debug("mem0 trader-recall failed: %s", exc)
+
+    if not blocks:
+        return ""
+
+    return (
+        "PAST MEMORIES (use these to inform your analysis — your own past lessons "
+        "and observations about this trader). Apply these as context, but base your "
+        "actual extraction on what you see in the chart:\n\n"
+        + "\n\n".join(blocks)
+        + "\n"
+    )
+
+
 def _param_hash(
     model: str,
     primary_model: str,
@@ -397,6 +614,7 @@ async def run_llm_track(
     news_context: str,
     instrument_symbol: str,
     correlation_id: str = "",
+    recall_context: str = "",
 ) -> LlmResult:
     """Run the LLM vision track: encode image, call vision model, parse response.
 
@@ -432,8 +650,10 @@ async def run_llm_track(
     system_prompt = prompts.get("system_prompt", "")
     if not system_prompt:
         system_prompt = (
-            "You are ChartHacker, a crypto chart analyst. Analyze the provided chart image. "
+            "You are ChartHacker, a crypto and financial chart analyst. Analyze the provided chart image. "
+            "Identify the trading instrument from the chart title or axis labels. "
             "Respond ONLY with a JSON object containing:\n"
+            "  instrument: the trading pair shown (e.g. 'BTC/USDT', 'ETH/USDT') or 'UNKNOWN'\n"
             "  direction: 'long' | 'short' | 'neutral' | 'unclear'\n"
             "  confidence: 0.0-1.0\n"
             "  reasoning: brief text (max 200 chars)\n"
@@ -441,8 +661,23 @@ async def run_llm_track(
             "No markdown, no prose outside the JSON."
         )
         logger.warning("chart_analysis.json system_prompt missing — using hardcoded fallback")
-    user_template = prompts.get("user_prompt_template", "Analyze this chart for {symbol}.\nNews context: {context}")
-    user_text = user_template.format(symbol=instrument_symbol, context=news_context[:500])
+    user_template = prompts.get("user_prompt_template", "Analyze this chart. Identify the trading instrument from the chart itself.\nNews context: {context}\n\n{recall_context}")
+    # Render the prompt with whichever placeholders the template uses. We
+    # support {symbol}, {context}, {recall_context} — all optional.
+    try:
+        user_text = user_template.format(
+            symbol=instrument_symbol or "UNKNOWN",
+            context=news_context[:500],
+            recall_context=recall_context or "",
+        )
+    except KeyError:
+        # Older templates may only know {context}; fall back gracefully
+        user_text = (
+            user_template.replace("{context}", news_context[:500])
+            .replace("{symbol}", instrument_symbol or "UNKNOWN")
+        )
+        if recall_context:
+            user_text += "\n\n" + recall_context
 
     # Phase 3: compute prompt metadata for audit trail
     prompt_version = compute_prompt_version(_load_prompts())
@@ -474,7 +709,62 @@ async def run_llm_track(
                 # We keep a local zero placeholder; the true cost is in the DB.
                 cost = 0.0
 
-                direction = str(parsed.get("direction", "unclear")).lower()
+                # Phase J — Lens prompt returns trader_trades[] and
+                # chart_hacker_trades[] arrays. Derive the legacy primary
+                # direction/confidence/levels from the first available trade
+                # so old downstream callers (audit columns, MemU broadcast
+                # gating) keep working unchanged.
+                trader_trades       = parsed.get("trader_trades") or []
+                chart_hacker_trades = parsed.get("chart_hacker_trades") or []
+                chart_analysis      = parsed.get("chart_analysis") or {}
+
+                # Coerce to lists in case the LLM returned a dict by mistake
+                if not isinstance(trader_trades, list):
+                    trader_trades = []
+                if not isinstance(chart_hacker_trades, list):
+                    chart_hacker_trades = []
+
+                # Pick the dominant trade for legacy fields. Trader's trade
+                # wins if present and has a clear direction; otherwise
+                # fall back to chart_hacker's first trade. If neither, the
+                # legacy fields stay at their defaults ("unclear", 0.0, {}).
+                primary = None
+                for t in trader_trades:
+                    if isinstance(t, dict) and t.get("direction") in ("long", "short"):
+                        primary = t
+                        break
+                if primary is None:
+                    for t in chart_hacker_trades:
+                        if isinstance(t, dict) and t.get("direction") in ("long", "short"):
+                            primary = t
+                            break
+
+                if primary is not None:
+                    direction = str(primary.get("direction", "unclear")).lower()
+                    confidence_raw = primary.get("confidence",
+                                                 primary.get("trader_confidence", 0.0))
+                    try:
+                        legacy_confidence = float(confidence_raw)
+                    except (TypeError, ValueError):
+                        legacy_confidence = 0.0
+                    legacy_levels = {
+                        "entry":       primary.get("entry"),
+                        "stop_loss":   primary.get("stop_loss"),
+                        "take_profit": primary.get("tp1"),
+                    }
+                    legacy_reasoning = str(
+                        primary.get("rationale")
+                        or primary.get("trader_rationale")
+                        or ""
+                    )[:500]
+                else:
+                    # No trades extracted from either side — chart was
+                    # commentary, meme, or unreadable.
+                    direction = str(parsed.get("direction", "unclear")).lower()
+                    legacy_confidence = float(parsed.get("confidence", 0.0) or 0.0)
+                    legacy_levels = parsed.get("levels", {}) or {}
+                    legacy_reasoning = str(parsed.get("reasoning", ""))
+
                 if direction not in ("long", "short", "neutral", "unclear"):
                     direction = "unclear"
 
@@ -504,11 +794,26 @@ async def run_llm_track(
                 except Exception as exc:
                     logger.warning("Failed to save primary payload for cid=%s: %s", correlation_id, exc)
 
+                # ai_agreement may come back as float or string
+                try:
+                    ai_agreement_val = float(parsed.get("ai_agreement_with_trader", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    ai_agreement_val = 0.0
+
                 return LlmResult(
                     direction=direction,
-                    confidence=float(parsed.get("confidence", 0.0)),
-                    reasoning=str(parsed.get("reasoning", "")),
-                    levels=parsed.get("levels", {}),
+                    confidence=legacy_confidence,
+                    reasoning=legacy_reasoning,
+                    levels=legacy_levels,
+                    instrument=str(parsed.get("instrument", "")).strip(),
+                    timeframe=str(parsed.get("timeframe", "")).strip(),
+                    trader_trades=trader_trades,
+                    chart_hacker_trades=chart_hacker_trades,
+                    chart_analysis=chart_analysis,
+                    ai_agreement=ai_agreement_val,
+                    ai_comment=str(parsed.get("ai_comment_on_trader", "")).strip()[:1000],
+                    trader_market_view=str(parsed.get("trader_market_view", "")).strip()[:500],
+                    chart_hacker_market_view=str(parsed.get("chart_hacker_market_view", "")).strip()[:500],
                     model_used=model,
                     model_resolved=resp.get("model", model),
                     cost_usd=cost,
@@ -829,6 +1134,8 @@ async def fetch_pending_media(
         "  n.content, "
         "  n.source_id, "
         "  n.instruments, "
+        "  n.author, "
+        "  n.channel_name, "
         "  n.collected_at "
         "FROM public.media_items m "
         "JOIN public.news_items n ON n.id = m.news_item_id "
@@ -1012,6 +1319,9 @@ async def write_signal_interpretation(
         "  llm_raw_request_path, llm_raw_response_path, "
         "  correlation_id, "
         "  instrument_resolved_from, "
+        # Phase J — dual-extraction columns
+        "  timeframe, chart_analysis, trader_trades, chart_hacker_trades, "
+        "  ai_agreement_score, ai_comment, "
         "  created_at"
         ") VALUES ("
         "  $1, $2, $3, $4, $5, $6, "
@@ -1025,6 +1335,9 @@ async def write_signal_interpretation(
         "  $28, $29, "
         "  $30, "
         "  $31, "
+        # Phase J params $32..$37
+        "  $32, $33::jsonb, $34::jsonb, $35::jsonb, "
+        "  $36, $37, "
         "  NOW()"
         ")"
         "ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING "
@@ -1063,6 +1376,13 @@ async def write_signal_interpretation(
         llm.response_path if llm else "",
         correlation_id,
         instrument_resolved_from,
+        # Phase J — dual-extraction payload
+        (llm.timeframe if llm and llm.timeframe else None),
+        json.dumps(llm.chart_analysis if llm and llm.chart_analysis else {}),
+        json.dumps(llm.trader_trades if llm and llm.trader_trades else []),
+        json.dumps(llm.chart_hacker_trades if llm and llm.chart_hacker_trades else []),
+        round(llm.ai_agreement, 2) if llm and llm.ai_agreement else None,
+        (llm.ai_comment if llm and llm.ai_comment else None),
     )
     row = await shared_pool.fetch_one(sql, params)
     if row is None:
@@ -1074,6 +1394,116 @@ async def write_signal_interpretation(
         )
         return None
     return int(row["id"])
+
+
+# ---------------------------------------------------------------------------
+# Symbol extraction from text — finds tickers like $BTC, BTCUSDT, ETH/USDT
+# ---------------------------------------------------------------------------
+_TICKER_PATTERNS = [
+    _re.compile(r"\b([A-Z]{2,6})/([A-Z]{3,5})\b"),   # BTC/USDT, ETH/USD
+    _re.compile(r"\b([A-Z]{2,6})(USDT|USD|BUSD)\b"),  # BTCUSDT, ETHBUSD
+    _re.compile(r"\$([A-Z]{2,6})\b"),                   # $BTC, $SOL
+    _re.compile(r"\b(XAU|XAG)(USD)\b"),                 # XAUUSD, XAGUSD
+    _re.compile(r"\b(NAS|SPX|US30|US100|NQ)\d*\b"),     # NAS100, SPX500
+]
+
+# Common crypto/forex symbols we recognise
+_KNOWN_BASES = {
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "DOT", "AVAX", "LINK",
+    "MATIC", "BNB", "LTC", "UNI", "AAVE", "NEAR", "APT", "SUI", "FTM",
+    "OP", "ARB", "INJ", "TIA", "SEI", "JUP", "WIF", "PEPE", "BONK",
+    "XAU", "XAG", "NAS", "SPX", "AAPL", "TSLA", "MSFT", "NVDA", "AMD",
+}
+
+
+def _extract_symbol_from_text(text: str) -> Optional[str]:
+    """Try to extract a trading symbol from free text.
+
+    Returns canonical slash form (e.g. 'BTC/USDT') or None.
+    """
+    if not text:
+        return None
+    upper = text.upper()
+    for pat in _TICKER_PATTERNS:
+        m = pat.search(upper)
+        if m:
+            groups = m.groups()
+            if len(groups) == 2:
+                base, quote = groups[0], groups[1]
+                if base in _KNOWN_BASES:
+                    return f"{base}/{quote}"
+            elif len(groups) == 1:
+                base = groups[0]
+                if base in _KNOWN_BASES:
+                    return f"{base}/USDT"  # default quote for crypto
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Price-level parsing — LLM returns strings like "$8.77-$8.82", "Below 94k",
+# "1.240-1.260", "4605.767", etc.  We need floats for tracked_positions.
+# ---------------------------------------------------------------------------
+_PRICE_CLEAN_RE = _re.compile(r"[^\d.\-]")  # keep digits, dots, hyphens
+_RANGE_RE = _re.compile(r"^([\d.]+)\s*[-–—to]+\s*([\d.]+)$")
+_K_SUFFIX_RE = _re.compile(r"^([\d.]+)\s*[kK]$")
+
+
+def _parse_price_level(value: Any) -> Optional[float]:
+    """Parse a price-level string from the LLM into a float.
+
+    Handles: "$8.77", "$8.77-$8.82" (midpoint), "Below $8.40" -> 8.40,
+    "Above 94k" -> 94000, "1.240-1.260" (midpoint), plain "4605.767",
+    None -> None.  Returns None on any parse failure.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v if v > 0 else None
+
+    text = str(value).strip()
+    if not text or text.lower() == "null" or text.lower() == "none":
+        return None
+
+    # Strip surrounding prose like "Below", "Above", "Around", "~"
+    text = _re.sub(r"^(?:below|above|around|approx\.?|~)\s*", "", text, flags=_re.IGNORECASE)
+
+    # Strip currency symbols, commas, spaces (but preserve 'k' for suffix check)
+    text = text.replace(",", "").replace(" ", "").replace("$", "")
+
+    if not text:
+        return None
+
+    # Handle "k" suffix BEFORE general cleanup: "94k" -> 94000
+    k_match = _K_SUFFIX_RE.match(text)
+    if k_match:
+        try:
+            return float(k_match.group(1)) * 1000
+        except ValueError:
+            return None
+
+    # Strip remaining non-numeric chars (letters other than k already handled)
+    text = _PRICE_CLEAN_RE.sub("", text)
+    if not text:
+        return None
+
+    # Handle ranges: "8.77-8.82" -> midpoint
+    range_match = _RANGE_RE.match(text)
+    if range_match:
+        try:
+            lo = float(range_match.group(1))
+            hi = float(range_match.group(2))
+            mid = (lo + hi) / 2.0
+            return mid if mid > 0 else None
+        except ValueError:
+            return None
+
+    # Plain float
+    try:
+        v = float(text)
+        return v if v > 0 else None
+    except ValueError:
+        return None
 
 
 async def create_tracked_position_from_interpretation(
@@ -1097,6 +1527,17 @@ async def create_tracked_position_from_interpretation(
     entry_reason_llm: Optional[str] = None,
     entry_reason_agent: Optional[str] = None,
     correlation_id: str = "",
+    # Phase J — dual-source extensions
+    signal_source: str = "trader",
+    actor_type: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    trade_type: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    take_profit_2: Optional[float] = None,
+    take_profit_3: Optional[float] = None,
+    take_profit_4: Optional[float] = None,
+    take_profit_5: Optional[float] = None,
+    take_profit_6: Optional[float] = None,
 ) -> Optional[int]:
     """Create a tracked_positions row from a signal interpretation.
 
@@ -1211,6 +1652,10 @@ async def create_tracked_position_from_interpretation(
             entry_reason_frozen_at, reason_agreement_score,
             entry_reason_trader_embedding,
             correlation_id,
+            signal_source, actor_type, actor_id,
+            trade_type, timeframe,
+            take_profit_2, take_profit_3,
+            take_profit_4, take_profit_5, take_profit_6,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3,
@@ -1225,7 +1670,11 @@ async def create_tracked_position_from_interpretation(
             $21, $22,
             $23::vector(384),
             $24,
-            $25, $25
+            $25, $26, $27,
+            $28, $29,
+            $30, $31,
+            $32, $33, $34,
+            $35, $35
         )
         ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction)
         DO NOTHING
@@ -1256,6 +1705,16 @@ async def create_tracked_position_from_interpretation(
             round(reason_agreement, 4) if reason_agreement is not None else None,
             trader_embed,
             correlation_id or None,
+            signal_source,
+            actor_type,
+            actor_id,
+            trade_type,
+            timeframe,
+            take_profit_2,
+            take_profit_3,
+            take_profit_4,
+            take_profit_5,
+            take_profit_6,
             now,
         ),
     )
@@ -1386,25 +1845,34 @@ class InterpretationService:
             if resolved:
                 company = resolved
 
-        # Resolve instrument — F8: refuses to invent BTCUSDT/bybit when
-        # upstream metadata is missing. Skip the row instead of silently
-        # mis-tagging it.
+        # Resolve instrument — first try JSONB metadata from the collector,
+        # then regex extraction from the news text, then defer to the LLM.
+        # F8 removed the old BTCUSDT hardcoded fallback; we now let the LLM
+        # identify the instrument from the chart image instead of failing.
         symbol, exchange = await resolve_instrument_symbol(
             shared_pool, instruments_jsonb
         )
+        symbol_from_llm = False
         if not symbol:
-            logger.warning(
-                "media_id=%s: unresolved instrument (instruments=%r); marking failed",
-                media_id, instruments_jsonb,
-            )
-            await update_media_status(
-                shared_pool, media_id, "failed",
-                error="unresolved_instrument",
-            )
-            return {
-                "media_id": media_id,
-                "status": "failed_unresolved_instrument",
-            }
+            # Try regex extraction from headline + content
+            symbol = _extract_symbol_from_text(f"{headline} {content}")
+            if symbol:
+                exchange = "bybit"  # default venue; LLM/quant can refine
+                logger.info(
+                    "media_id=%s: instrument resolved from text: %s",
+                    media_id, symbol,
+                )
+            else:
+                # Let the LLM identify the instrument from the chart image.
+                # Use a placeholder; we'll replace it after the LLM responds.
+                symbol = "UNKNOWN"
+                exchange = "bybit"
+                symbol_from_llm = True
+                logger.info(
+                    "media_id=%s: no instrument in metadata or text; "
+                    "deferring to LLM chart identification",
+                    media_id,
+                )
 
         # Resolve trader profile (from news item author/channel)
         author = media_row.get("author", "unknown")
@@ -1527,6 +1995,14 @@ class InterpretationService:
 
         # --- LLM Track (with rate limiting) ---
         news_context = f"{headline}\n{content}"[:1000]
+        # Phase J — pull chart_hacker's relevant past memories (best-effort,
+        # never blocks). Provides self-recall + trader-specific observations.
+        recall_context = await _recall_relevant_memories(
+            company=company,
+            symbol=symbol if symbol and symbol != "UNKNOWN" else None,
+            direction=None,  # not yet known at this stage
+            trader_handle=author if author and author != "unknown" else None,
+        )
         try:
             await self._rate_limiter.acquire(
                 model=self.cfg.primary_model,
@@ -1537,6 +2013,7 @@ class InterpretationService:
                 image_path=local_path,
                 news_context=news_context,
                 instrument_symbol=symbol,
+                recall_context=recall_context,
                 correlation_id=cid,
             )
             self._rate_limiter.report_success()
@@ -1553,6 +2030,39 @@ class InterpretationService:
                 "status": "skipped_vision_unavailable",
                 "reason": str(exc),
             }
+
+        # --- Post-LLM instrument resolution ---
+        # If the collector didn't provide an instrument, use what the LLM
+        # identified from the chart image. This replaces the old F8 hard-fail.
+        if symbol_from_llm and llm_result and llm_result.instrument:
+            llm_instrument = llm_result.instrument.strip().upper()
+            if llm_instrument and llm_instrument != "UNKNOWN":
+                # Normalise: ensure slash form
+                if "/" not in llm_instrument and len(llm_instrument) > 3:
+                    # Try to split: BTCUSDT -> BTC/USDT
+                    for quote in ("USDT", "USD", "BUSD", "USDC"):
+                        if llm_instrument.endswith(quote):
+                            llm_instrument = llm_instrument[:-len(quote)] + "/" + quote
+                            break
+                symbol = llm_instrument
+                logger.info(
+                    "media_id=%s: LLM identified instrument as %s",
+                    media_id, symbol,
+                )
+            else:
+                # LLM couldn't identify it either — mark failed
+                logger.warning(
+                    "media_id=%s: LLM also returned UNKNOWN instrument; marking failed",
+                    media_id,
+                )
+                await update_media_status(
+                    shared_pool, media_id, "failed",
+                    error="unresolved_instrument_after_llm",
+                )
+                return {
+                    "media_id": media_id,
+                    "status": "failed_unresolved_instrument",
+                }
 
         # --- Quant Track ---
         from shared.utils.db import get_company_pool
@@ -1610,31 +2120,153 @@ class InterpretationService:
             instrument_resolved_from=resolved_from,
         )
 
-        # --- Wire to tracked_positions (feeds PositionMonitor + ChartHackerGuru) ---
-        if sig_id is not None:
-            try:
-                await create_tracked_position_from_interpretation(
-                    shared_pool=shared_pool,
-                    signal_interpretation_id=sig_id,
-                    news_item_id=news_item_id,
-                    media_item_id=media_id,
-                    trader_profile_id=trader_profile_id,
-                    instrument_symbol=symbol,
-                    instrument_exchange=exchange or "bybit",
-                    direction=consensus.direction,
-                    entry_price=llm_result.levels.get("entry") if llm_result and llm_result.levels else None,
-                    stop_loss=llm_result.levels.get("stop_loss") if llm_result and llm_result.levels else None,
-                    take_profit_1=llm_result.levels.get("take_profit") if llm_result and llm_result.levels else None,
-                    detection_method=consensus.method,
-                    detection_confidence=consensus.confidence,
-                    raw_signal_text=f"{headline}\n{content}"[:2000],
-                    company_id=company,
-                    entry_reason_trader=content[:2000] if content else None,
-                    entry_reason_llm=llm_result.reasoning[:2000] if llm_result and llm_result.reasoning else None,
-                    correlation_id=cid,
+        # --- Wire to tracked_positions — Phase J dual write ---
+        # Two passes:
+        #   1. Each trader_trade → tracked_positions row with signal_source='trader'
+        #   2. Each chart_hacker_trade → tracked_positions row with signal_source='chart_hacker'
+        # Both pass through the same downstream pipeline (monitor → postmortem
+        # → skill score) and land on the same leaderboard.
+        positions_created: List[int] = []
+        if sig_id is not None and llm_result is not None:
+            chart_hacker_pid = await _get_chart_hacker_profile_id(shared_pool)
+
+            async def _write_one(
+                trade: Dict[str, Any],
+                source: str,
+                profile_id: int,
+                actor_type_val: str,
+                actor_id_val: str,
+                reason_trader: Optional[str],
+                reason_agent: Optional[str],
+            ) -> None:
+                if not isinstance(trade, dict):
+                    return
+                direction = str(trade.get("direction", "")).lower().strip()
+                if direction not in ("long", "short"):
+                    return  # neutral/unclear/missing → skip
+                entry_p = _parse_price_level(trade.get("entry"))
+                # Phase J — fall back to current market price when entry missing
+                if entry_p is None and symbol and direction:
+                    entry_p = await _lookup_current_price(
+                        shared_pool, symbol, exchange or "bybit"
+                    )
+                    if entry_p is not None:
+                        logger.info(
+                            "media_id=%s: %s entry filled from md.quote: %s @ %.6f",
+                            media_id, source, symbol, entry_p,
+                        )
+                try:
+                    pid = await create_tracked_position_from_interpretation(
+                        shared_pool=shared_pool,
+                        signal_interpretation_id=sig_id,
+                        news_item_id=news_item_id,
+                        media_item_id=media_id,
+                        trader_profile_id=profile_id,
+                        instrument_symbol=symbol,
+                        instrument_exchange=exchange or "bybit",
+                        direction=direction,
+                        entry_price=entry_p,
+                        stop_loss=_parse_price_level(trade.get("stop_loss")),
+                        take_profit_1=_parse_price_level(trade.get("tp1")),
+                        detection_method=consensus.method,
+                        detection_confidence=float(
+                            trade.get("confidence")
+                            or trade.get("trader_confidence")
+                            or consensus.confidence
+                            or 0.0
+                        ),
+                        raw_signal_text=f"{headline}\n{content}"[:2000],
+                        company_id=company,
+                        entry_reason_trader=reason_trader,
+                        entry_reason_llm=str(
+                            trade.get("rationale") or trade.get("trader_rationale") or ""
+                        )[:2000] or None,
+                        entry_reason_agent=reason_agent,
+                        correlation_id=cid,
+                        signal_source=source,
+                        actor_type=actor_type_val,
+                        actor_id=actor_id_val,
+                        trade_type=str(trade.get("trade_type") or "")[:20] or None,
+                        timeframe=str(trade.get("timeframe") or llm_result.timeframe or "")[:8] or None,
+                        take_profit_2=_parse_price_level(trade.get("tp2")),
+                        take_profit_3=_parse_price_level(trade.get("tp3")),
+                        take_profit_4=_parse_price_level(trade.get("tp4")),
+                        take_profit_5=_parse_price_level(trade.get("tp5")),
+                        take_profit_6=_parse_price_level(trade.get("tp6")),
+                    )
+                    if pid:
+                        positions_created.append(pid)
+                except Exception as exc:
+                    logger.warning(
+                        "Phase J %s tracked_position write failed (sig_id=%s): %s",
+                        source, sig_id, exc,
+                    )
+
+            # Pass 1 — trader's marked trades
+            trader_actor_id = f"{company}_trader_{trader_profile_id}"
+            for trade in (llm_result.trader_trades or []):
+                await _write_one(
+                    trade=trade,
+                    source="trader",
+                    profile_id=trader_profile_id,
+                    actor_type_val="trader_human",
+                    actor_id_val=trader_actor_id,
+                    reason_trader=content[:2000] if content else None,
+                    reason_agent=None,
                 )
-            except Exception as exc:
-                logger.warning("Failed to create tracked_position for sig_id=%s: %s", sig_id, exc)
+
+            # Pass 2 — chart_hacker's independent analysis
+            if chart_hacker_pid is not None:
+                ch_actor_id = f"{company}_chart_hacker"
+                for trade in (llm_result.chart_hacker_trades or []):
+                    await _write_one(
+                        trade=trade,
+                        source="chart_hacker",
+                        profile_id=chart_hacker_pid,
+                        actor_type_val="agent",
+                        actor_id_val=ch_actor_id,
+                        reason_trader=None,
+                        reason_agent=str(
+                            trade.get("rationale") or llm_result.chart_hacker_market_view or ""
+                        )[:2000] or None,
+                    )
+
+            # Legacy fallback — if the LLM didn't return either array but the
+            # consensus path produced a direction (e.g. fallback to old prompt
+            # format), preserve the previous single-write behaviour.
+            if not positions_created and consensus.direction in ("long", "short"):
+                try:
+                    legacy_pid = await create_tracked_position_from_interpretation(
+                        shared_pool=shared_pool,
+                        signal_interpretation_id=sig_id,
+                        news_item_id=news_item_id,
+                        media_item_id=media_id,
+                        trader_profile_id=trader_profile_id,
+                        instrument_symbol=symbol,
+                        instrument_exchange=exchange or "bybit",
+                        direction=consensus.direction,
+                        entry_price=_parse_price_level(llm_result.levels.get("entry")) if llm_result.levels else None,
+                        stop_loss=_parse_price_level(llm_result.levels.get("stop_loss")) if llm_result.levels else None,
+                        take_profit_1=_parse_price_level(llm_result.levels.get("take_profit")) if llm_result.levels else None,
+                        detection_method=consensus.method,
+                        detection_confidence=consensus.confidence,
+                        raw_signal_text=f"{headline}\n{content}"[:2000],
+                        company_id=company,
+                        entry_reason_trader=content[:2000] if content else None,
+                        entry_reason_llm=llm_result.reasoning[:2000] if llm_result.reasoning else None,
+                        correlation_id=cid,
+                        signal_source="trader",
+                        actor_type="trader_human",
+                        actor_id=f"{company}_trader_{trader_profile_id}",
+                        timeframe=llm_result.timeframe or None,
+                    )
+                    if legacy_pid:
+                        positions_created.append(legacy_pid)
+                except Exception as exc:
+                    logger.warning(
+                        "Legacy tracked_position fallback failed (sig_id=%s): %s",
+                        sig_id, exc,
+                    )
 
         # --- Update media status ---
         await update_media_status(shared_pool, media_id, "analyzed")
@@ -1810,9 +2442,9 @@ class InterpretationService:
                     instrument_symbol=symbol or signal.get("symbol", "UNKNOWN"),
                     instrument_exchange=exchange or "bybit",
                     direction=signal["direction"],
-                    entry_price=signal.get("entry"),
-                    stop_loss=signal.get("stop_loss"),
-                    take_profit_1=(signal.get("take_profits") or [None])[0],
+                    entry_price=_parse_price_level(signal.get("entry")),
+                    stop_loss=_parse_price_level(signal.get("stop_loss")),
+                    take_profit_1=_parse_price_level((signal.get("take_profits") or [None])[0]),
                     detection_method="text_extraction",
                     detection_confidence=signal.get("confidence", 0.5),
                     raw_signal_text=content[:2000],

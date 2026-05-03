@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from shared.execution.protocol import (
     ACTIVE_STATUSES,
@@ -204,6 +204,7 @@ class PaperExecutionAdapter:
         *,
         exchange: Optional[str] = None,
         symbol: Optional[str] = None,
+        **kwargs: Any,
     ) -> OrderUpdate:
         async with self._lock:
             order = self._orders.get(client_order_id)

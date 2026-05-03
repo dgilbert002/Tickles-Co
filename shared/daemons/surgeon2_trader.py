@@ -26,6 +26,15 @@ from typing import Dict, List, Optional, Tuple
 import psycopg2
 import psycopg2.extras
 
+# Add /opt/tickles to sys.path to ensure shared imports work
+sys.path.append("/opt/tickles")
+from shared.utils.config import load_env
+from shared.utils.freshness import validate_freshness, StaleDataError
+from shared.utils.mem0_config import ScopedMemory
+
+# Load environment variables from .env
+load_env()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s surgeon2 %(message)s")
 LOG = logging.getLogger("surgeon2.trader")
 
@@ -49,14 +58,17 @@ MAX_HOLD_SEC = 45 * 60
 STALL_SEC = 15 * 60
 
 ASSETS = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
+    "BTC": "BTC/USDT",
+    "ETH": "ETH/USDT",
+    "SOL": "SOL/USDT",
 }
 
 BINANCE_PREM = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol={s}"
 BINANCE_PRICE = "https://fapi.binance.com/fapi/v1/ticker/price?symbol={s}"
 BINANCE_KLINE = "https://fapi.binance.com/fapi/v1/klines?symbol={s}&interval=1m&limit=50"
+
+def _to_binance_sym(s: str) -> str:
+    return s.replace("/", "")
 
 
 def now_utc() -> datetime:
@@ -85,17 +97,64 @@ def rsi14(closes: List[float]) -> float:
     return round(100 - (100 / (1 + rs)), 2)
 
 
-def fetch_market() -> List[dict]:
+def fetch_db_funding(conn, symbol: str) -> float:
+    """Fetch funding rate from derivatives_snapshots with freshness check."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        # 1. Resolve instrument_id
+        cur.execute("SELECT id FROM instruments WHERE symbol = %s AND exchange = 'binance' LIMIT 1", (symbol,))
+        inst = cur.fetchone()
+        if not inst:
+            LOG.warning("Instrument not found in DB for %s", symbol)
+            return 0.0
+        
+        # 2. Query latest snapshot by instrument_id
+        cur.execute("""
+            SELECT funding_rate, snapshot_at
+            FROM derivatives_snapshots
+            WHERE instrument_id = %s
+            ORDER BY snapshot_at DESC LIMIT 1
+        """, (inst["id"],))
+        row = cur.fetchone()
+        if not row:
+            LOG.warning("No funding data in DB for %s", symbol)
+            return 0.0
+        
+        # Validate freshness (default 180s)
+        lag = validate_freshness(row["snapshot_at"], context=f"db_funding:{symbol}")
+        LOG.info("Freshness: %s db_funding lag=%.2fs", symbol, lag)
+        return float(row["funding_rate"])
+
+
+def fetch_market(shared_conn) -> List[dict]:
+    """Fetch market data from Binance and cross-reference DB funding."""
     rows = []
     for asset, sym in ASSETS.items():
         try:
-            prem = http_json(BINANCE_PREM.format(s=sym))
-            price = float(http_json(BINANCE_PRICE.format(s=sym))["price"])
-            kl = http_json(BINANCE_KLINE.format(s=sym))
+            # 1. Fetch live prices from Binance
+            bsym = _to_binance_sym(sym)
+            prem = http_json(BINANCE_PREM.format(s=bsym))
+            # Binance premiumIndex returns 'time' as unix ms
+            binance_ts = prem.get("time")
+            if binance_ts:
+                lag = validate_freshness(binance_ts / 1000.0, context=f"binance_prem:{sym}")
+                LOG.info("Freshness: %s binance_prem lag=%.2fs", sym, lag)
+
+            price_data = http_json(BINANCE_PRICE.format(s=bsym))
+            price = float(price_data["price"])
+            
+            kl = http_json(BINANCE_KLINE.format(s=bsym))
+            # klines [0] is open time, [6] is close time (ms)
+            if kl:
+                lag = validate_freshness(kl[-1][6] / 1000.0, context=f"binance_kline:{sym}")
+                LOG.info("Freshness: %s binance_kline lag=%.2fs", sym, lag)
+            
             closes = [float(k[4]) for k in kl]
             mark = float(prem.get("markPrice", price))
             index = float(prem.get("indexPrice", mark))
-            funding = float(prem.get("lastFundingRate", 0.0))
+            
+            # 2. Fetch funding from DB (Freshness Guarded)
+            funding = fetch_db_funding(shared_conn, sym)
+            
             div_pct = (mark - index) / index * 100.0 if index else 0.0
             rows.append({
                 "symbol": sym,
@@ -106,6 +165,8 @@ def fetch_market() -> List[dict]:
                 "funding": funding,
                 "rsi14": rsi14(closes),
             })
+        except StaleDataError as e:
+            LOG.error("STALE DATA for %s: %s. Skipping asset.", sym, e)
         except Exception as exc:
             LOG.warning("fetch %s failed: %s", sym, exc)
     return rows
@@ -114,20 +175,20 @@ def fetch_market() -> List[dict]:
 # ---------- postgres helpers ----------
 def connect_shared():
     return psycopg2.connect(
-        host=os.environ.get("PGHOST", "127.0.0.1"),
-        port=int(os.environ.get("PGPORT", "5432")),
-        user=os.environ.get("PGUSER", "admin"),
-        password=os.environ.get("PGPASSWORD", ""),
-        dbname="tickles_shared",
+        host=os.environ.get("DB_HOST", "127.0.0.1"),
+        port=int(os.environ.get("DB_PORT", "5432")),
+        user=os.environ.get("DB_USER", "admin"),
+        password=os.environ.get("DB_PASSWORD", ""),
+        dbname=os.environ.get("DB_NAME_SHARED", "tickles_shared"),
     )
 
 
 def connect_company():
     return psycopg2.connect(
-        host=os.environ.get("PGHOST", "127.0.0.1"),
-        port=int(os.environ.get("PGPORT", "5432")),
-        user=os.environ.get("PGUSER", "admin"),
-        password=os.environ.get("PGPASSWORD", ""),
+        host=os.environ.get("DB_HOST", "127.0.0.1"),
+        port=int(os.environ.get("DB_PORT", "5432")),
+        user=os.environ.get("DB_USER", "admin"),
+        password=os.environ.get("DB_PASSWORD", ""),
         dbname="tickles_rubicon",
     )
 
@@ -287,11 +348,11 @@ def margin_for(tier: str, balance: float) -> float:
     return balance * {"MAX": 0.22, "HIGH": 0.15, "MODERATE": 0.10}[tier]
 
 
-def cycle(conn) -> None:
-    state_load = load_state(conn)
+def cycle(company_conn, shared_conn, memory: Optional[ScopedMemory] = None) -> None:
+    state_load = load_state(company_conn)
     s = state_load["state"]
     positions = state_load["positions"]
-    market = fetch_market()
+    market = fetch_market(shared_conn)
     market_by_sym = {m["symbol"]: m for m in market}
 
     balance = float(s["balance"])
@@ -337,14 +398,14 @@ def cycle(conn) -> None:
             if pos["remaining_frac"] <= 1e-6:
                 pos["remaining_frac"] = 0
                 pos["closed_at"] = now_utc()
-            update_position(conn, {
+            update_position(company_conn, {
                 "trade_id": pos["trade_id"], "sl": pos["sl"],
                 "tp1_done": pos["tp1_done"], "tp2_done": pos["tp2_done"],
                 "remaining_frac": pos["remaining_frac"],
                 "last_progress_ts": pos["last_progress_ts"],
                 "closed_at": pos.get("closed_at"),
             })
-            insert_log(conn, {
+            insert_log(company_conn, {
                 "ts": now_utc(), "trade_id": pos["trade_id"], "symbol": sym,
                 "side": side, "action": action, "entry_price": ep,
                 "exit_price": exit_px, "frac": frac,
@@ -354,6 +415,20 @@ def cycle(conn) -> None:
             })
             LOG.info("close %s %s %.0f%% %s net=%+.2f cum=%+.2f",
                      sym, side, frac*100, action, net, cumulative_net)
+
+            # --- Learning Loop: Post-Trade Autopsy ---
+            if memory and pos["remaining_frac"] <= 0:
+                try:
+                    autopsy = (
+                        f"Trade Autopsy: {sym} {side} closed via {action}/{reason}. "
+                        f"Net PnL: {net:+.2f}. Entry: {ep:.4f}, Exit: {exit_px:.4f}. "
+                        f"Divergence at entry: {pos['divergence_at_entry']:.3f}%. "
+                        f"Funding at entry: {pos['funding_at_entry']:.4f}."
+                    )
+                    memory.add(autopsy, user_id="rubicon", agent_id="surgeon2", metadata={"type": "autopsy", "symbol": sym})
+                    LOG.info("recorded autopsy to mem0 for trade #%s", pos["trade_id"])
+                except Exception as e:
+                    LOG.warning("failed to record autopsy: %s", e)
 
         # convergence
         if abs_div < CONVERGENCE_EXIT_THRESH and float(pos["remaining_frac"]) > 0:
@@ -378,7 +453,7 @@ def cycle(conn) -> None:
             close_partial(0.25, "TP1", "TP1")
             pos["tp1_done"] = True
             pos["sl"] = float(pos["entry_price"])
-            update_position(conn, {
+            update_position(company_conn, {
                 "trade_id": pos["trade_id"], "sl": pos["sl"],
                 "tp1_done": True, "tp2_done": pos["tp2_done"],
                 "remaining_frac": pos["remaining_frac"],
@@ -392,7 +467,7 @@ def cycle(conn) -> None:
             pos["tp2_done"] = True
             trail = float(pos["entry_price"]) * (1.005 if side == "LONG" else 0.995)
             pos["sl"] = max(pos["sl"], trail) if side == "LONG" else min(pos["sl"], trail)
-            update_position(conn, {
+            update_position(company_conn, {
                 "trade_id": pos["trade_id"], "sl": pos["sl"],
                 "tp1_done": pos["tp1_done"], "tp2_done": True,
                 "remaining_frac": pos["remaining_frac"],
@@ -424,6 +499,16 @@ def cycle(conn) -> None:
             if any(p["symbol"] == sym and float(p["remaining_frac"]) > 0 for p in positions):
                 continue
             price = m["price"]
+
+            # --- Learning Loop: Pre-Trade Memory Check ---
+            if memory:
+                try:
+                    learnings = memory.search("recent trading learnings", limit=3, user_id="rubicon", agent_id="surgeon2")
+                    if learnings:
+                        LOG.info("PRE-TRADE LEARNINGS for %s: %s", sym, json.dumps(learnings))
+                except Exception as e:
+                    LOG.warning("failed to query memory: %s", e)
+
             entry = entry_price_with_slip(price, side)
             margin = margin_for(tier, balance)
             notional = margin * LEVERAGE_DEFAULT
@@ -447,8 +532,8 @@ def cycle(conn) -> None:
                 "funding_at_entry": m["funding"],
                 "reason": reason,
             }
-            insert_position(conn, pos)
-            insert_log(conn, {
+            insert_position(company_conn, pos)
+            insert_log(company_conn, {
                 "ts": ts, "trade_id": trade_counter, "symbol": sym, "side": side,
                 "action": "OPEN", "entry_price": entry, "exit_price": None,
                 "frac": 1.0, "gross_pnl": None, "fees": fee, "net_pnl": None,
@@ -461,7 +546,7 @@ def cycle(conn) -> None:
             LOG.info("OPEN %s %s [%s] %s margin=%.2f notional=%.2f entry=%.4f",
                      sym, side, tier, reason, margin, notional, entry)
     elif not candidates:
-        insert_log(conn, {
+        insert_log(company_conn, {
             "ts": now_utc(), "trade_id": 0, "symbol": "-", "side": "-",
             "action": "DECISION", "entry_price": None, "exit_price": None,
             "frac": None, "gross_pnl": None, "fees": None, "net_pnl": None,
@@ -470,22 +555,54 @@ def cycle(conn) -> None:
         })
         LOG.info("no signal. candidates=%s", [(m['symbol'], m['divergence_pct'], m['funding']) for m in market])
 
-    save_state_row(conn, {
+    save_state_row(company_conn, {
         "balance": balance, "realized_pnl": realized_pnl,
         "total_fees": total_fees, "cumulative_turnover": turnover,
         "trade_counter": trade_counter,
     })
-    conn.commit()
+    company_conn.commit()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--interval", type=int, default=300)
+    parser.add_argument("--interval", type=int, default=900, help="seconds between cycles (default 15 min)")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
-    conn = connect_company()
-    ensure_schema(conn)
+    company_conn = connect_company()
+    shared_conn = connect_shared()
+    ensure_schema(company_conn)
+
+    # Phase 10 [BD] dual-backend assertion: refuse to start if legacy tables
+    # coexist with new canonical tables (post-cutover safety gate).
+    with company_conn.cursor() as cur:
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'surgeon2_state'
+            ) AND EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'agent_state'
+            ) AS dual_backend;
+        """)
+        row = cur.fetchone()
+        if row and row[0]:
+            LOG.error(
+                "DUAL-BACKEND BLOCKED: surgeon2_state (legacy) and agent_state (canonical) "
+                "both exist. Run migration script first: "
+                "python -m shared.scripts.migrate_surgeon2 --company rubicon"
+            )
+            sys.exit(78)  # EX_CONFIG — configuration error
+
+    # Initialize ScopedMemory (Tier-1/2)
+    memory = None
+    try:
+        memory = ScopedMemory(company="rubicon", agent_id="surgeon2")
+        LOG.info("ScopedMemory initialized for surgeon2")
+    except Exception as e:
+        LOG.warning("ScopedMemory initialization failed: %s", e)
 
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
@@ -493,24 +610,26 @@ def main() -> None:
 
     LOG.info("surgeon2 trader started. interval=%ss", args.interval)
     if args.once:
-        cycle(conn)
+        cycle(company_conn, shared_conn, memory=memory)
         return
 
     while not stop["flag"]:
         try:
-            cycle(conn)
+            cycle(company_conn, shared_conn, memory=memory)
         except Exception as exc:
             LOG.exception("cycle failed: %s", exc)
             try:
-                conn.rollback()
+                company_conn.rollback()
             except Exception:
                 pass
             try:
-                conn.close()
+                company_conn.close()
+                shared_conn.close()
             except Exception:
                 pass
-            conn = connect_company()
-            ensure_schema(conn)
+            company_conn = connect_company()
+            shared_conn = connect_shared()
+            ensure_schema(company_conn)
         for _ in range(args.interval):
             if stop["flag"]:
                 break

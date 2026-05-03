@@ -1,0 +1,13 @@
+======================================================================
+ChartHacker Guru Hourly Status — 2026-04-29T11:29:09.541278+00:00
+======================================================================
+
+No open positions currently tracked.
+
+--- STRUGGLES / WARNINGS ---
+  ⚠ No trades detected in the last hour — collector or interpretation may be failing.
+
+--- RECOMMENDATIONS ---
+  → Check Discord collector connectivity and interpretation service health.
+
+======================================================================

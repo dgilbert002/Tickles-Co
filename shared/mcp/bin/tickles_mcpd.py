@@ -43,7 +43,7 @@ from ..server import McpServer
 from ..store import InvocationStore
 from ..transports.http import run_http
 from ..tools import ToolContext
-from ..tools import provisioning, data, memory, trading, learning, backtest, meta, contest
+from ..tools import provisioning, data, memory, trading, learning, backtest, meta, contest, intelligence
 
 
 LOG = logging.getLogger("tickles.mcp.daemon")
@@ -83,6 +83,7 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     learning.register(reg, ctx)
     meta.register(reg, ctx)
     contest.register(reg, ctx)
+    intelligence.register(reg, ctx)
     register_builtin_providers(reg, LOG)
 
     LOG.info("[build_registry] registered tools=%d", len(reg.list_tools()))

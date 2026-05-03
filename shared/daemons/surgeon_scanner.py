@@ -22,6 +22,10 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import List
 
+# Add /opt/tickles to sys.path to ensure shared imports work
+sys.path.append("/opt/tickles")
+from shared.utils.freshness import validate_freshness, StaleDataError
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOG = logging.getLogger("surgeon.scanner")
 
@@ -94,19 +98,34 @@ def bollinger(closes: List[float], period: int = 20, k: float = 2.0) -> dict:
 
 
 def scan_one(sym: str) -> dict:
-    price = get_json(BINANCE_PRICE.format(s=sym))
+    """Fetch and validate market data for one symbol."""
+    price_data = get_json(BINANCE_PRICE.format(s=sym))
     prem = get_json(BINANCE_PREM.format(s=sym))
+    
+    # Validate Binance Premium Index freshness (unix ms)
+    binance_ts = prem.get("time")
+    if binance_ts:
+        lag = validate_freshness(binance_ts / 1000.0, context=f"binance_prem:{sym}")
+        LOG.debug("Freshness: %s binance_prem lag=%.2fs", sym, lag)
+        
     t24 = get_json(BINANCE_24H.format(s=sym))
     kl = get_json(BINANCE_KLINE.format(s=sym))
+    
+    # Validate Klines freshness (index 6 is close time in ms)
+    if kl:
+        lag = validate_freshness(kl[-1][6] / 1000.0, context=f"binance_kline:{sym}")
+        LOG.debug("Freshness: %s binance_kline lag=%.2fs", sym, lag)
+        
     closes = [float(k[4]) for k in kl]
-    mark = float(prem.get("markPrice", price["price"]))
+    mark = float(prem.get("markPrice", price_data["price"]))
     index = float(prem.get("indexPrice", mark))
     funding = float(prem.get("lastFundingRate", 0.0))
     divergence_pct = (mark - index) / index * 100.0 if index else 0.0
-    last_close = closes[-1] if closes else float(price["price"])
+    last_close = closes[-1] if closes else float(price_data["price"])
+    
     return {
         "symbol": sym,
-        "price": float(price["price"]),
+        "price": float(price_data["price"]),
         "markPrice": mark,
         "indexPrice": index,
         "divergencePct": round(divergence_pct, 4),
@@ -145,7 +164,7 @@ def write_outputs(out_dir: str, data: List[dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="/root/.openclaw/workspace/rubicon_surgeon")
-    parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--interval", type=int, default=900, help="seconds between scans (default 15 min)")
     args = parser.parse_args()
 
     stop = {"flag": False}
@@ -158,6 +177,8 @@ def main() -> None:
         for _, sym in ASSETS.items():
             try:
                 data.append(scan_one(sym))
+            except StaleDataError as e:
+                LOG.error("STALE DATA for %s: %s. Skipping.", sym, e)
             except Exception as exc:
                 LOG.warning("%s failed: %s", sym, exc)
         if data:

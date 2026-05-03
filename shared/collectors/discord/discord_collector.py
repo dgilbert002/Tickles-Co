@@ -24,11 +24,14 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import aiohttp
 
 from shared.collectors.base import BaseCollector, CollectorConfig, NewsItem, NewsSource
+from shared.collectors.rate_limit import for_source as rate_limit_for_source
+from shared.intelligence.zone_filter import classify, passes
+from shared.intelligence.image_phash import compute_phash, is_near_duplicate
 from shared.utils.db import DatabasePool
 
 logger = logging.getLogger("tickles.discord")
@@ -408,15 +411,17 @@ async def _download_media_for_messages(
                 (".mp3", ".ogg", ".wav")
             )
 
-            if not (is_image or is_video or is_audio):
+            # Skip non-image media — vision LLMs cannot process video/audio.
+            if not is_image:
+                if is_video or is_audio:
+                    logger.debug(
+                        "Skipping %s attachment %s (vision LLM cannot process)",
+                        "video" if is_video else "audio",
+                        filename,
+                    )
                 continue
 
-            if is_image:
-                media_type = "photo"
-            elif is_video:
-                media_type = "video"
-            else:
-                media_type = "voice"
+            media_type = "photo"
 
             ext = os.path.splitext(filename)[1] or ".bin"
             timestamp = msg.get("date", datetime.now(timezone.utc))
@@ -472,6 +477,8 @@ class DiscordCollector(BaseCollector):
         self._db_pool = db_pool
         self._ready = False
         self._media_base_dir = MEDIA_BASE_DIR
+        self._known_traders: Set[str] = set()  # normalized handles from trader_profiles
+        self._known_traders_last_refresh: Optional[datetime] = None
 
         # Load config
         self._load_config()
@@ -787,11 +794,37 @@ class DiscordCollector(BaseCollector):
 
         return text
 
-    def _should_include_message(self, msg_data: Dict[str, Any]) -> bool:
+    async def _refresh_known_traders(self) -> None:
+        """Refresh the set of known trader handles from trader_profiles.
+
+        Caches for 5 minutes to avoid hammering the DB on every collection cycle.
+        """
+        now = datetime.now(timezone.utc)
+        if self._known_traders_last_refresh and (now - self._known_traders_last_refresh).total_seconds() < 300:
+            return
+
+        pool = await self._ensure_db_pool()
+        try:
+            rows = await pool.fetch_all(
+                "SELECT DISTINCT handle_normalized FROM public.trader_profiles WHERE platform = 'discord'"
+            )
+            self._known_traders = {row["handle_normalized"].lower() for row in rows if row.get("handle_normalized")}
+            self._known_traders_last_refresh = now
+            logger.debug("Refreshed known traders: %d handles", len(self._known_traders))
+        except Exception as e:
+            logger.warning("Failed to refresh known traders: %s", e)
+            # Keep existing set on failure so we don't open the floodgates
+
+    def _should_include_message(self, msg_data: Dict[str, Any], channel_id: Optional[str] = None) -> bool:
         """Check if a message should be included based on user filters.
+
+        For the trading-zone channel, only allows messages from known traders
+        (those present in the trader_profiles table) to filter out general
+        community chatter and capture only trade status updates.
 
         Args:
             msg_data: Message data dict with sender info.
+            channel_id: Optional Discord channel ID for channel-specific filtering.
 
         Returns:
             True if message should be included.
@@ -815,6 +848,136 @@ class DiscordCollector(BaseCollector):
                 if allowed_lower == sender_id or allowed_lower == sender_username:
                     return True
             return False
+
+        # --- Trading-zone: only known traders ---
+        if channel_id == "1305518197725728788":
+            known = getattr(self, "_known_traders", set())
+            if known and sender_username not in known:
+                return False
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Phase 9 — zone filter, context window, rate limit, image dedup
+    # ------------------------------------------------------------------
+
+    async def _build_context_window(self, channel: Any, message: Any) -> Optional[Dict[str, Any]]:
+        """Build ±10 message context window around a message.
+
+        Args:
+            channel: Discord channel object.
+            message: Discord message object.
+
+        Returns:
+            Dict with 'before' and 'after' message snapshots, or None on error.
+        """
+        try:
+            import discord
+            before = []
+            async for m in channel.history(limit=10, before=message):
+                before.append({
+                    "id": str(m.id),
+                    "author": str(m.author),
+                    "text": (m.content or "")[:2000],
+                    "timestamp": m.created_at.isoformat() if m.created_at else None,
+                    "has_attachment": bool(m.attachments),
+                })
+            after = []
+            async for m in channel.history(limit=10, after=message):
+                after.append({
+                    "id": str(m.id),
+                    "author": str(m.author),
+                    "text": (m.content or "")[:2000],
+                    "timestamp": m.created_at.isoformat() if m.created_at else None,
+                    "has_attachment": bool(m.attachments),
+                })
+            return {"before": list(reversed(before)), "after": after}
+        except Exception as exc:
+            logger.warning("Discord context-window failed: %s", exc)
+            return None
+
+    async def _apply_zone_filter_and_dedup(
+        self,
+        item: NewsItem,
+        source_id: Optional[int],
+        channel_id: str,
+        pool: DatabasePool,
+    ) -> bool:
+        """Apply zone filter, image dedup, and enrichment_status to a NewsItem.
+
+        Mutates item in-place with enrichment_status, zone_filter_* fields,
+        context_window, image_phash, duplicate_of_id.
+
+        Args:
+            item: NewsItem to process.
+            source_id: collector_sources.id for per-source overrides.
+            channel_id: Discord channel ID string.
+            pool: Database pool for dedup lookups.
+
+        Returns:
+            True if item should proceed to DB write (not dropped by rate limit).
+            False if item was dropped (should not be written).
+        """
+        cid = f"discord_{channel_id}_{item.hash_key[:16]}"
+
+        # --- Phase 9 [BB] rate limiter ---
+        default_rate = float(os.environ.get("DISCORD_RATE_LIMIT_MSGS_PER_SEC", "50"))
+        bucket = rate_limit_for_source(source_id or 0, default_rate)
+        if not await bucket.acquire(timeout=30.0):
+            logger.warning("Discord rate-limit timeout source_id=%s; dropping message", source_id)
+            return False
+
+        # --- Phase 9 §A zone filter ---
+        catalog: Optional[Dict[str, Any]] = None
+        if source_id is not None:
+            try:
+                row = await pool.fetchrow(
+                    "SELECT zone_filter_enabled, zone_filter_threshold, rate_limit_msgs_per_sec "
+                    "FROM collector_sources WHERE id = $1", source_id,
+                )
+                if row:
+                    catalog = dict(row)
+            except Exception as exc:
+                logger.warning("Failed to load collector_catalog for source_id=%s: %s", source_id, exc)
+
+        zone_filter_enabled = catalog.get("zone_filter_enabled", True) if catalog else True
+        per_source_threshold = catalog.get("zone_filter_threshold") if catalog else None
+
+        if zone_filter_enabled and item.content:
+            zone = await classify(item.content, source_id=source_id or 0, correlation_id=cid)
+            item.zone_filter_confidence = zone.get("confidence")
+            item.zone_filter_reason = zone.get("reason")
+            if not passes(zone, per_source_threshold=per_source_threshold):
+                item.enrichment_status = "non_signal"
+                logger.debug("Discord zone-filter rejected: confidence=%s reason=%s",
+                             item.zone_filter_confidence, item.zone_filter_reason)
+            else:
+                item.enrichment_status = "pending"
+        else:
+            item.enrichment_status = "pending"
+
+        # --- Phase 9 [BA] image perceptual-hash dedup ---
+        if item.media_path:
+            try:
+                phash = compute_phash(Path(item.media_path))
+                if phash:
+                    item.image_phash = phash
+                    async with pool.acquire() as conn:
+                        canonical = await conn.fetchrow(
+                            "SELECT id FROM news_items "
+                            "WHERE image_phash IS NOT NULL "
+                            "  AND duplicate_of_id IS NULL "
+                            "  AND collected_at > now() - interval '60 minutes' "
+                            "  AND image_phash = $1 "
+                            "ORDER BY collected_at ASC LIMIT 1",
+                            phash,
+                        )
+                        if canonical:
+                            item.duplicate_of_id = canonical["id"]
+                            item.enrichment_status = "duplicate_zone"
+                            logger.info("Discord image dedup: %s is duplicate of %s", item.hash_key[:16], canonical["id"])
+            except Exception as exc:
+                logger.warning("Discord image dedup failed for %s: %s", item.media_path, exc)
 
         return True
 
@@ -878,10 +1041,23 @@ class DiscordCollector(BaseCollector):
 
             # Filter messages by user if configured
             if self.config and (self.config.allowed_users or self.config.blocked_users):
-                filtered_messages = [m for m in raw_messages if self._should_include_message(m)]
+                filtered_messages = [m for m in raw_messages if self._should_include_message(m, channel_id)]
                 if len(filtered_messages) != len(raw_messages):
                     logger.debug(
                         "Discord: #%s — filtered %d -> %d messages by user filter",
+                        channel_info.get("name", channel_id),
+                        len(raw_messages),
+                        len(filtered_messages),
+                    )
+                raw_messages = filtered_messages
+
+            # Also apply trading-zone known-trader filter even without explicit allowed_users
+            if channel_id == "1305518197725728788":
+                await self._refresh_known_traders()
+                filtered_messages = [m for m in raw_messages if self._should_include_message(m, channel_id)]
+                if len(filtered_messages) != len(raw_messages):
+                    logger.info(
+                        "Discord: #%s — trader-filtered %d -> %d messages (trading-zone)",
                         channel_info.get("name", channel_id),
                         len(raw_messages),
                         len(filtered_messages),
@@ -895,10 +1071,12 @@ class DiscordCollector(BaseCollector):
             group_window = self.config.group_window_seconds if self.config else 60
             grouped = _group_messages(raw_messages, channel_info, group_window)
 
-            # Convert to NewsItems
+            # Convert to NewsItems + Phase 9 zone filter / dedup / context window
             items: List[NewsItem] = []
             source_id = channel_info.get("source_id")
             channel_name = channel_info.get("name")
+            pool = await self._ensure_db_pool()
+
             for group in grouped:
                 meta = dict(group.get("metadata") or {})
                 # Stamp every news_item with its provenance so we can trace
@@ -924,14 +1102,34 @@ class DiscordCollector(BaseCollector):
                     metadata=meta,
                 )
                 item.hash_key = group["hash_key"]
+
+                # Phase 9 — apply zone filter, rate limit, image dedup
+                keep = await self._apply_zone_filter_and_dedup(
+                    item, source_id, channel_id, pool,
+                )
+                if not keep:
+                    continue
+
+                # Phase 9 — context window for signal-classified items
+                if item.enrichment_status == "pending" and group.get("first_msg"):
+                    try:
+                        ctx = await self._build_context_window(channel, group["first_msg"])
+                        if ctx:
+                            item.context_window = ctx
+                    except Exception as exc:
+                        logger.debug("Discord context-window skipped: %s", exc)
+
                 items.append(item)
 
             logger.info(
-                "Discord: #%s — %d msgs -> %d groups -> %d items",
+                "Discord: #%s — %d msgs -> %d groups -> %d items (%d pending, %d non_signal, %d duplicate)",
                 channel_info.get("name", channel_id),
                 len(raw_messages),
                 len(grouped),
                 len(items),
+                sum(1 for i in items if i.enrichment_status == "pending"),
+                sum(1 for i in items if i.enrichment_status == "non_signal"),
+                sum(1 for i in items if i.enrichment_status == "duplicate_zone"),
             )
 
             return items
@@ -970,7 +1168,13 @@ class DiscordCollector(BaseCollector):
         return all_items
 
     async def run_forever(self) -> None:
-        """Main loop: connect to Discord and collect every interval."""
+        """Main loop: connect to Discord and collect every interval.
+
+        Reconnection strategy:
+        - Exponential backoff on client disconnect (max 300s).
+        - 429 (rate-limit) triggers a gradual slowdown (interval *= 1.5).
+        - Health check: if client dies mid-loop, re-initialise and reconnect.
+        """
         logger.info("Discord collector service starting...")
 
         await self._load_hwm()
@@ -983,24 +1187,52 @@ class DiscordCollector(BaseCollector):
             )
             return
 
-        # Start Discord client in background
-        client_task = asyncio.create_task(self._start_client())
-
-        # Wait for client to be ready
-        for _ in range(30):
-            if self._ready:
-                break
-            await asyncio.sleep(1)
-
-        if not self._ready:
-            logger.error("Discord client failed to become ready within 30s")
-            return
-
         interval = self.config.collection_interval_seconds if self.config else 120
-        logger.info("Discord collector ready. Collecting every %d seconds.", interval)
+        reconnect_backoff = 1
+        max_reconnect_backoff = 300
+        rate_limit_hits = 0
 
-        try:
-            while True:
+        while True:
+            try:
+                # ── Connect or reconnect ───────────────────────────────
+                if not self._ready or self._client is None or self._client.is_closed():
+                    logger.info(
+                        "Discord reconnecting (backoff=%ds, ready=%s, closed=%s)",
+                        reconnect_backoff,
+                        self._ready,
+                        self._client.is_closed() if self._client else "N/A",
+                    )
+                    if self._client and not self._client.is_closed():
+                        try:
+                            await self._client.close()
+                        except Exception:
+                            pass
+                    self._ready = False
+                    self._client = None
+                    client_task = asyncio.create_task(self._start_client())
+
+                    # Wait for ready with timeout
+                    for _ in range(min(60, reconnect_backoff * 2)):
+                        if self._ready:
+                            break
+                        await asyncio.sleep(1)
+
+                    if not self._ready:
+                        logger.error(
+                            "Discord client failed to become ready (backoff=%ds)",
+                            reconnect_backoff,
+                        )
+                        if not client_task.done():
+                            client_task.cancel()
+                        await asyncio.sleep(reconnect_backoff)
+                        reconnect_backoff = min(reconnect_backoff * 2, max_reconnect_backoff)
+                        continue
+
+                    # Successful connection — reset backoff
+                    reconnect_backoff = 1
+                    logger.info("Discord collector reconnected. Collecting every %d seconds.", interval)
+
+                # ── Collection cycle ─────────────────────────────────
                 try:
                     items = await self.collect()
                     if items:
@@ -1008,19 +1240,39 @@ class DiscordCollector(BaseCollector):
                         inserted = await self.write_to_db(items, pool)
                         if inserted > 0:
                             logger.info("Discord: wrote %d new items", inserted)
-
                 except Exception as e:
+                    err_str = str(e).lower()
+                    if "429" in err_str or "too many requests" in err_str or "rate limit" in err_str:
+                        rate_limit_hits += 1
+                        slowdown = min(interval * (1.5 ** rate_limit_hits), 600)
+                        logger.warning(
+                            "Discord rate-limit hit (#%d). Slowing to %ds interval.",
+                            rate_limit_hits,
+                            int(slowdown),
+                        )
+                        await asyncio.sleep(slowdown)
+                        continue
                     logger.error("Discord collection cycle error: %s", e, exc_info=True)
                     self.errors += 1
 
                 await asyncio.sleep(interval)
 
-        except asyncio.CancelledError:
-            logger.info("Discord collector cancelled")
-        finally:
-            if self._client:
+            except asyncio.CancelledError:
+                logger.info("Discord collector cancelled")
+                break
+            except Exception as e:
+                logger.error("Discord run_forever outer error: %s", e, exc_info=True)
+                self.errors += 1
+                await asyncio.sleep(reconnect_backoff)
+                reconnect_backoff = min(reconnect_backoff * 2, max_reconnect_backoff)
+
+        # Cleanup
+        if self._client and not self._client.is_closed():
+            try:
                 await self._client.close()
-            logger.info("Discord collector stopped. Status: %s", self.get_status())
+            except Exception:
+                pass
+        logger.info("Discord collector stopped. Status: %s", self.get_status())
 
     def get_status(self) -> Dict[str, Any]:
         """Get current service status.

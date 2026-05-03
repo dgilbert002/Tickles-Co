@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Tickles Manage{% endblock %}</title>
+<link rel="stylesheet" href="/manage/static/manage.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/manage/sources" class="{% if active_tab == 'sources' %}active{% endif %}">Sources</a>
+  <a href="/manage/channels" class="{% if active_tab == 'channels' %}active{% endif %}">Channels</a>
+  <a href="/manage/users" class="{% if active_tab == 'users' %}active{% endif %}">Users</a>
+  <a href="/manage/signals" class="{% if active_tab == 'signals' %}active{% endif %}">Signals</a>
+  <a href="/manage/positions" class="{% if active_tab == 'positions' %}active{% endif %}">Positions</a>
+  <a href="/manage/leaderboard" class="{% if active_tab == 'leaderboard' %}active{% endif %}">Leaderboard</a>
+</nav>
+<div id="error-banner" class="error-banner" style="display:none"></div>
+<main class="container">
+{% block content %}{% endblock %}
+</main>
+<script src="/manage/static/manage.js"></script>
+</body>
+</html>

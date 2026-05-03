@@ -49,6 +49,7 @@ from shared.intelligence.gateway_config import GatewayConfig, chat_completion
 from shared.intelligence.heartbeat import record_heartbeat
 from shared.intelligence.position_monitor import _resolve_instrument_id
 from shared.intelligence.prompt_registry import register_prompt
+from shared.intelligence.recall_log import match_recall_to_outcome
 from shared.utils.correlation import new_correlation_id
 from shared.utils.db import DatabasePool, get_shared_pool
 
@@ -228,6 +229,122 @@ def _truncate(value: Any, max_len: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Phase J — push postmortem lessons into mem0 (closes the learning loop)
+# ---------------------------------------------------------------------------
+async def _push_lessons_to_mem0(
+    company: str,
+    position: asyncpg.Record,
+    parsed: Dict[str, Any],
+) -> None:
+    """Write postmortem lessons into the chart_hacker mem0 namespace.
+
+    Routing rule:
+      * If the closed position is chart_hacker's own (signal_source='chart_hacker'),
+        the lesson is filed under metadata.about='self' — chart_hacker learning
+        from its own outcomes.
+      * If the position belongs to a human trader (signal_source='trader'),
+        chart_hacker still records the outcome as an observation about that
+        trader: metadata.about='trader:<handle>'. So chart_hacker builds a
+        running profile of every trader it watches.
+
+    Best-effort: any failure is logged and swallowed — the postmortem row has
+    already been written, and the JSONB lessons_for_actor / lessons_for_company
+    columns are the source of truth. mem0 is the recall surface.
+
+    Args:
+        company: Company slug.
+        position: The asyncpg.Record from _fetch_pending (must include
+            signal_source, trader_handle, instrument_symbol, outcome, direction).
+        parsed: Parsed LLM response dict (with lessons_for_actor /
+            lessons_for_company keys).
+    """
+    try:
+        from shared.utils.mem0_config import get_memory
+    except Exception as exc:
+        logger.debug("postmortem→mem0: mem0_config import failed: %s", exc)
+        return
+
+    actor_lesson   = (parsed.get("lessons_for_actor")   or "").strip()
+    company_lesson = (parsed.get("lessons_for_company") or "").strip()
+    if not actor_lesson and not company_lesson:
+        return
+
+    signal_source = (position["signal_source"] or "trader").lower()
+    trader_handle = (position["trader_handle"] or "").strip().lower()
+    symbol        = position["instrument_symbol"]
+    direction     = position["direction"]
+    outcome       = position["outcome"]
+    timeframe     = position["timeframe"] if "timeframe" in position.keys() else None
+    pnl           = position["realized_pnl_usd_final"]
+
+    if signal_source == "chart_hacker":
+        about = "self"
+        prefix = "Self lesson"
+    else:
+        about = f"trader:{trader_handle}" if trader_handle else "trader:unknown"
+        prefix = f"Observation on {trader_handle or 'unknown trader'}"
+
+    metadata = {
+        "about":         about,
+        "signal_source": signal_source,
+        "symbol":        symbol,
+        "direction":     direction,
+        "outcome":       outcome,
+        "timeframe":     timeframe,
+        "pnl_usd":       float(pnl) if pnl is not None else None,
+        "position_id":   int(position["id"]),
+    }
+
+    try:
+        mem, agent_id = get_memory(company, "chart_hacker")
+    except Exception as exc:
+        logger.warning("postmortem→mem0: get_memory failed: %s", exc)
+        return
+
+    # actor lesson — what to remember when looking at similar setups in future
+    if actor_lesson:
+        text = f"{prefix} ({symbol} {direction} → {outcome}): {actor_lesson}"
+        try:
+            await asyncio.to_thread(
+                mem.add,
+                text,
+                user_id=company,
+                agent_id=agent_id,
+                metadata=metadata,
+            )
+            logger.info(
+                "postmortem→mem0: wrote actor lesson for position_id=%s about=%s",
+                position["id"], about,
+            )
+        except Exception as exc:
+            logger.warning(
+                "postmortem→mem0: actor-lesson add failed (position_id=%s): %s",
+                position["id"], exc,
+            )
+
+    # company lesson — broadcast to MemU is handled elsewhere (broadcast_insight);
+    # also stamp it into chart_hacker's mem0 with about='company' so it shows up
+    # on recall regardless of which side opens the next analysis.
+    if company_lesson:
+        text = f"Company lesson ({symbol} {direction} → {outcome}): {company_lesson}"
+        meta_company = dict(metadata)
+        meta_company["about"] = "company"
+        try:
+            await asyncio.to_thread(
+                mem.add,
+                text,
+                user_id=company,
+                agent_id=agent_id,
+                metadata=meta_company,
+            )
+        except Exception as exc:
+            logger.warning(
+                "postmortem→mem0: company-lesson add failed (position_id=%s): %s",
+                position["id"], exc,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 class PostMortemService:
@@ -315,22 +432,33 @@ class PostMortemService:
     # DB queries
     # ------------------------------------------------------------------
     async def _fetch_pending(self, conn: asyncpg.Connection) -> List[asyncpg.Record]:
-        """Fetch closed positions awaiting post-mortem for this company."""
+        """Fetch closed positions awaiting post-mortem for this company.
+
+        Phase J — also pulls signal_source/actor fields and the human
+        trader's handle so the post-mortem hook can route the lessons to
+        the correct mem0 namespace (chart_hacker self-learning vs
+        chart_hacker writing observations about a trader).
+        """
         try:
             return await conn.fetch(
                 """
-                SELECT id, instrument_symbol, instrument_exchange, direction,
-                       entry_price, exit_price, outcome,
-                       max_drawdown_pct, max_profit_pct, time_in_trade_minutes,
-                       entry_reason_trader, entry_reason_llm, exit_reason,
-                       signal_timestamp, closed_at,
-                       realized_pnl_usd_final, status_reason
-                FROM public.tracked_positions
-                WHERE status = 'closed'
-                  AND postmortem_status = 'pending'
-                  AND company_id = $1
-                ORDER BY closed_at ASC
-                LIMIT $2
+                SELECT tp.id, tp.instrument_symbol, tp.instrument_exchange, tp.direction,
+                       tp.entry_price, tp.exit_price, tp.outcome,
+                       tp.max_drawdown_pct, tp.max_profit_pct, tp.time_in_trade_minutes,
+                       tp.entry_reason_trader, tp.entry_reason_llm, tp.exit_reason,
+                       tp.signal_timestamp, tp.closed_at,
+                       tp.realized_pnl_usd_final, tp.status_reason,
+                       tp.signal_source, tp.actor_id, tp.actor_type,
+                       tp.trader_profile_id, tp.timeframe, tp.company_id,
+                       prof.handle_normalized AS trader_handle,
+                       prof.platform          AS trader_platform
+                  FROM public.tracked_positions tp
+             LEFT JOIN public.trader_profiles  prof ON prof.id = tp.trader_profile_id
+                 WHERE tp.status = 'closed'
+                   AND tp.postmortem_status = 'pending'
+                   AND tp.company_id = $1
+                 ORDER BY tp.closed_at ASC
+                 LIMIT $2
                 """,
                 self.company_id,
                 self.batch_size,
@@ -653,12 +781,36 @@ class PostMortemService:
                 pos_id,
                 latency_ms,
             )
+            # Phase J — close the learning loop: push lessons into mem0
+            await _push_lessons_to_mem0(self.company_id, position, parsed)
         else:
             logger.info(
                 "postmortem: position_id=%s already had a postmortem (ON CONFLICT)",
                 pos_id,
             )
             await conn.execute(_UPDATE_STATUS_SQL, "done", pos_id)
+
+        # Phase Y.2 — retroactively match any pending mem0_recall_log rows
+        # for this just-closed position. The matcher is best-effort: any
+        # error is swallowed inside `match_recall_to_outcome` so a missing
+        # mem0_recall_log table (pre-migration) or a row-level CHECK
+        # violation never derails the postmortem pipeline.
+        try:
+            await match_recall_to_outcome(
+                conn,
+                position_id=pos_id,
+                position_outcome=position["outcome"],
+                position_symbol=position["instrument_symbol"],
+            )
+        except Exception as exc:
+            # Defence-in-depth: the matcher already swallows asyncpg errors,
+            # but an unexpected programming error must not propagate up and
+            # rollback the postmortem-status update.
+            logger.warning(
+                "postmortem: recall_log matcher raised unexpectedly "
+                "for position_id=%s: %s",
+                pos_id, exc,
+            )
 
     # ------------------------------------------------------------------
     # Tick / loop

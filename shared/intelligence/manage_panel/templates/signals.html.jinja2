@@ -1,0 +1,33 @@
+{% extends "base.html.jinja2" %}
+{% block title %}Signals — Tickles Manage{% endblock %}
+{% block content %}
+<h1>Signals <span class="subtitle">last {{ hours }}h</span></h1>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Trader</th>
+      <th>Symbol</th>
+      <th>LLM</th>
+      <th>Quant</th>
+      <th>Consensus</th>
+      <th>Cost</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for sig in signals %}
+    <tr>
+      <td>{{ sig['created_at'] | fmt_dt('%m-%d %H:%M') }}</td>
+      <td>{{ sig.get('trader_handle','—') }}</td>
+      <td>{{ sig.get('symbol','—') }}</td>
+      <td class="dir-{{ sig.get('llm_direction','') }}">{{ sig.get('llm_direction','—') }} {{ sig.get('llm_confidence','') }}</td>
+      <td class="dir-{{ sig.get('quant_direction','') }}">{{ sig.get('quant_direction','—') }} {{ sig.get('quant_confidence','') }}</td>
+      <td class="dir-{{ sig.get('consensus_direction','') }}">{{ sig.get('consensus_direction','—') }} {{ sig.get('consensus_confidence','') }}</td>
+      <td>${{ "%.4f"|format(sig.get('total_cost_usd',0)) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="empty">No signals in the last {{ hours }} hours.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

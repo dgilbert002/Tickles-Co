@@ -330,3 +330,73 @@ openclaw cron add \
   --message '<same message as above>' \
   --json
 ```
+
+---
+
+## 12. Service-runner agent recipe (Phase 7)
+
+For services that poll the database and write structured rows (e.g. post-mortem,
+opinion generation, edge scoring), the OpenClaw agent acts as a **runner**, not a
+trader. It invokes the Python service via `exec`; it never writes rows directly.
+
+### Register the agent
+
+```bash
+COMPANY=<company>
+openclaw agents add ${COMPANY}_postmortem \
+  --workspace /root/.openclaw/workspace/${COMPANY}_postmortem \
+  --model openrouter/openai/gpt-4.1 \
+  --non-interactive --json
+```
+
+### Register the cron with `--tools read,exec` (NOT `read,write,exec`)
+
+The `write` tool is deliberately omitted. The Python service is the sole writer
+to `position_postmortems`, `agent_opinions`, and `memu_outbox.processed_at`.
+
+```bash
+openclaw cron add \
+  --agent ${COMPANY}_postmortem \
+  --name ${COMPANY}_postmortem_cycle \
+  --cron '*/15 * * * *' \
+  --tz UTC \
+  --session isolated \
+  --tools read,exec \
+  --thinking low \
+  --timeout-seconds 180 \
+  --no-deliver \
+  --message 'Pull next pending post-mortem from tickles_${COMPANY}.tracked_positions where status=closed and postmortem_status=pending. Compute. Write to position_postmortems. Mark done.' \
+  --json
+```
+
+### Why `--tools read,exec` matters
+
+| Tool set | Risk |
+|---|---|
+| `read,write,exec` | Agent can `INSERT` directly, bypassing validation, idempotency, and cost logging. |
+| `read,exec` | Agent can only read files and execute commands. The Python service enforces all business rules. |
+
+This pattern is reused for ChartHackerOpinion (Phase 8) and EdgeScorer (Phase 11).
+
+### Verify
+
+```bash
+openclaw cron list | grep ${COMPANY}_postmortem
+# Expected: Status ok, Last <recent>, Next <soon>
+```
+
+---
+
+## 13. CI grep gates (post-Phase 7)
+
+Run these in CI to enforce single-writer invariants:
+
+```bash
+# No ad-hoc INSERT into position_postmortems outside the central service
+rg -n "INSERT INTO position_postmortems" shared/ | grep -v shared/intelligence/postmortem_service.py
+# Expected: zero matches
+
+# No openclaw cron registered with write tool for service runners
+rg "openclaw cron add.*read,write,exec" shared/
+# Expected: zero matches
+```

@@ -14,6 +14,7 @@ Requirements:
     pip install telethon aiohttp
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -26,6 +27,9 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 
 from shared.collectors.base import BaseCollector, CollectorConfig, NewsItem, NewsSource
+from shared.collectors.rate_limit import for_source as rate_limit_for_source
+from shared.intelligence.zone_filter import classify, passes
+from shared.intelligence.image_phash import compute_phash, is_near_duplicate
 from shared.utils.db import DatabasePool
 
 logger = logging.getLogger("tickles.telegram")
@@ -564,6 +568,136 @@ class TelegramCollector(BaseCollector):
 
         return True
 
+    # ------------------------------------------------------------------
+    # Phase 9 — zone filter, context window, rate limit, image dedup
+    # ------------------------------------------------------------------
+
+    async def _build_context_window_telegram(
+        self,
+        client: Any,
+        entity: Any,
+        message: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Build ±10 message context window around a Telegram message.
+
+        Args:
+            client: Telethon TelegramClient.
+            entity: Channel/group entity.
+            message: Telethon message object.
+
+        Returns:
+            Dict with 'before' and 'after' message snapshots, or None on error.
+        """
+        try:
+            before = []
+            async for m in client.iter_messages(entity, limit=10, max_id=message.id):
+                before.append({
+                    "id": str(m.id),
+                    "author": str(getattr(m.sender, "username", "") or ""),
+                    "text": (m.message or "")[:2000],
+                    "timestamp": m.date.isoformat() if m.date else None,
+                    "has_attachment": bool(m.media),
+                })
+            after = []
+            async for m in client.iter_messages(entity, limit=10, min_id=message.id):
+                after.append({
+                    "id": str(m.id),
+                    "author": str(getattr(m.sender, "username", "") or ""),
+                    "text": (m.message or "")[:2000],
+                    "timestamp": m.date.isoformat() if m.date else None,
+                    "has_attachment": bool(m.media),
+                })
+            return {"before": list(reversed(before)), "after": after}
+        except Exception as exc:
+            logger.warning("Telegram context-window failed: %s", exc)
+            return None
+
+    async def _apply_zone_filter_and_dedup_telegram(
+        self,
+        item: NewsItem,
+        source_id: Optional[int],
+        channel_id: str,
+        pool: DatabasePool,
+    ) -> bool:
+        """Apply zone filter, image dedup, and enrichment_status to a NewsItem.
+
+        Mutates item in-place with enrichment_status, zone_filter_* fields,
+        image_phash, duplicate_of_id.
+
+        Args:
+            item: NewsItem to process.
+            source_id: collector_sources.id for per-source overrides.
+            channel_id: Telegram channel ID string.
+            pool: Database pool for dedup lookups.
+
+        Returns:
+            True if item should proceed to DB write (not dropped by rate limit).
+            False if item was dropped (should not be written).
+        """
+        cid = f"telegram_{channel_id}_{item.hash_key[:16]}"
+
+        # --- Phase 9 [BB] rate limiter ---
+        default_rate = float(os.environ.get("TELEGRAM_RATE_LIMIT_MSGS_PER_SEC", "30"))
+        bucket = rate_limit_for_source(source_id or 0, default_rate)
+        if not await bucket.acquire(timeout=30.0):
+            logger.warning("Telegram rate-limit timeout source_id=%s; dropping message", source_id)
+            return False
+
+        # --- Phase 9 §A zone filter ---
+        catalog: Optional[Dict[str, Any]] = None
+        if source_id is not None:
+            try:
+                row = await pool.fetchrow(
+                    "SELECT zone_filter_enabled, zone_filter_threshold, rate_limit_msgs_per_sec "
+                    "FROM collector_sources WHERE id = $1", source_id,
+                )
+                if row:
+                    catalog = dict(row)
+            except Exception as exc:
+                logger.warning("Failed to load collector_catalog for source_id=%s: %s", source_id, exc)
+
+        zone_filter_enabled = catalog.get("zone_filter_enabled", True) if catalog else True
+        per_source_threshold = catalog.get("zone_filter_threshold") if catalog else None
+
+        if zone_filter_enabled and item.content:
+            zone = await classify(item.content, source_id=source_id or 0, correlation_id=cid)
+            item.zone_filter_confidence = zone.get("confidence")
+            item.zone_filter_reason = zone.get("reason")
+            if not passes(zone, per_source_threshold=per_source_threshold):
+                item.enrichment_status = "non_signal"
+                logger.debug("Telegram zone-filter rejected: confidence=%s reason=%s",
+                             item.zone_filter_confidence, item.zone_filter_reason)
+            else:
+                item.enrichment_status = "pending"
+        else:
+            item.enrichment_status = "pending"
+
+        # --- Phase 9 [BA] image perceptual-hash dedup ---
+        if item.media_path:
+            try:
+                phash = compute_phash(Path(item.media_path))
+                if phash:
+                    item.image_phash = phash
+                    async with pool.acquire() as conn:
+                        canonical = await conn.fetchrow(
+                            "SELECT id FROM news_items "
+                            "WHERE image_phash IS NOT NULL "
+                            "  AND duplicate_of_id IS NULL "
+                            "  AND collected_at > now() - interval '60 minutes' "
+                            "  AND image_phash = $1 "
+                            "ORDER BY collected_at ASC LIMIT 1",
+                            phash,
+                        )
+                        if canonical:
+                            item.duplicate_of_id = canonical["id"]
+                            item.enrichment_status = "duplicate_zone"
+                            logger.info("Telegram image dedup: %s is duplicate of %s",
+                                        item.hash_key[:16], canonical["id"])
+            except Exception as exc:
+                logger.warning("Telegram image dedup failed for %s: %s", item.media_path, exc)
+
+        return True
+
     async def collect(self) -> List[NewsItem]:
         """Collect recent messages from Telegram channels.
 
@@ -684,7 +818,10 @@ class TelegramCollector(BaseCollector):
                                 group, self._media_base_dir, channel_info
                             )
 
-                    # Convert to NewsItems
+                    # Convert to NewsItems + Phase 9 zone filter / dedup / context window
+                    pool = await self._ensure_db_pool()
+                    source_id = channel_info.get("source_id")
+
                     for group in grouped:
                         finalized = _finalize_group(group)
                         item = NewsItem(
@@ -700,14 +837,37 @@ class TelegramCollector(BaseCollector):
                             metadata=finalized.get("metadata", {}),
                         )
                         item.hash_key = finalized["hash_key"]
+
+                        # Phase 9 — apply zone filter, rate limit, image dedup
+                        keep = await self._apply_zone_filter_and_dedup_telegram(
+                            item, source_id, str(entity.id), pool,
+                        )
+                        if not keep:
+                            continue
+
+                        # Phase 9 — context window for signal-classified items
+                        if item.enrichment_status == "pending" and group.get("messages"):
+                            try:
+                                first_msg = group["messages"][0]
+                                ctx = await self._build_context_window_telegram(
+                                    client, entity, first_msg,
+                                )
+                                if ctx:
+                                    item.context_window = ctx
+                            except Exception as exc:
+                                logger.debug("Telegram context-window skipped: %s", exc)
+
                         items.append(item)
 
                     logger.info(
-                        "Telegram: %s — %d msgs -> %d groups -> %d items",
+                        "Telegram: %s — %d msgs -> %d groups -> %d items (%d pending, %d non_signal, %d duplicate)",
                         channel_name,
                         len(raw_messages),
                         len(grouped),
                         len([i for i in items if i.metadata.get("channel_id") == str(entity.id)]),
+                        sum(1 for i in items if i.enrichment_status == "pending"),
+                        sum(1 for i in items if i.enrichment_status == "non_signal"),
+                        sum(1 for i in items if i.enrichment_status == "duplicate_zone"),
                     )
 
                 except (ValueError, TypeError) as e:

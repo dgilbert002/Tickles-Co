@@ -15,7 +15,7 @@ from ..registry import (
 )
 from ..server import McpServer
 from ..store import InvocationStore
-from ..tools import ToolContext, provisioning, data, memory, trading, learning, backtest, meta, contest
+from ..tools import ToolContext, provisioning, data, memory, trading, learning, backtest, meta, contest, intelligence
 from ..transports.stdio import run_stdio
 
 
@@ -44,6 +44,7 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     learning.register(reg, ctx)
     meta.register(reg, ctx)
     contest.register(reg, ctx)
+    intelligence.register(reg, ctx)
     register_builtin_providers(reg, LOG)
     return reg
 

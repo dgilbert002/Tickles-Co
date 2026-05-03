@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from shared.copy_trader_trader.protocol import (
+from shared.copy_trader.protocol import (
     SIZE_MODE_FIXED_NOTIONAL_USD,
     SIZE_MODE_RATIO,
     SIZE_MODE_REPLICATE,

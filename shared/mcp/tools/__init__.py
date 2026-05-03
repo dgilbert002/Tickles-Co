@@ -7,6 +7,10 @@ Layout:
     trading.py        — execution, banker, treasury
     learning.py       — autopsy / postmortem / feedback loop (Twilly templates)
     backtest.py       — strategy/indicator/engine discovery, compose, sweep, top_k
+    meta.py           — tool catalogue, suggestions, usage stats, requests
+    contest.py        — paper trading contest management
+    intelligence.py   — Phase 3B+ intelligence pipeline (chart analyze, interpret,
+                      trader profiles, trader scores, signal queries)
 
 Every module exports ``register(registry, ctx)`` which registers its tools
 against a ``ToolRegistry`` using a shared ``ToolContext`` carrying HTTP

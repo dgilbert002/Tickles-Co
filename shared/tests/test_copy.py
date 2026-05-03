@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from unittest.mock import patch
 
-from shared.copy_trader_trader import (
+from shared.copy_trader import (
     CopyMapper,
     CopyService,
     CopySource,
@@ -19,7 +19,7 @@ from shared.copy_trader_trader import (
     StaticCopySource,
     read_migration_sql,
 )
-from shared.copy_trader_trader.protocol import (
+from shared.copy_trader.protocol import (
     SIZE_MODE_FIXED_NOTIONAL_USD,
     SIZE_MODE_RATIO,
     SIZE_MODE_REPLICATE,

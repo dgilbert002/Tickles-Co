@@ -35,9 +35,15 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
+from shared.memu.insight_kinds import INSIGHT_KINDS
+
 from ..protocol import McpTool
 from ..registry import ToolRegistry
 from .context import ToolContext
+
+# Sorted list form of the canonical insight-kind enum, used in JSON-Schema
+# ``enum`` arrays (which require an ordered, JSON-serialisable list).
+_INSIGHT_KINDS_SORTED: list[str] = sorted(INSIGHT_KINDS)
 
 
 LOG = logging.getLogger("tickles.mcp.tools.memory")
@@ -376,7 +382,7 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
                 "originAgentId": {"type": "string"},
                 "category": {
                     "type": "string",
-                    "enum": ["lesson", "warning", "playbook", "postmortem"],
+                    "enum": list(_INSIGHT_KINDS_SORTED),
                 },
                 "content": {"type": "string"},
                 "metadata": {"type": "object"},
@@ -438,7 +444,7 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
             "Search the cross-company MemU (Tier-3) for relevant insights. "
             "Uses pgvector semantic similarity when embeddings are available, "
             "falls back to recency order otherwise. Optionally filter by "
-            "category (lesson|warning|playbook|postmortem)."
+            "category (" + "|".join(_INSIGHT_KINDS_SORTED) + ")."
         ),
         version="2",
         input_schema={
@@ -447,7 +453,7 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
                 "query": {"type": "string"},
                 "category": {
                     "type": "string",
-                    "enum": ["lesson", "warning", "playbook", "postmortem"],
+                    "enum": list(_INSIGHT_KINDS_SORTED),
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
             },

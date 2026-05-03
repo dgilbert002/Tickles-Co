@@ -42,13 +42,14 @@ class ServiceDescriptor:
     """Describe a long-running Tickles service."""
 
     name: str
-    kind: str  # collector | gateway | worker | auditor | catalog | api | custom
+    kind: str  # collector | gateway | worker | auditor | catalog | api | custom | agent_cron | listener
     module: str
     description: str = ""
     systemd_unit: str = ""
     enabled_on_vps: bool = False
     factory: Optional[DaemonFactory] = None
     tags: Dict[str, str] = field(default_factory=dict)
+    cron_schedule: Optional[str] = None  # populated when kind='agent_cron' (mirrors openclaw cron)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,6 +61,7 @@ class ServiceDescriptor:
             "enabled_on_vps": self.enabled_on_vps,
             "has_factory": self.factory is not None,
             "tags": dict(self.tags),
+            "cron_schedule": self.cron_schedule,
         }
 
 
@@ -399,6 +401,56 @@ def _seed_known_services() -> None:
     )
     SERVICE_REGISTRY.register(
         ServiceDescriptor(
+            name="chart-hacker-opinion",
+            kind="agent_cron",
+            module="shared.scripts.run_chart_hacker_opinion",
+            description=(
+                "Phase 8 ChartHackerOpinionService daemon. Watches open "
+                "tracked_positions where actor_type IN ('trader','copy_bot','self'), "
+                "calls vision LLM for critic opinions, writes to agent_opinions. "
+                "Never opens/closes positions. Sole writer to agent_opinions."
+            ),
+            systemd_unit="tickles-chart-hacker-opinion.service",
+            enabled_on_vps=False,
+            tags={"phase": "8"},
+            cron_schedule="*/10 * * * *",
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="intelligence-edge-scorer",
+            kind="daemon",
+            module="shared.intelligence.edge_scorer_service",
+            description=(
+                "Phase 11 EdgeScorer daemon. Computes platform-agnostic edge_score "
+                "for every actor across 7d/30d/90d/all windows. Upserts actor_performance, "
+                "logs changes > 0.05 to edge_score_changes. Dual-writes trader_performance "
+                "for Discord actors during 90-day deprecation window."
+            ),
+            systemd_unit="tickles-edge-scorer.service",
+            enabled_on_vps=False,
+            tags={"phase": "11"},
+            cron_schedule="0 1 * * *",
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="intelligence-coach",
+            kind="daemon",
+            module="shared.intelligence.coach_service",
+            description=(
+                "Phase 11 CoachService. A/B prompt variant assignment, computes "
+                "prompt_lift per variant, promotes winners to prompt_versions default. "
+                "Runs weekly Sunday 02:00 UTC."
+            ),
+            systemd_unit="tickles-coach.service",
+            enabled_on_vps=False,
+            tags={"phase": "11"},
+            cron_schedule="0 2 * * 0",
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
             name="dashboard",
             kind="api",
             module="shared.cli.dashboard_cli",
@@ -436,6 +488,88 @@ def _seed_known_services() -> None:
         )
     )
 
+
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="signal-review-exporter",
+            kind="worker",
+            module="shared.intelligence.signal_review_export",
+            description=(
+                "Phase 4 Signal Review Exporter. Generates CSV + HTML "
+                "reports of recent signal_interpretations every 60s, "
+                "served via Tailscale at /opticals/signal_review/. "
+                "Disabled on VPS until Tailscale serve is wired."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "4"},
+        )
+    )
+
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="manage-panel",
+            kind="api",
+            module="shared.intelligence.manage_panel.server_routes",
+            description=(
+                "Phase 5 Served HTML Manage Panel.  aiohttp routes mounted "
+                "on the dashboard app at /manage/* providing read-only views "
+                "(sources, signals, positions, leaderboard, trader drill-down) "
+                "and edit-in-place mutations (enable/disable sources/channels). "
+                "Protected by default-deny auth, CSRF tokens, and token-bucket "
+                "rate limiting.  Served via Tailscale."
+            ),
+            enabled_on_vps=False,
+            tags={"phase": "5"},
+        )
+    )
+
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="intelligence-postmortem",
+            kind="agent_cron",
+            module="shared.intelligence.postmortem_service",
+            description=(
+                "Centralised post-mortem service — one row per closed tracked_position. "
+                "Polls pending positions, runs causal LLM analysis, writes position_postmortems. "
+                "Phase 7."
+            ),
+            systemd_unit="tickles-postmortem.service",
+            enabled_on_vps=False,
+            tags={"phase": "7"},
+            cron_schedule="*/15 * * * *",
+        )
+    )
+
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="memu-listener",
+            kind="listener",
+            module="shared.memu.listener_service",
+            description=(
+                "MemU outbox listener — durable broadcast pipeline. "
+                "Listens to pg_notify('memu_broadcast') and processes outbox rows. "
+                "Phase 7."
+            ),
+            systemd_unit="tickles-memu-listener.service",
+            enabled_on_vps=False,
+            tags={"phase": "7"},
+        )
+    )
+
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="cron-canary",
+            kind="auditor",
+            module="shared.intelligence.cron_canary",
+            description=(
+                "Phase M.5 Cron Canary. Monitors public.cron_heartbeats and "
+                "alerts on Telegram if agents miss their expected intervals."
+            ),
+            systemd_unit="tickles-cron-canary.service",
+            enabled_on_vps=False,
+            tags={"phase": "M.5"},
+        )
+    )
 
 def register_builtin_services() -> None:
     """Idempotent registration of the built-in services."""

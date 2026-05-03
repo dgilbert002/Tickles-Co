@@ -1,11 +1,12 @@
-"""Twilly-faithful Surgeon paper trader (flat-file mode).
+"""Twilly-faithful Surgeon paper trader (mem0 mode).
 
 Implements the SOUL.md strategy literally:
-- Reads TRADE_STATE.md (balance + open positions)
+- Reads .surgeon_state.json (authoritative balance + open positions)
 - Reads MARKET_STATE.json + MARKET_INDICATORS.json (scanner output)
 - Scans for mark/index divergence + extreme funding signals
 - Manages open positions (SL, TP1/2/3, convergence, time-stop, stall)
-- Writes TRADE_STATE.md (overwrite) + TRADE_LOG.md (append-only)
+- Persists state to .surgeon_state.json and writes trade narratives to mem0
+  (type=trade_decision / type=trade_state_snapshot). NO .md output.
 
 Paper trading only. No real orders. Does NOT call any exchange API for execution.
 """
@@ -23,6 +24,11 @@ import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+
+# Add /opt/tickles to sys.path to ensure shared imports work
+sys.path.append("/opt/tickles")
+from shared.utils.freshness import validate_freshness, StaleDataError
+from shared.utils.mem0_config import ScopedMemory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s surgeon %(message)s")
 LOG = logging.getLogger("surgeon.trader")
@@ -46,9 +52,9 @@ CONVERGENCE_EXIT_THRESH = 0.03  # % (abs divergence)
 MAX_HOLD_SEC = 45 * 60
 STALL_SEC = 15 * 60
 
-STATE_PATH = "TRADE_STATE.md"
-LOG_PATH = "TRADE_LOG.md"
-STATE_JSON = ".surgeon_state.json"  # machine-readable sidecar (authoritative)
+STATE_JSON = ".surgeon_state.json"  # machine-readable state (authoritative)
+DEFAULT_COMPANY = "rubicon"
+DEFAULT_AGENT_ID = "surgeon1"
 
 
 @dataclass
@@ -125,12 +131,28 @@ def now_iso() -> str:
 
 
 def read_market(ws: str) -> Tuple[Optional[dict], Optional[dict]]:
+    """Read market data from JSON files with Freshness Guard."""
     try:
-        with open(os.path.join(ws, "MARKET_STATE.json")) as f:
+        ms_path = os.path.join(ws, "MARKET_STATE.json")
+        mi_path = os.path.join(ws, "MARKET_INDICATORS.json")
+        
+        if not os.path.exists(ms_path) or not os.path.exists(mi_path):
+            return None, None
+
+        with open(ms_path) as f:
             ms = json.load(f)
-        with open(os.path.join(ws, "MARKET_INDICATORS.json")) as f:
+        with open(mi_path) as f:
             mi = json.load(f)
+            
+        # Validate freshness of the scanner output (default 180s)
+        # The scanner writes a 'timestamp' field in ISO format.
+        ts = ms.get("timestamp")
+        validate_freshness(ts, context="scanner:MARKET_STATE")
+        
         return ms, mi
+    except StaleDataError as e:
+        LOG.error("STALE DATA from scanner: %s", e)
+        return None, None
     except Exception as exc:
         LOG.warning("market data unavailable: %s", exc)
         return None, None
@@ -258,7 +280,8 @@ def open_position(state: State, asset_sym: str, price: float, side: str,
     return pos
 
 
-def close_partial(state: State, pos: Position, price: float, frac: float, reason: str) -> dict:
+def close_partial(state: State, pos: Position, price: float, frac: float, reason: str,
+                  memory: Optional[ScopedMemory] = None) -> dict:
     exit_px = exit_price_with_slip(price, pos.side)
     gross, fees = pnl(pos, exit_px, frac)
     state.total_fees += fees
@@ -282,11 +305,26 @@ def close_partial(state: State, pos: Position, price: float, frac: float, reason
         "cumulative_net_pnl": round(state.realized_pnl, 4),
     }
     state.closed_trades.append(closed_entry)
+
+    # --- Learning Loop: Post-Trade Autopsy ---
+    if memory and pos.remaining_frac <= 0:
+        try:
+            autopsy = (
+                f"Trade Autopsy: {pos.symbol} {pos.side} closed via {reason}. "
+                f"Net PnL: {net:+.2f}. Entry: {pos.entry_price:.4f}, Exit: {exit_px:.4f}. "
+                f"Divergence at entry: {pos.divergence_at_entry:.3f}%. "
+                f"Funding at entry: {pos.funding_at_entry:.4f}."
+            )
+            memory.add(autopsy, user_id="rubicon", agent_id="surgeon1", metadata={"type": "autopsy", "symbol": pos.symbol})
+            LOG.info("recorded autopsy to mem0 for trade #%s", pos.trade_id)
+        except Exception as e:
+            LOG.warning("failed to record autopsy: %s", e)
+
     return closed_entry
 
 
 def manage_position(state: State, pos: Position, ms_asset: dict,
-                    log_lines: List[str]) -> Optional[Position]:
+                    log_lines: List[str], memory: Optional[ScopedMemory] = None) -> Optional[Position]:
     """Apply stops/TPs/convergence/time-stop. Returns the position if still open, else None."""
     price = ms_asset.get("price", 0.0)
     div_now = ms_asset.get("divergencePct", 0.0)
@@ -294,7 +332,7 @@ def manage_position(state: State, pos: Position, ms_asset: dict,
 
     # convergence exit
     if abs_div < CONVERGENCE_EXIT_THRESH and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, pos.remaining_frac, "CONVERGENCE")
+        entry = close_partial(state, pos, price, pos.remaining_frac, "CONVERGENCE", memory=memory)
         log_lines.append(format_log_entry(pos, entry, convergence=True))
         pos.remaining_frac = 0.0
         return None
@@ -303,7 +341,7 @@ def manage_position(state: State, pos: Position, ms_asset: dict,
     entry_dt = datetime.fromisoformat(pos.entry_ts.replace("Z", "+00:00"))
     held = (datetime.now(timezone.utc) - entry_dt).total_seconds()
     if held > MAX_HOLD_SEC and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, pos.remaining_frac, "TIME_STOP")
+        entry = close_partial(state, pos, price, pos.remaining_frac, "TIME_STOP", memory=memory)
         log_lines.append(format_log_entry(pos, entry, time_stop=True))
         pos.remaining_frac = 0.0
         return None
@@ -312,7 +350,7 @@ def manage_position(state: State, pos: Position, ms_asset: dict,
     last_prog = datetime.fromisoformat(pos.last_progress_ts.replace("Z", "+00:00"))
     stalled = (datetime.now(timezone.utc) - last_prog).total_seconds()
     if pos.tp1_done and not pos.tp2_done and stalled > STALL_SEC and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, pos.remaining_frac, "STALL")
+        entry = close_partial(state, pos, price, pos.remaining_frac, "STALL", memory=memory)
         log_lines.append(format_log_entry(pos, entry, stall=True))
         pos.remaining_frac = 0.0
         return None
@@ -320,7 +358,7 @@ def manage_position(state: State, pos: Position, ms_asset: dict,
     # SL hit (full close)
     stop_hit = (pos.side == "LONG" and price <= pos.sl) or (pos.side == "SHORT" and price >= pos.sl)
     if stop_hit and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, pos.remaining_frac, "SL")
+        entry = close_partial(state, pos, price, pos.remaining_frac, "SL", memory=memory)
         log_lines.append(format_log_entry(pos, entry, sl=True))
         pos.remaining_frac = 0.0
         return None
@@ -328,14 +366,14 @@ def manage_position(state: State, pos: Position, ms_asset: dict,
     # TP1
     tp1_hit = (pos.side == "LONG" and price >= pos.tp1) or (pos.side == "SHORT" and price <= pos.tp1)
     if tp1_hit and not pos.tp1_done and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, 0.25, "TP1")
+        entry = close_partial(state, pos, price, 0.25, "TP1", memory=memory)
         pos.tp1_done = True
         pos.sl = pos.entry_price  # breakeven stop
         log_lines.append(format_log_entry(pos, entry, tp="TP1"))
     # TP2
     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or (pos.side == "SHORT" and price <= pos.tp2)
     if tp2_hit and not pos.tp2_done and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, 0.25, "TP2")
+        entry = close_partial(state, pos, price, 0.25, "TP2", memory=memory)
         pos.tp2_done = True
         # trail stop at +0.5% above entry
         if pos.side == "LONG":
@@ -346,7 +384,7 @@ def manage_position(state: State, pos: Position, ms_asset: dict,
     # TP3 (remaining)
     tp3_hit = (pos.side == "LONG" and price >= pos.tp3) or (pos.side == "SHORT" and price <= pos.tp3)
     if tp3_hit and pos.remaining_frac > 0:
-        entry = close_partial(state, pos, price, pos.remaining_frac, "TP3")
+        entry = close_partial(state, pos, price, pos.remaining_frac, "TP3", memory=memory)
         log_lines.append(format_log_entry(pos, entry, tp="TP3"))
         pos.remaining_frac = 0.0
         return None
@@ -381,11 +419,23 @@ def format_decision_entry(ts: str, candidates: List[Tuple[str, str, str, str]]) 
     return "\n".join(lines)
 
 
-def write_trade_state(ws: str, state: State) -> None:
-    path = os.path.join(ws, STATE_PATH)
+def build_state_snapshot(state: State, company: str) -> str:
+    """Render a human-readable state snapshot for mem0.
+
+    The narrative is content-equivalent to the deprecated TRADE_STATE.md but
+    is written into mem0 as a `trade_state_snapshot` entry rather than to
+    disk.
+
+    Args:
+        state: Current trader state.
+        company: Company slug (for the header).
+
+    Returns:
+        Multi-line string snapshot.
+    """
     net = state.balance - state.starting_balance
     lines = [
-        "# TRADE_STATE — rubicon_surgeon",
+        f"# TRADE_STATE — {company}_surgeon",
         "",
         f"Last-updated: {now_iso()}",
         "Mode: PAPER_TRADING",
@@ -421,22 +471,89 @@ def write_trade_state(ws: str, state: State) -> None:
                 f"- #{c['trade_id']} {c['symbol']} {c['side']} | {c['reason']} | "
                 f"net {c['net_pnl']:+.2f} | exit ${c['exit_price']:.4f} @ {c['ts']}"
             )
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
 
 
-def append_trade_log(ws: str, chunks: List[str]) -> None:
-    if not chunks:
+def persist_state_snapshot(
+    state: State, company: str, memory: Optional[ScopedMemory]
+) -> None:
+    """Write the latest state snapshot into mem0 (overwrite-latest semantics).
+
+    Args:
+        state: Current trader state.
+        company: Company slug (used in the prose header).
+        memory: ScopedMemory instance, or None to skip the write.
+    """
+    if memory is None:
         return
-    path = os.path.join(ws, LOG_PATH)
-    with open(path, "a") as f:
-        for c in chunks:
-            f.write(c)
-            if not c.endswith("\n"):
-                f.write("\n")
+    snapshot = build_state_snapshot(state, company)
+    try:
+        memory.add(
+            snapshot,
+            metadata={
+                "type": "trade_state_snapshot",
+                "kind": "live",
+                "original_timestamp": now_iso(),
+                "balance": float(state.balance),
+                "open_positions": len(
+                    [p for p in state.positions if p.remaining_frac > 0]
+                ),
+            },
+        )
+    except Exception as exc:
+        LOG.warning("failed to persist trade_state_snapshot to mem0: %s", exc)
 
 
-def cycle(state: State, ws: str, dry: bool = False) -> None:
+def persist_trade_decisions(
+    chunks: List[str], memory: Optional[ScopedMemory]
+) -> None:
+    """Write each trade-decision narrative into mem0.
+
+    Args:
+        chunks: List of pre-formatted Twilly-style entries (from
+                format_log_entry / format_open_entry / format_decision_entry).
+        memory: ScopedMemory instance, or None to skip the write.
+    """
+    if not chunks or memory is None:
+        return
+    for chunk in chunks:
+        text = chunk.rstrip("\n")
+        if not text:
+            continue
+        action_match = re.search(r"\[(?P<tag>[A-Z0-9_:]+)\]", text)
+        action = action_match.group("tag").lower() if action_match else "decision"
+        trade_match = re.search(r"Trade #(\d+)", text)
+        trade_id: Optional[int] = (
+            int(trade_match.group(1)) if trade_match else None
+        )
+        symbol_match = re.search(r"Trade #\d+ -- (\S+)", text)
+        symbol: Optional[str] = (
+            symbol_match.group(1) if symbol_match else None
+        )
+        try:
+            memory.add(
+                text,
+                metadata={
+                    "type": "trade_decision",
+                    "kind": "live",
+                    "action": action,
+                    "trade_id": trade_id,
+                    "symbol": symbol,
+                    "original_timestamp": now_iso(),
+                },
+            )
+        except Exception as exc:
+            LOG.warning("failed to persist trade_decision to mem0: %s", exc)
+
+
+def cycle(
+    state: State,
+    ws: str,
+    dry: bool = False,
+    memory: Optional[ScopedMemory] = None,
+    company: str = DEFAULT_COMPANY,
+    agent_id: str = DEFAULT_AGENT_ID,
+) -> None:
     ms, mi = read_market(ws)
     if not ms or not mi:
         LOG.warning("no market data; skipping cycle")
@@ -454,7 +571,7 @@ def cycle(state: State, ws: str, dry: bool = False) -> None:
         if not a:
             still_open.append(pos)
             continue
-        out = manage_position(state, pos, a, log_chunks)
+        out = manage_position(state, pos, a, log_chunks, memory=memory)
         if out is not None:
             still_open.append(out)
     state.positions = still_open
@@ -483,6 +600,21 @@ def cycle(state: State, ws: str, dry: bool = False) -> None:
                 continue
             if taken >= open_slots:
                 break
+
+            # --- Learning Loop: Pre-Trade Memory Check ---
+            if memory:
+                try:
+                    learnings = memory.search(
+                        "recent trading learnings",
+                        limit=3,
+                        user_id=company,
+                        agent_id=agent_id,
+                    )
+                    if learnings:
+                        LOG.info("PRE-TRADE LEARNINGS for %s: %s", sym, json.dumps(learnings))
+                except Exception as e:
+                    LOG.warning("failed to query memory: %s", e)
+
             pos = open_position(state, sym, price, side, tier, reason, div, funding)
             taken += 1
             log_chunks.append(format_open_entry(pos))
@@ -492,11 +624,11 @@ def cycle(state: State, ws: str, dry: bool = False) -> None:
                          for sym, a in assets_ms.items()]
         log_chunks.append(format_decision_entry(now_iso(), cand_display))
 
-    # 3) Persist state
+    # 3) Persist state — JSON (authoritative on disk) + mem0 (narrative log).
     if not dry:
-        write_trade_state(ws, state)
-        append_trade_log(ws, log_chunks)
         state.save(os.path.join(ws, STATE_JSON))
+        persist_state_snapshot(state, company, memory)
+        persist_trade_decisions(log_chunks, memory)
         LOG.info("cycle done. balance=$%.2f open=%d closed_total=%d",
                  state.balance, len([p for p in state.positions if p.remaining_frac > 0]),
                  len(state.closed_trades))
@@ -517,11 +649,22 @@ def format_open_entry(pos: Position) -> str:
 
 
 def main() -> None:
+    """CLI entry point for the surgeon paper trader."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", default="/root/.openclaw/workspace/rubicon_surgeon")
-    parser.add_argument("--interval", type=int, default=300, help="seconds between cycles (default 5 min)")
+    parser.add_argument("--interval", type=int, default=900, help="seconds between cycles (default 15 min)")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
     parser.add_argument("--dry", action="store_true")
+    parser.add_argument(
+        "--company",
+        default=os.environ.get("COMPANY_ID", DEFAULT_COMPANY),
+        help="Company slug for mem0 scoping (default from $COMPANY_ID or rubicon).",
+    )
+    parser.add_argument(
+        "--agent-id",
+        default=os.environ.get("AGENT_ID", DEFAULT_AGENT_ID),
+        help="Agent id for mem0 scoping (default from $AGENT_ID or surgeon1).",
+    )
     args = parser.parse_args()
 
     ws = args.workspace
@@ -529,25 +672,52 @@ def main() -> None:
     state_json_path = os.path.join(ws, STATE_JSON)
     state = State.load(state_json_path)
 
-    # seed TRADE_LOG header if missing
-    log_path = os.path.join(ws, LOG_PATH)
-    if not os.path.exists(log_path):
-        with open(log_path, "w") as f:
-            f.write("# TRADE_LOG — rubicon_surgeon\nMode: PAPER_TRADING\nAppend-only.\n\n")
+    # Initialize ScopedMemory (Tier-1/2). Trade narratives now flow into mem0
+    # exclusively — no .md writes.
+    memory: Optional[ScopedMemory] = None
+    try:
+        memory = ScopedMemory(company=args.company, agent_id=args.agent_id)
+        LOG.info(
+            "ScopedMemory initialized for company=%s agent_id=%s",
+            args.company,
+            args.agent_id,
+        )
+    except Exception as e:
+        LOG.warning("ScopedMemory initialization failed: %s", e)
 
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
 
-    LOG.info("surgeon trader started. ws=%s interval=%ss", ws, args.interval)
+    LOG.info(
+        "surgeon trader started. ws=%s interval=%ss company=%s agent_id=%s",
+        ws,
+        args.interval,
+        args.company,
+        args.agent_id,
+    )
 
     if args.once:
-        cycle(state, ws, dry=args.dry)
+        cycle(
+            state,
+            ws,
+            dry=args.dry,
+            memory=memory,
+            company=args.company,
+            agent_id=args.agent_id,
+        )
         return
 
     while not stop["flag"]:
         try:
-            cycle(state, ws, dry=args.dry)
+            cycle(
+                state,
+                ws,
+                dry=args.dry,
+                memory=memory,
+                company=args.company,
+                agent_id=args.agent_id,
+            )
         except Exception as exc:
             LOG.exception("cycle failed: %s", exc)
         for _ in range(args.interval):

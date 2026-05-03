@@ -13,7 +13,8 @@ This document traces the **complete lifecycle** from "agent discovers a strategy
 4. [Phase D: Two Days Pass — The Validation Engine](#phase-d)
 5. [Phase E: Re-Running the Backtest to Confirm](#phase-e)
 6. [Phase F: Agent Learns — Strategy Review & Autopsy](#phase-f)
-7. [Why This Guarantees 99.9% Parity](#why-parity)
+7. [Phase G: The Learning Loop — Episodic Memory](#phase-g)
+8. [Why This Guarantees 99.9% Parity](#why-parity)
 8. [Tables & Data Flow Diagram](#tables-diagram)
 
 ---
@@ -866,6 +867,51 @@ If the adjusted backtest still shows a positive Sharpe, the agent now has a
 **realistic** expectation of live performance. If not, the strategy is abandoned
 before wasting more capital.
 
+
+---
+
+## Phase G: The Learning Loop — Episodic Memory <a name="phase-g"></a>
+
+While Phase F focuses on institutional validation, Phase G enables **individual agent learning** via the 3-Tier Memory system (Mem0 + Qdrant).
+
+### Step 23: Pre-Trade Memory Check
+
+Before opening a position, the Surgeon agent queries its episodic memory for relevant past experiences.
+
+```python
+# shared/daemons/surgeon2_trader.py
+learnings = memory.search("recent trading learnings", limit=3, user_id="rubicon", agent_id="surgeon2")
+if learnings:
+    LOG.info("PRE-TRADE LEARNINGS: %s", json.dumps(learnings))
+```
+
+This allows the agent to "remember" if a specific symbol has been behaving erratically or if slippage has been higher than usual.
+
+### Step 24: Post-Trade Autopsy Recording
+
+Immediately after a trade is fully closed, the agent records a structured autopsy.
+
+```python
+autopsy = (
+    f"Trade Autopsy: {sym} {side} closed via {action}/{reason}. "
+    f"Net PnL: {net:+.2f}. Entry: {ep:.4f}, Exit: {exit_px:.4f}. "
+    f"Divergence at entry: {pos['divergence_at_entry']:.3f}%. "
+    f"Funding at entry: {pos['funding_at_entry']:.4f}."
+)
+memory.add(autopsy, user_id="rubicon", agent_id="surgeon2", metadata={"type": "autopsy", "symbol": sym})
+```
+
+### Step 25: The Freshness Guard
+
+To ensure the agent never learns from (or trades on) stale data, the `Freshness Guard` is enforced at every data entry point.
+
+```python
+# shared/utils/freshness.py
+lag = validate_freshness(row["snapshot_at"], threshold_seconds=180.0)
+```
+
+If the data lag exceeds 180 seconds, a `StaleDataError` is raised, preventing the agent from making decisions based on outdated information.
+
 ---
 
 ## Summary: The Complete Loop
@@ -883,8 +929,10 @@ before wasting more capital.
 10. Strategy review → CONTINUE verdict, 93.6% Rule 1 pass rate
 11. Strategy autopsy → detects slippage pattern, generates learnings
 12. Agent re-backtests with adjusted slippage/fee assumptions
-13. If profitable → continue with realistic expectations
-14. If not → abandon strategy, try new parameters or new approach
+13. Agent queries episodic memory (Phase G) before next trade
+14. Agent records post-trade autopsy to Qdrant for future retrieval
+15. If profitable → continue with realistic expectations
+16. If not → abandon strategy, try new parameters or new approach
 ```
 
 The **only source of drift** is real-world market microstructure (slippage, fee

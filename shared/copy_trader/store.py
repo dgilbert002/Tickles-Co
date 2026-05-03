@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from shared.copy_trader_trader.protocol import CopySource, CopyTrade
+from shared.copy_trader.protocol import CopySource, CopyTrade
 
 
 class CopyStore:

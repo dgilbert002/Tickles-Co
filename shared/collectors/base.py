@@ -92,6 +92,14 @@ class NewsItem:
 
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Phase 9 — zone filter + context window + image dedup
+    enrichment_status: str = "pending"
+    context_window: Optional[Dict[str, Any]] = None
+    zone_filter_confidence: Optional[float] = None
+    zone_filter_reason: Optional[str] = None
+    image_phash: Optional[str] = None
+    duplicate_of_id: Optional[int] = None
+
     def compute_hash(self) -> None:
         """Compute SHA-256 content hash for deduplication.
 
@@ -204,12 +212,18 @@ class BaseCollector(ABC):
                 hash_key, source, headline, content, sentiment, instruments,
                 published_at, collected_at,
                 source_id, channel_name, author, author_id, message_id,
-                metadata, has_media, media_count
+                metadata, has_media, media_count,
+                enrichment_status, context_window,
+                zone_filter_confidence, zone_filter_reason,
+                image_phash, duplicate_of_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::jsonb,
                 $7, $8,
                 $9, $10, $11, $12, $13,
-                $14::jsonb, $15, $16
+                $14::jsonb, $15, $16,
+                $17, $18::jsonb,
+                $19, $20,
+                $21, $22
             )
             ON CONFLICT (hash_key) DO NOTHING
             RETURNING id
@@ -223,7 +237,7 @@ class BaseCollector(ABC):
             ) VALUES (
                 $1, $2, $3, $4,
                 $5, $6, $7, $8::jsonb,
-                'pending'
+                $9
             )
         """
 
@@ -281,6 +295,12 @@ class BaseCollector(ABC):
                             json.dumps(meta, default=str),  # metadata jsonb
                             has_media,
                             media_count,
+                            item.enrichment_status,
+                            json.dumps(item.context_window) if item.context_window else None,
+                            item.zone_filter_confidence,
+                            item.zone_filter_reason,
+                            item.image_phash,
+                            item.duplicate_of_id,
                         )
 
                         if new_id is None:
@@ -294,6 +314,15 @@ class BaseCollector(ABC):
                             media_type = _guess_media_type(
                                 url, fallback=item.media_type or "link"
                             )
+                            # CDN-hosted images (TradingView, etc.) are directly
+                            # accessible — mark as 'downloaded' so the
+                            # interpretation_service picks them up immediately.
+                            # Only local files that need processing stay 'pending'.
+                            is_direct_image = (
+                                media_type == "photo"
+                                or url.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+                                or "tradingview.com" in url
+                            )
                             await conn.execute(
                                 media_insert_sql,
                                 new_id,
@@ -304,6 +333,7 @@ class BaseCollector(ABC):
                                 None,
                                 None,
                                 json.dumps({"origin": "collector_batch"}),
+                                "downloaded" if is_direct_image else "pending",
                             )
 
                         if has_local:
@@ -320,6 +350,7 @@ class BaseCollector(ABC):
                                 item.media_path,
                                 None,
                                 json.dumps({"origin": "collector_batch"}),
+                                "downloaded",
                             )
 
             if inserted_count > 0:

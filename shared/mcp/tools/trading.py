@@ -32,6 +32,7 @@ from ..protocol import McpTool
 from ..registry import ToolRegistry
 from .context import ToolContext
 from . import db_helper
+from shared.utils.freshness import freshness_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -310,12 +311,20 @@ def _handle_banker_positions(p: Dict[str, Any]) -> Dict[str, Any]:
                 "adapter": r["adapter"],
                 "ts": _fmt_ts(r.get("ts")),
             })
-        return {
+        res = {
             "status": "ok",
             "companyId": cid,
             "positions": positions,
             "count": len(positions),
         }
+        # Apply Freshness Guard to the latest position update if available
+        if positions:
+            # Find the most recent timestamp among all positions
+            latest_ts = max((p["ts"] for p in positions if p["ts"]), default=None)
+            if latest_ts:
+                res["timestamp"] = latest_ts
+                return freshness_envelope(res, ts_field="timestamp", context=f"banker.positions:{cid}")
+        return res
     except Exception as exc:
         logger.exception("banker.positions DB query failed")
         return {"status": "error", "message": f"failed to read positions: {exc}"}
@@ -1342,7 +1351,13 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
             adapter = await _build_adapter(venue, account_name)
             try:
                 ticker = await adapter.fetch_ticker(symbol)
-                return {"status": "ok", "ticker": ticker}
+                res = {"status": "ok", "ticker": ticker}
+                # Apply Freshness Guard to the exchange-provided timestamp
+                return freshness_envelope(
+                    res,
+                    ts_field="ticker.timestamp" if isinstance(ticker.get("timestamp"), (int, float)) else "ticker.datetime",
+                    context=f"market_ticker:{venue}/{symbol}"
+                )
             finally:
                 await adapter.close()
         except Exception as e:
@@ -1352,7 +1367,11 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
     # --- market.funding ---
     t_market_funding = McpTool(
         name="market_funding",
-        description="Fetch current funding rate or overnight holding costs for a symbol.",
+        description=(
+            "Fetch current funding rate or overnight holding costs for a symbol. "
+            "Reads from the derivatives_snapshots database table (updated by "
+            "the funding_collector daemon)."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -1367,19 +1386,50 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
     )
 
     async def _market_funding(p: Dict[str, Any]) -> Dict[str, Any]:
-        """Fetch live funding rate via exchange adapter."""
+        """Fetch funding rate from Postgres (derivatives_snapshots) with Freshness Guard."""
         try:
             venue = str(p["venue"])
             symbol = str(p["symbol"])
-            account_name = str(p.get("accountName", "main"))
 
-            adapter = await _build_adapter(venue, account_name)
+            # 1. Resolve instrument
             try:
-                funding = await adapter.fetch_funding_rate(symbol)
-                return {"status": "ok", "funding": funding}
-            finally:
-                await adapter.close()
+                iid = db_helper.resolve_instrument_id(symbol, venue)
+            except RuntimeError as exc:
+                return {"status": "error", "message": f"Database error: {exc}"}
+            
+            if iid is None:
+                return {"status": "error", "message": f"Instrument not found: {venue}/{symbol}"}
+
+            # 2. Query latest snapshot
+            try:
+                rows = db_helper.query(
+                    "SELECT snapshot_at, funding_rate, open_interest, source "
+                    "FROM derivatives_snapshots WHERE instrument_id = %s "
+                    "ORDER BY snapshot_at DESC LIMIT 1",
+                    (iid,),
+                )
+            except RuntimeError as exc:
+                return {"status": "error", "message": f"Query failed: {exc}"}
+
+            if not rows:
+                return {"status": "no_data", "message": f"No funding data in DB for {venue}/{symbol}"}
+
+            r = rows[0]
+            res = {
+                "status": "ok",
+                "symbol": symbol,
+                "venue": venue,
+                "funding_rate": _decimal_to_float(r["funding_rate"]),
+                "open_interest": _decimal_to_float(r["open_interest"]),
+                "timestamp": r["snapshot_at"].isoformat() if isinstance(r["snapshot_at"], datetime) else str(r["snapshot_at"]),
+                "source": r["source"],
+            }
+
+            # 3. Apply Freshness Guard (default 180s)
+            return freshness_envelope(res, context=f"market_funding_db:{venue}/{symbol}")
+
         except Exception as e:
+            logger.error("market_funding failed: %s", e)
             return {"status": "error", "message": str(e)}
 
     # --- market.hours ---

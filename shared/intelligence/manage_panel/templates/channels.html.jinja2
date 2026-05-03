@@ -1,0 +1,41 @@
+{% extends "base.html.jinja2" %}
+{% block title %}Channels — Tickles Manage{% endblock %}
+{% block content %}
+<h1>Channels</h1>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Source</th>
+      <th>Platform</th>
+      <th>External ID</th>
+      <th>Name</th>
+      <th>Enabled</th>
+      <th>Collect</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in channels %}
+    <tr>
+      <td>{{ c['id'] }}</td>
+      <td>{{ c.get('source_name','') }}</td>
+      <td>{{ c.get('platform','') }}</td>
+      <td>{{ c.get('external_id','') }}</td>
+      <td>{{ c.get('channel_name','') or c.get('external_id','') }}</td>
+      <td class="{% if c['is_enabled'] %}ok{% else %}warn{% endif %}">{{ '✓' if c['is_enabled'] else '✗' }}</td>
+      <td>{{ '✓' if c.get('collect_messages') else '✗' }}</td>
+      <td>
+        {% if c['is_enabled'] %}
+        <button class="btn-warn" onclick="disableChannel({{ c['id'] }})">Disable</button>
+        {% else %}
+        <button class="btn-ok" onclick="enableChannel({{ c['id'] }})">Enable</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="empty">No channels configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

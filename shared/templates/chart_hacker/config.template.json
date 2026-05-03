@@ -1,0 +1,9 @@
+{
+  "agent_name": "{{AGENT_NAME}}",
+  "company_name": "{{COMPANY_NAME}}",
+  "workspace": "/root/.openclaw/workspace/{{AGENT_ID}}",
+  "mode": "CHART_ANALYSIS",
+  "model": "{{MODEL}}",
+  "model_budget_usd_day": 2.0,
+  "interval": 300
+}

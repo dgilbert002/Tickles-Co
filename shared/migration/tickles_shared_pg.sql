@@ -354,6 +354,29 @@ CREATE INDEX idx_news_published ON news_items(published_at);
 -- GIN index for JSONB instrument extraction
 CREATE INDEX idx_news_instruments ON news_items USING GIN (instruments);
 
+-- Phase 9 additions — zone filter + context window + image dedup
+ALTER TABLE news_items
+    ADD COLUMN IF NOT EXISTS enrichment_status       TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS context_window          JSONB NULL,
+    ADD COLUMN IF NOT EXISTS zone_filter_confidence  NUMERIC(4,3) NULL,
+    ADD COLUMN IF NOT EXISTS zone_filter_reason      TEXT NULL,
+    ADD COLUMN IF NOT EXISTS image_phash             CHAR(16) NULL,
+    ADD COLUMN IF NOT EXISTS duplicate_of_id         BIGINT NULL REFERENCES news_items(id);
+
+CREATE INDEX IF NOT EXISTS idx_news_items_phash_recent
+    ON news_items (image_phash, collected_at DESC)
+    WHERE image_phash IS NOT NULL AND duplicate_of_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_news_items_pending
+    ON news_items (collected_at)
+    WHERE enrichment_status = 'pending';
+
+-- Phase 9 — collector_sources zone-filter + rate-limit overrides
+ALTER TABLE collector_sources
+    ADD COLUMN IF NOT EXISTS zone_filter_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS zone_filter_threshold  NUMERIC(4,3) NULL,
+    ADD COLUMN IF NOT EXISTS rate_limit_msgs_per_sec INT NULL;
+
 -- ============================================================================
 -- 12. derivatives_snapshots
 -- ============================================================================
@@ -404,6 +427,216 @@ CREATE TABLE api_cost_log (
 );
 CREATE INDEX idx_cost_company_date ON api_cost_log(company_id, created_at);
 CREATE INDEX idx_cost_role_date ON api_cost_log(role, created_at);
+
+-- ============================================================================
+-- 15. tracked_positions — Shared Trade Ledger (Phase 2)
+-- ============================================================================
+-- Lives in tickles_shared.public, NOT per-company.  company_id scopes rows.
+-- All Phase 2 columns baked in for new companies provisioned after Phase 2.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS public.tracked_positions (
+    id                  BIGSERIAL       PRIMARY KEY,
+
+    -- Source references
+    news_item_id        BIGINT          NOT NULL,
+    media_item_id       BIGINT,
+    trader_profile_id   BIGINT          NOT NULL,
+    signal_interpretation_id BIGINT,
+
+    -- Instrument
+    instrument_symbol   VARCHAR(50)     NOT NULL,
+    instrument_exchange VARCHAR(50)     NOT NULL DEFAULT 'bybit',
+    epic_code           VARCHAR(50),
+
+    -- Trade parameters
+    direction           VARCHAR(8)      NOT NULL
+        CHECK (direction IN ('long','short')),
+    entry_price         NUMERIC(20,8),
+    stop_loss           NUMERIC(20,8),
+    take_profit_1       NUMERIC(20,8),
+    take_profit_2       NUMERIC(20,8),
+    take_profit_3       NUMERIC(20,8),
+    position_size       NUMERIC(20,8),
+    leverage            NUMERIC(5,2),
+
+    -- Detection metadata
+    detection_method    VARCHAR(32)     NOT NULL DEFAULT 'manual'
+        CHECK (detection_method IN ('manual','llm_vision','text_parser','quant_pattern','agent_override')),
+    detection_confidence NUMERIC(5,4)   NOT NULL DEFAULT 0.0,
+    raw_signal_text     TEXT,
+    signal_timestamp    TIMESTAMPTZ(3)  NOT NULL,
+
+    -- Status lifecycle
+    status              VARCHAR(16)     NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open','partial_exit','closed','expired','invalidated','cancelled')),
+    status_reason       VARCHAR(100),
+
+    -- Current market state
+    current_price       NUMERIC(20,8),
+    price_updated_at    TIMESTAMPTZ(3),
+    highest_price       NUMERIC(20,8),
+    lowest_price        NUMERIC(20,8),
+
+    -- P&L metrics
+    unrealized_pnl_pct  NUMERIC(10,4),
+    unrealized_pnl_usd  NUMERIC(20,8),
+    realized_pnl_pct    NUMERIC(10,4)   NOT NULL DEFAULT 0,
+    realized_pnl_usd    NUMERIC(20,8)   NOT NULL DEFAULT 0,
+    max_drawdown_pct    NUMERIC(10,4)   NOT NULL DEFAULT 0,
+    max_profit_pct      NUMERIC(10,4)   NOT NULL DEFAULT 0,
+
+    -- Distance metrics
+    distance_to_entry_pct NUMERIC(10,4),
+    distance_to_sl_pct    NUMERIC(10,4),
+    distance_to_tp1_pct   NUMERIC(10,4),
+    risk_reward_ratio     NUMERIC(10,4),
+
+    -- Time metrics
+    time_in_trade_minutes INT             NOT NULL DEFAULT 0,
+    time_to_tp1_minutes   INT,
+    time_to_sl_minutes    INT,
+    expiry_at             TIMESTAMPTZ(3),
+
+    -- Outcome
+    outcome               VARCHAR(16)
+        CHECK (outcome IN ('tp1_hit','tp2_hit','tp3_hit','sl_hit','breakeven','expired','manual_close','invalidated')),
+    exit_price            NUMERIC(20,8),
+    exit_timestamp        TIMESTAMPTZ(3),
+    exit_reason           TEXT,
+
+    -- Notional
+    notional_usd          NUMERIC(20,8)   NOT NULL DEFAULT 1000.0,
+
+    -- Company context — NO DEFAULT, must be explicit
+    company_id            VARCHAR(50)     NOT NULL,
+
+    -- Phase 2 additions — actor / department / legs / reasons / postmortem
+    actor_type              VARCHAR(32),
+    actor_id                VARCHAR(128),
+    department              VARCHAR(64),
+    position_kind           VARCHAR(32),
+    asset_class             VARCHAR(32),
+    venue                   VARCHAR(64),
+    legs                    JSONB,
+    sl_history              JSONB,
+    partial_closes          JSONB,
+    entry_reason_trader     TEXT,
+    entry_reason_llm        TEXT,
+    entry_reason_agent      TEXT,
+    entry_reason_frozen_at  TIMESTAMPTZ(3),
+    exit_reason_trader      TEXT,
+    exit_reason_llm         TEXT,
+    exit_reason_system      TEXT,
+    closed_at               TIMESTAMPTZ(3),
+    realized_pnl_usd_final  NUMERIC(20,8),
+    postmortem_status       VARCHAR(32) DEFAULT 'pending',
+    correlation_id          VARCHAR(36),
+
+    -- Phase 6 additions — normalised symbol, reason agreement, pgvector embedding
+    instrument_symbol_normalised VARCHAR(64),
+    reason_agreement_score  NUMERIC(4,3),
+    entry_reason_trader_embedding vector(384),
+
+    -- Phase 10 additions — actor_instance namespace + source_position_id for Surgeon2 migration
+    actor_instance        TEXT            NOT NULL DEFAULT '',
+    source_position_id  BIGINT          NULL,
+
+    -- Metadata
+    created_at            TIMESTAMPTZ(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMPTZ(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Deduplication (Phase 10: extended with actor_instance for multi-instance safety)
+    CONSTRAINT uq_position_dedup UNIQUE (news_item_id, trader_profile_id, instrument_symbol, direction, actor_instance)
+);
+
+CREATE INDEX idx_tracked_pos_trader      ON public.tracked_positions (trader_profile_id);
+CREATE INDEX idx_tracked_pos_status      ON public.tracked_positions (status);
+CREATE INDEX idx_tracked_pos_symbol      ON public.tracked_positions (instrument_symbol, instrument_exchange);
+CREATE INDEX idx_tracked_pos_company     ON public.tracked_positions (company_id);
+CREATE INDEX idx_tracked_pos_signal_ts   ON public.tracked_positions (signal_timestamp);
+CREATE INDEX idx_tracked_pos_open        ON public.tracked_positions (status, trader_profile_id) WHERE status = 'open';
+CREATE INDEX idx_tp_actor_type           ON public.tracked_positions (actor_type);
+CREATE INDEX idx_tp_actor_id             ON public.tracked_positions (actor_id);
+CREATE INDEX idx_tp_postmortem           ON public.tracked_positions (postmortem_status) WHERE postmortem_status = 'pending';
+CREATE INDEX idx_tp_closed_at            ON public.tracked_positions (closed_at) WHERE closed_at IS NOT NULL;
+CREATE INDEX idx_tp_correlation_id       ON public.tracked_positions (correlation_id) WHERE correlation_id IS NOT NULL;
+CREATE INDEX idx_tp_symbol_norm          ON public.tracked_positions (instrument_symbol_normalised) WHERE instrument_symbol_normalised IS NOT NULL;
+
+-- Phase 10 — extended UNIQUE for multi-instance actor safety
+CREATE UNIQUE INDEX uniq_tracked_positions_actor
+    ON public.tracked_positions (actor_type, actor_id, actor_instance, source_position_id)
+    WHERE source_position_id IS NOT NULL;
+
+CREATE INDEX idx_tp_entry_reason_embed_cosine
+  ON public.tracked_positions
+  USING ivfflat (entry_reason_trader_embedding vector_cosine_ops)
+  WITH (lists = 50);
+
+CREATE TRIGGER trg_tracked_positions_updated
+    BEFORE UPDATE ON public.tracked_positions
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ============================================================================
+-- [AG] Reason-freeze trigger — hindsight-bias guard
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION public.fn_freeze_entry_reasons()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.entry_reason_frozen_at IS NOT NULL THEN
+        IF NEW.entry_reason_trader IS DISTINCT FROM OLD.entry_reason_trader
+           OR NEW.entry_reason_llm IS DISTINCT FROM OLD.entry_reason_llm
+           OR NEW.entry_reason_agent IS DISTINCT FROM OLD.entry_reason_agent
+           OR NEW.entry_reason_frozen_at IS DISTINCT FROM OLD.entry_reason_frozen_at THEN
+            RAISE EXCEPTION 'entry_reason_* fields are frozen on tracked_positions.id=% (frozen_at=%)',
+                OLD.id, OLD.entry_reason_frozen_at;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_tp_freeze_entry_reasons
+    BEFORE UPDATE ON public.tracked_positions
+    FOR EACH ROW EXECUTE FUNCTION public.fn_freeze_entry_reasons();
+
+-- ============================================================================
+-- 16. prompt_versions — LLM prompt registry (Phase 6)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.prompt_versions (
+  id            BIGSERIAL PRIMARY KEY,
+  name          TEXT        NOT NULL,
+  version       VARCHAR(32) NOT NULL,
+  prompt_hash   CHAR(16)    NOT NULL,
+  system        TEXT,
+  body          TEXT        NOT NULL,
+  taxonomy_rule TEXT,
+  model_hint    TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by    TEXT,
+  notes         TEXT,
+  UNIQUE (name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_name ON public.prompt_versions (name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_hash ON public.prompt_versions (prompt_hash);
+
+-- ============================================================================
+-- 17. memu_outbox — Durable broadcast outbox (Phase 7)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.memu_outbox (
+    id            BIGSERIAL PRIMARY KEY,
+    payload       JSONB NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at  TIMESTAMPTZ NULL,
+    last_error    TEXT NULL,
+    attempt_count INT NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_memu_outbox_unprocessed
+    ON public.memu_outbox (created_at)
+    WHERE processed_at IS NULL;
 
 -- ============================================================================
 -- Seed default system_config

@@ -1,0 +1,65 @@
+{% extends "base.html.jinja2" %}
+{% block title %}Positions — Tickles Manage{% endblock %}
+{% block content %}
+<h1>Open Positions</h1>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Trader</th>
+      <th>Symbol</th>
+      <th>Dir</th>
+      <th>Entry</th>
+      <th>SL</th>
+      <th>TP</th>
+      <th>R:R</th>
+      <th>P&L</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in open_positions %}
+    <tr>
+      <td>{{ p['created_at'] | fmt_dt('%m-%d %H:%M') }}</td>
+      <td>{{ p.get('trader_name','—') }}</td>
+      <td>{{ p.get('instrument_symbol','—') }}</td>
+      <td class="dir-{{ p.get('direction','') }}">{{ p.get('direction','—') }}</td>
+      <td>{{ p.get('entry_price','—') }}</td>
+      <td>{{ p.get('stop_loss','—') }}</td>
+      <td>{{ p.get('take_profit','—') }}</td>
+      <td>{{ "%.2f"|format(p.get('risk_reward_ratio',0)) }}</td>
+      <td class="{% if (p.get('realized_pnl_usd') or 0) >= 0 %}ok{% else %}warn{% endif %}">${{ "%.2f"|format(p.get('realized_pnl_usd',0)) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9" class="empty">No open positions.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Recently Closed (7d)</h2>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Closed</th>
+      <th>Trader</th>
+      <th>Symbol</th>
+      <th>Dir</th>
+      <th>Outcome</th>
+      <th>P&L</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in closed_positions %}
+    <tr>
+      <td>{{ p['closed_at'] | fmt_dt('%m-%d %H:%M') }}</td>
+      <td>{{ p.get('trader_name','—') }}</td>
+      <td>{{ p.get('instrument_symbol','—') }}</td>
+      <td class="dir-{{ p.get('direction','') }}">{{ p.get('direction','—') }}</td>
+      <td class="outcome-{{ p.get('outcome','') }}">{{ p.get('outcome','—') }}</td>
+      <td class="{% if (p.get('realized_pnl_usd') or 0) >= 0 %}ok{% else %}warn{% endif %}">${{ "%.2f"|format(p.get('realized_pnl_usd',0)) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="empty">No closed positions in the last 7 days.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

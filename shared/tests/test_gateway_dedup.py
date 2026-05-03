@@ -7,6 +7,7 @@ Location: /opt/tickles/shared/tests/test_gateway_dedup.py
 import asyncio
 import logging
 import os
+import pytest
 from shared.gateway.gateway import Gateway
 from shared.gateway.redis_bus import RedisBus
 from shared.gateway.schema import SubscriptionRequest, TickChannel
@@ -14,6 +15,7 @@ from shared.gateway.schema import SubscriptionRequest, TickChannel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@pytest.mark.anyio
 async def test_gateway_deduplication():
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
     bus = RedisBus(redis_url)

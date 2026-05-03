@@ -1,0 +1,32 @@
+{
+  "model_resolved": "google/gemini-2.5-flash",
+  "content": "```json\n{\n  \"is_trade_setup\": false,\n  \"message_type\": \"commentary\",\n  \"reasoning\": \"The image is a table showing trade performance metrics, not a specific trade setup.\"\n}\n```",
+  "timestamp_utc": "2026-05-03T15:16:27.203992+00:00",
+  "usage": {
+    "prompt_tokens": 1684,
+    "completion_tokens": 53,
+    "total_tokens": 1737,
+    "cost": 0.0006377,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.0006377,
+      "upstream_inference_prompt_cost": 0.0005052,
+      "upstream_inference_completions_cost": 0.0001325
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "extra": {
+    "operation": "vision_prefilter",
+    "correlation_id": "sig-5bb8b2a9b6a9"
+  }
+}

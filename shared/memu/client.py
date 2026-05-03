@@ -34,6 +34,14 @@ for p in (_ROOT, _SHARED):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# Phase Y.0 — canonical enum (single source of truth across BroadcastPayload,
+# MCP tool schemas, this DDL, and every runtime validator).
+from shared.memu.insight_kinds import (  # noqa: E402  — must follow sys.path tweak
+    INSIGHT_KINDS,
+    check_constraint_sql,
+    validate_kind,
+)
+
 log = logging.getLogger("tickles.memu")
 
 
@@ -45,14 +53,19 @@ MEMU_EMBED_MODEL = os.getenv("MEMU_EMBED_MODEL", "all-MiniLM-L6-v2")
 # headroom for envelope overhead.
 _NOTIFY_MAX_BYTES = 7900
 
+# Constraint name MUST match the one used by the migration that retro-fits
+# this CHECK onto pre-existing deployments
+# (shared/memu/migrations/2026_05_05_phase_y0_insight_kinds_check.sql).
+_KIND_CHECK_NAME = "ck_insights_kind_enum"
 
-_SCHEMA_SQL = """
+_SCHEMA_SQL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS insights (
     id            UUID PRIMARY KEY,
     created_at    TIMESTAMPTZ(3) NOT NULL DEFAULT NOW(),
-    kind          VARCHAR(32)  NOT NULL,
+    kind          VARCHAR(32)  NOT NULL
+                  CONSTRAINT {_KIND_CHECK_NAME} {check_constraint_sql("kind")},
     source_agent  VARCHAR(64),
     content       TEXT         NOT NULL,
     content_hash  CHAR(64)     NOT NULL,
@@ -154,10 +167,30 @@ class MemU:
                       source_agent: Optional[str] = None,
                       metadata: Optional[Dict[str, Any]] = None) -> str:
         """Persist a structured insight; dedup on (kind, content_hash).
-        Returns the insight id (existing id if duplicate).
+
+        Args:
+            kind: Insight kind. Must be one of ``INSIGHT_KINDS`` (validated
+                client-side before the INSERT and again by the DB CHECK
+                constraint ``ck_insights_kind_enum``).
+            content: Free-text body of the insight (will be SHA-256 hashed
+                for dedup and embedded if a sentence-transformer is loaded).
+            source_agent: Optional agent identifier (truncated to 64 chars
+                by the schema).
+            metadata: Optional JSON-serialisable metadata dict.
+
+        Returns:
+            The inserted insight UUID, or — when the (kind, content_hash)
+            pair already exists — the existing insight UUID. Empty string
+            when MemU is disabled (``MEMU_ENABLED=false``).
+
+        Raises:
+            ValueError: If ``kind`` is not in the canonical INSIGHT_KINDS set.
         """
         if self.conn is None:
             return ""
+        # Validate up-front so callers get a clear error rather than a Postgres
+        # CHECK violation buried under psycopg2 traceback noise.
+        validate_kind(kind)
         self._ensure_connected()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         ins_id = str(uuid.uuid4())

@@ -1,0 +1,48 @@
+{% extends "base.html.jinja2" %}
+{% block title %}Leaderboard — Tickles Manage{% endblock %}
+{% block content %}
+<h1>Leaderboard <span class="subtitle">last {{ days }}d</span></h1>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Trader</th>
+      <th>Trades</th>
+      <th>Wins</th>
+      <th>Losses</th>
+      <th>Win Rate</th>
+      <th>Total P&L</th>
+      <th>Avg R:R</th>
+      <th>Bias</th>
+      <th>Most Traded</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    {% set total = r.get('total_trades',0) %}
+    {% set wins = r.get('wins',0) %}
+    {% set losses = r.get('losses',0) %}
+    {% set win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0 %}
+    {% set pnl = r.get('total_pnl') or 0 %}
+    {% set rr = r.get('avg_rr') or 0 %}
+    {% set long_c = r.get('long_count',0) %}
+    {% set short_c = r.get('short_count',0) %}
+    {% if long_c > short_c * 1.5 %}{% set bias = 'LONG' %}{% elif short_c > long_c * 1.5 %}{% set bias = 'SHORT' %}{% else %}{% set bias = 'MIXED' %}{% endif %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td><a href="/manage/trader/{{ r.get('trader_id','') }}">{{ r.get('display_name') or r.get('handle_normalized') or 'unknown' }}</a></td>
+      <td>{{ total }}</td>
+      <td class="ok">{{ wins }}</td>
+      <td class="warn">{{ losses }}</td>
+      <td>{{ "%.1f"|format(win_rate) }}%</td>
+      <td class="{% if pnl >= 0 %}ok{% else %}warn{% endif %}">${{ "%.2f"|format(pnl) }}</td>
+      <td>{{ "%.2f"|format(rr) }}</td>
+      <td class="dir-{{ bias|lower }}">{{ bias }}</td>
+      <td>{{ r.get('most_traded_symbol','') }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10" class="empty">No trades in the last {{ days }} days.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

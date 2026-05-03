@@ -194,9 +194,11 @@ class TestMdQuoteHandler:
 
     def test_success(self) -> None:
         from shared.mcp.tools.data import _handle_md_quote
+        # Use a very recent timestamp to pass the Freshness Guard
+        now = datetime.now(timezone.utc)
         with patch("shared.mcp.tools.data.resolve_instrument_id", return_value=1), \
              patch("shared.mcp.tools.data.query", return_value=[{
-                 "timestamp": datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
+                 "timestamp": now,
                  "open": 76000.0, "high": 76100.0, "low": 75900.0,
                  "close": 76050.0, "volume": 100.0, "source": "bybit",
              }]):
@@ -216,9 +218,11 @@ class TestMdCandlesHandler:
 
     def test_success_with_candles(self) -> None:
         from shared.mcp.tools.data import _handle_md_candles
+        # Use a very recent timestamp to pass the Freshness Guard
+        now = datetime.now(timezone.utc)
         with patch("shared.mcp.tools.data.resolve_instrument_id", return_value=1), \
              patch("shared.mcp.tools.data.query", return_value=[{
-                 "timestamp": datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
+                 "timestamp": now,
                  "open": 76000.0, "high": 76100.0, "low": 75900.0,
                  "close": 76050.0, "volume": 100.0, "source": "bybit",
              }]):

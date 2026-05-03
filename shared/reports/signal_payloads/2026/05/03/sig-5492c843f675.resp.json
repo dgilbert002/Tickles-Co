@@ -1,0 +1,32 @@
+{
+  "model_resolved": "google/gemini-2.5-flash",
+  "content": "```json\n{\n  \"is_trade_setup\": false,\n  \"message_type\": \"commentary\",\n  \"reasoning\": \"The chart shows price action and technical indicators but lacks clear entry, stop-loss, or take-profit levels indicating a specific trade setup.\"\n}\n```",
+  "timestamp_utc": "2026-05-03T15:22:48.465173+00:00",
+  "usage": {
+    "prompt_tokens": 2458,
+    "completion_tokens": 65,
+    "total_tokens": 2523,
+    "cost": 0.0008999,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.0008999,
+      "upstream_inference_prompt_cost": 0.0007374,
+      "upstream_inference_completions_cost": 0.0001625
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "extra": {
+    "operation": "vision_prefilter",
+    "correlation_id": "sig-5492c843f675"
+  }
+}

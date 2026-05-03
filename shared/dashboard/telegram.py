@@ -39,6 +39,10 @@ class TelegramSender(Protocol):
         self, chat_id: str, code: str, *, ttl_s: int,
     ) -> None: ...
 
+    async def send_alert(
+        self, chat_id: str, message: str,
+    ) -> None: ...
+
 
 class NullTelegramSender:
     """Offline sender. Appends delivered codes to a local log file."""
@@ -55,8 +59,19 @@ class NullTelegramSender:
         self, chat_id: str, code: str, *, ttl_s: int,
     ) -> None:
         self.deliveries.append({
-            "chat_id": chat_id, "code": code, "ttl_s": ttl_s,
+            "type": "code", "chat_id": chat_id, "code": code, "ttl_s": ttl_s,
         })
+        self._write_log()
+
+    async def send_alert(
+        self, chat_id: str, message: str,
+    ) -> None:
+        self.deliveries.append({
+            "type": "alert", "chat_id": chat_id, "message": message,
+        })
+        self._write_log()
+
+    def _write_log(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
@@ -85,6 +100,18 @@ class TelegramBotSender:
             f"Valid for {ttl_s // 60} minutes. "
             "Do not share this code."
         )
+        await self._send(chat_id, text)
+
+    async def send_alert(
+        self, chat_id: str, message: str,
+    ) -> None:
+        text = (
+            "⚠️ <b>Tickles Alert</b>\n\n"
+            f"{message}"
+        )
+        await self._send(chat_id, text)
+
+    async def _send(self, chat_id: str, text: str) -> None:
         data = urllib.parse.urlencode({
             "chat_id": chat_id, "text": text, "parse_mode": "HTML",
         }).encode("utf-8")

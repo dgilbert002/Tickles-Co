@@ -1,0 +1,32 @@
+{
+  "model_resolved": "anthropic/claude-4-sonnet-20250522",
+  "content": "```json\n{\n  \"message_type\": \"commentary\",\n  \"instrument\": \"UNKNOWN\",\n  \"summary\": \"Spreadsheet showing trading backtest results with multiple crypto assets (AERO, ASTER, TAO, PUMP, XPL, SUI, ZEC, ETH, BRETT, AAVE, HYPE, VIRTUAL) and performance metrics\",\n  \"sentiment\": \"neutral\"\n}\n```",
+  "timestamp_utc": "2026-05-03T15:16:12.608712+00:00",
+  "usage": {
+    "prompt_tokens": 1505,
+    "completion_tokens": 102,
+    "total_tokens": 1607,
+    "cost": 0.006045,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.006045,
+      "upstream_inference_prompt_cost": 0.004515,
+      "upstream_inference_completions_cost": 0.00153
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "extra": {
+    "operation": "vision_primary",
+    "correlation_id": "sig-2e57cf86081a"
+  }
+}

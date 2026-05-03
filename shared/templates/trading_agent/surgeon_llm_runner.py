@@ -1,12 +1,14 @@
-"""Twilly-faithful LLM Surgeon runner (reusable template).
+"""Twilly-faithful LLM Surgeon runner (reusable template, mem0 mode).
 
 Every cycle:
-  1. Reads SOUL.md (strategy + persona), TRADE_STATE.md, recent TRADE_LOG.md tail,
-     MARKET_STATE.json, MARKET_INDICATORS.json, (optional) EXECUTION_REALITY.md.
+  1. Reads SOUL.md (strategy + persona), recent trade decisions and the latest
+     state snapshot from mem0, MARKET_STATE.json, MARKET_INDICATORS.json,
+     (optional) EXECUTION_REALITY.md.
   2. Sends everything to an LLM via OpenRouter.
   3. LLM returns a strict JSON decision block.
-  4. Python applies the decisions deterministically, updates TRADE_STATE.md,
-     appends to TRADE_LOG.md.
+  4. Python applies the decisions deterministically, persists the new state
+     snapshot and per-decision entries to mem0, and updates the local
+     ``.surgeon_state.json`` sidecar.
 
 Designed to be copy-pasted per agent. Config lives in config.json next to this
 script, or via CLI flags.
@@ -15,6 +17,10 @@ Why this design (Twilly-faithful):
   - The LLM does the reasoning / signal scoring / decision selection.
   - Python enforces math (fees, slippage, P&L, SL/TP hit detection) so the LLM
     cannot break accounting.
+
+Notes:
+  - No ``TRADE_STATE.md`` / ``TRADE_LOG.md`` files are written. All durable
+    history lives in mem0 (Qdrant + LLM-derived facts) per company namespace.
 """
 from __future__ import annotations
 
@@ -31,6 +37,11 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Add /opt/tickles to sys.path to ensure shared imports work
+sys.path.append("/opt/tickles")
+from shared.utils.freshness import validate_freshness, StaleDataError
+from shared.utils.mem0_config import ScopedMemory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s surgeon_llm %(message)s")
 LOG = logging.getLogger("surgeon_llm.runner")
@@ -102,7 +113,11 @@ class State:
         if not path.exists():
             s = cls(starting_balance=starting_balance, balance=starting_balance)
             return s
-        d = json.loads(path.read_text())
+        try:
+            d = json.loads(path.read_text())
+        except Exception as exc:
+            LOG.warning("State file corrupted (%s), starting fresh: %s", path, exc)
+            return cls(starting_balance=starting_balance, balance=starting_balance)
         s = cls(
             starting_balance=d.get("starting_balance", starting_balance),
             balance=d.get("balance", starting_balance),
@@ -110,8 +125,8 @@ class State:
             total_fees=d.get("total_fees", 0.0),
             cumulative_turnover=d.get("cumulative_turnover", 0.0),
             trade_counter=d.get("trade_counter", 0),
-            positions=[Position(**p) for p in d.get("positions", [])],
-            closed=d.get("closed", []),
+            positions=[Position(**p) for p in (d.get("positions") or [])],
+            closed=list(d.get("closed") or []),
         )
         return s
 
@@ -124,9 +139,11 @@ class State:
             "cumulative_turnover": self.cumulative_turnover,
             "trade_counter": self.trade_counter,
             "positions": [asdict(p) for p in self.positions],
-            "closed": self.closed[-50:],
+            "closed": (self.closed or [])[-50:],
         }
-        path.write_text(json.dumps(d, indent=2))
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, indent=2))
+        tmp.replace(path)
 
 
 # ---------- helpers ----------
@@ -138,7 +155,8 @@ def parse_ts(ts: str) -> datetime:
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except Exception:
-        return datetime.now(timezone.utc)
+        LOG.warning("Failed to parse timestamp '%s', using epoch", ts)
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def read_text_safe(p: Path, tail_bytes: int = 0) -> str:
@@ -436,9 +454,9 @@ def apply_actions(state: State, actions: List[dict], market: dict,
 def auto_manage_positions(state: State, market: dict, cfg: dict) -> List[dict]:
     """Enforce SL / TP / convergence / time / stall regardless of LLM."""
     auto: List[dict] = []
-    CONVERGENCE = 0.03
-    MAX_HOLD = 45 * 60
-    STALL = 15 * 60
+    CONVERGENCE = cfg.get("convergence_threshold", 0.03)
+    MAX_HOLD = cfg.get("max_hold_seconds", 45 * 60)
+    STALL = cfg.get("stall_seconds", 15 * 60)
     for pos in list(state.positions):
         if pos.remaining_frac <= 0:
             continue
@@ -446,7 +464,10 @@ def auto_manage_positions(state: State, market: dict, cfg: dict) -> List[dict]:
         price = float(asset.get("price") or 0)
         if price <= 0:
             continue
-        div = abs(float(asset.get("divergencePct") or 0.0))
+        raw_div = asset.get("divergencePct")
+        if raw_div is None:
+            continue  # skip convergence check if data missing
+        div = abs(float(raw_div))
         now = datetime.now(timezone.utc)
         held = (now - parse_ts(pos.entry_ts)).total_seconds()
         stalled = (now - parse_ts(pos.last_progress_ts)).total_seconds()
@@ -471,8 +492,27 @@ def auto_manage_positions(state: State, market: dict, cfg: dict) -> List[dict]:
     return auto
 
 
-# ---------- markdown writers ----------
-def write_trade_state(ws: Path, state: State, cfg: dict, last_reasoning: str) -> None:
+# ---------- mem0 persistence ----------
+_LOG_HEADER_RE = re.compile(
+    r"Trade #(?P<trade_id>\d+) -- (?P<symbol>\S+)\s+(?P<side>\S+)"
+)
+_DECISION_HEADER_RE = re.compile(r"^Decision @ ", re.MULTILINE)
+
+
+def build_state_snapshot_text(state: State, cfg: dict, last_reasoning: str) -> str:
+    """Render the latest state snapshot as a Twilly-style narrative for mem0.
+
+    The output mirrors what the legacy ``TRADE_STATE.md`` file used to contain
+    so downstream consumers (LLM prompt, dashboards) get the same context.
+
+    Args:
+        state: Current ``State`` instance.
+        cfg: Agent config dict (uses ``agent_name`` and ``mode``).
+        last_reasoning: Most recent LLM reasoning summary string.
+
+    Returns:
+        A multi-line string suitable for ``mem.add(text=...)``.
+    """
     lines = [
         f"# TRADE_STATE — {cfg['agent_name']}",
         "",
@@ -510,25 +550,114 @@ def write_trade_state(ws: Path, state: State, cfg: dict, last_reasoning: str) ->
             f"entry=${e['entry_price']:.4f} exit=${e['exit_price']:.4f} "
             f"frac={e['fraction']:.0%} net=${e['net_pnl']:+,.2f} @ {e['ts']}"
         )
-    (ws / "TRADE_STATE.md").write_text("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
 
 
-def ensure_trade_log(ws: Path, agent_name: str) -> None:
-    p = ws / "TRADE_LOG.md"
-    if not p.exists():
-        p.write_text(
-            f"# TRADE_LOG — {agent_name}\nMode: PAPER_TRADING\n"
-            f"Append-only. Every closed trade or decision gets an entry in the Twilly format.\n"
-        )
+def persist_state_snapshot(
+    state: State,
+    cfg: dict,
+    last_reasoning: str,
+    memory: Optional[ScopedMemory],
+) -> None:
+    """Write the latest state snapshot to mem0 (overwrite-latest semantics).
 
-
-def append_trade_log(ws: Path, entries: List[str]) -> None:
-    if not entries:
+    Args:
+        state: Current ``State`` instance.
+        cfg: Agent config dict.
+        last_reasoning: Latest LLM reasoning summary.
+        memory: ``ScopedMemory`` instance, or ``None`` to skip persistence.
+    """
+    if memory is None:
         return
-    p = ws / "TRADE_LOG.md"
-    with p.open("a") as fh:
-        for line in entries:
-            fh.write(line + "\n")
+    text = build_state_snapshot_text(state, cfg, last_reasoning)
+    metadata = {
+        "type": "trade_state_snapshot",
+        "kind": "live",
+        "agent_name": cfg.get("agent_name", "surgeon"),
+        "mode": cfg.get("mode", "PAPER_TRADING"),
+        "balance": round(state.balance, 6),
+        "realized_pnl": round(state.realized_pnl, 6),
+        "open_positions": sum(1 for p in state.positions if p.remaining_frac > 0),
+        "original_timestamp": now_iso(),
+    }
+    try:
+        memory.add(text, metadata=metadata)
+    except Exception as exc:
+        LOG.warning("persist_state_snapshot failed: %s", exc)
+
+
+def persist_trade_decisions(
+    entries: List[str],
+    memory: Optional[ScopedMemory],
+) -> None:
+    """Write each formatted log entry to mem0 as a discrete trade_decision memory.
+
+    The original Twilly entry text is preserved verbatim. Best-effort metadata
+    (``trade_id``, ``symbol``, ``side``) is parsed from the header so future
+    ``memory.search`` queries can filter by trade or asset.
+
+    Args:
+        entries: List of pre-formatted entry strings (open/close/decision).
+        memory: ``ScopedMemory`` instance, or ``None`` to skip persistence.
+    """
+    if memory is None or not entries:
+        return
+    for raw in entries:
+        text = raw.rstrip("\n")
+        if not text:
+            continue
+        metadata: Dict[str, Any] = {
+            "type": "trade_decision",
+            "kind": "live",
+            "original_timestamp": now_iso(),
+        }
+        if _DECISION_HEADER_RE.search(text):
+            metadata["action"] = "DECISION"
+        else:
+            match = _LOG_HEADER_RE.search(text)
+            if match:
+                metadata["trade_id"] = int(match.group("trade_id"))
+                metadata["symbol"] = match.group("symbol")
+                metadata["side"] = match.group("side")
+                if "[CLOSE" in text or "Action: CLOSE" in text:
+                    metadata["action"] = "CLOSE"
+                elif "Action: OPEN" in text:
+                    metadata["action"] = "OPEN"
+        try:
+            memory.add(text, metadata=metadata)
+        except Exception as exc:
+            LOG.warning(
+                "persist_trade_decisions: failed to add entry (trade_id=%s): %s",
+                metadata.get("trade_id"),
+                exc,
+            )
+
+
+def _format_memory_hits(hits: Any) -> str:
+    """Render a list of mem0 search hits as a plain-text block for the LLM.
+
+    Args:
+        hits: Whatever ``memory.search`` returned (list, dict, str, ...).
+
+    Returns:
+        Newline-joined text of each hit's memory body, or ``""`` if empty.
+    """
+    if not hits:
+        return ""
+    items: List[Any]
+    if isinstance(hits, dict) and "results" in hits:
+        items = list(hits.get("results") or [])
+    elif isinstance(hits, list):
+        items = hits
+    else:
+        return str(hits)
+    chunks: List[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            chunks.append(str(item.get("memory") or item.get("text") or item))
+        else:
+            chunks.append(str(item))
+    return "\n\n".join(c for c in chunks if c)
 
 
 def format_open_entry(state: State, pos: Position, reason: str) -> str:
@@ -570,18 +699,64 @@ def format_decision_line(cands: List[dict], reasoning: str) -> str:
 
 
 # ---------- cycle ----------
-def cycle(cfg: dict, openrouter_key: str) -> None:
+def cycle(cfg: dict, openrouter_key: str, memory: Optional[ScopedMemory] = None) -> None:
+    """
+    Execute one iteration of the LLM Surgeon loop.
+    
+    Args:
+        cfg: Configuration dictionary.
+        openrouter_key: API key for OpenRouter.
+        memory: Optional ScopedMemory instance for the Learning Loop.
+    """
     ws = Path(cfg["workspace"])
     ws.mkdir(parents=True, exist_ok=True)
-    ensure_trade_log(ws, cfg["agent_name"])
     state_path = ws / STATE_SIDECAR_NAME
     state = State.load(state_path, cfg["starting_balance"])
 
     soul_md = read_text_safe(ws / "SOUL.md")
-    trade_state_md = read_text_safe(ws / "TRADE_STATE.md")
-    trade_log_tail = read_text_safe(ws / "TRADE_LOG.md", tail_bytes=cfg["log_tail_bytes"])
-    market_state = read_json_safe(ws / "MARKET_STATE.json") or {}
-    market_ind = read_json_safe(ws / "MARKET_INDICATORS.json") or {}
+
+    # Pull recent state snapshot + decision tail from mem0 (replaces TRADE_STATE.md / TRADE_LOG.md)
+    trade_state_md = ""
+    trade_log_tail = ""
+    if memory is not None:
+        try:
+            state_hits = memory.search(
+                query="latest trade state snapshot",
+                metadata={"type": "trade_state_snapshot"},
+                limit=1,
+            )
+            trade_state_md = _format_memory_hits(state_hits)
+        except Exception as exc:
+            LOG.warning("mem0 search (trade_state_snapshot) failed: %s", exc)
+        try:
+            log_hits = memory.search(
+                query="recent trade decisions",
+                metadata={"type": "trade_decision"},
+                limit=5,
+            )
+            trade_log_tail = _format_memory_hits(log_hits)
+        except Exception as exc:
+            LOG.warning("mem0 search (trade_decision) failed: %s", exc)
+    
+    # Read market data with Freshness Guard
+    market_state_path = ws / "MARKET_STATE.json"
+    market_ind_path = ws / "MARKET_INDICATORS.json"
+    
+    market_state = read_json_safe(market_state_path) or {}
+    market_ind = read_json_safe(market_ind_path) or {}
+    
+    # Validate freshness of market data
+    if market_state:
+        try:
+            validate_freshness(market_state.get("timestamp"), context="MARKET_STATE.json")
+        except ValueError as exc:
+            raise StaleDataError(str(exc), lag_seconds=float("inf"), threshold_seconds=180.0)
+    if market_ind:
+        try:
+            validate_freshness(market_ind.get("timestamp"), context="MARKET_INDICATORS.json")
+        except ValueError as exc:
+            raise StaleDataError(str(exc), lag_seconds=float("inf"), threshold_seconds=180.0)
+        
     exec_reality = read_text_safe(ws / "EXECUTION_REALITY.md")
 
     assets = (market_state.get("assets") or {})
@@ -589,10 +764,44 @@ def cycle(cfg: dict, openrouter_key: str) -> None:
     # 1) auto-manage existing positions BEFORE asking LLM (math is sacred)
     auto_closed = auto_manage_positions(state, assets, cfg)
     auto_log_lines = [format_close_entry(e, state) for e in auto_closed]
+    
+    # Record autopsies for auto-closed trades
+    if memory and auto_closed:
+        for entry in auto_closed:
+            try:
+                autopsy = (
+                    f"AUTO-CLOSED Trade #{entry['trade_id']} {entry['symbol']} {entry['side']} "
+                    f"via {entry['action']}. Net PnL: ${entry['net_pnl']:.2f}. Reason: {entry['reason']}"
+                )
+                memory.add(autopsy, metadata={"type": "autopsy", "trade_id": entry["trade_id"], "auto": True})
+                LOG.info("Recorded auto-close autopsy for trade #%d", entry["trade_id"])
+            except Exception as e:
+                LOG.warning("Failed to record auto-close autopsy: %s", e)
 
-    # 2) build LLM prompt
+    # 2) Query Memory for relevant experiences
+    memories = []
+    if memory:
+        try:
+            # Query for recent performance or similar market conditions
+            query_str = f"recent performance {cfg['agent_name']} {list(assets.keys())[:3]}"
+            memories = memory.search(query_str, limit=5)
+            LOG.info("Retrieved %d memories for context", len(memories))
+        except Exception as e:
+            LOG.warning("Memory search failed: %s", e)
+
+    # 3) build LLM prompt
+    # Ensure memories are JSON-serializable
+    safe_memories = []
+    for m in (memories or []):
+        if isinstance(m, dict):
+            safe_memories.append(m)
+        elif hasattr(m, "__dict__"):
+            safe_memories.append(m.__dict__)
+        else:
+            safe_memories.append(str(m))
     user_payload = {
         "now_utc": now_iso(),
+        "memories": safe_memories,
         "TRADE_STATE_md": trade_state_md,
         "TRADE_LOG_tail": trade_log_tail,
         "MARKET_STATE": market_state,
@@ -666,13 +875,25 @@ def cycle(cfg: dict, openrouter_key: str) -> None:
                 log_entries.append(format_open_entry(state, pos, a["action"].get("reason", "")))
         elif a["type"] in ("CLOSE_PARTIAL", "CLOSE_ALL") and a["ok"]:
             log_entries.append(format_close_entry(a["entry"], state))
+            # Record autopsy for manually closed trades
+            if memory:
+                try:
+                    entry = a["entry"]
+                    autopsy = (
+                        f"CLOSED Trade #{entry['trade_id']} {entry['symbol']} {entry['side']} "
+                        f"via {entry['action']}. Net PnL: ${entry['net_pnl']:.2f}. Reason: {entry['reason']}"
+                    )
+                    memory.add(autopsy, metadata={"type": "autopsy", "trade_id": entry["trade_id"]})
+                    LOG.info("Recorded manual-close autopsy for trade #%d", entry["trade_id"])
+                except Exception as e:
+                    LOG.warning("Failed to record manual-close autopsy: %s", e)
 
     if not applied or not any(a.get("ok") for a in applied):
         if not auto_closed:
             log_entries.append(format_decision_line(llm_decision.get("top_candidates", []), reasoning_summary))
 
-    append_trade_log(ws, log_entries)
-    write_trade_state(ws, state, cfg, reasoning_summary)
+    persist_trade_decisions(log_entries, memory)
+    persist_state_snapshot(state, cfg, reasoning_summary, memory)
     state.save(state_path)
 
     open_n = sum(1 for p in state.positions if p.remaining_frac > 0)
@@ -718,6 +939,16 @@ def main() -> None:
         LOG.error("OPENROUTER_API_KEY missing; cannot run LLM cycles.")
         sys.exit(2)
 
+    # Initialize ScopedMemory if configured
+    memory = None
+    company_id = os.environ.get("COMPANY_ID", "tickles")
+    agent_id = cfg["agent_name"]
+    try:
+        memory = ScopedMemory(company=company_id, agent_id=agent_id)
+        LOG.info("ScopedMemory initialized for %s/%s", company_id, agent_id)
+    except Exception as e:
+        LOG.warning("ScopedMemory initialization failed (Learning Loop disabled): %s", e)
+
     LOG.info("surgeon_llm starting. agent=%s ws=%s interval=%ss model=%s",
              cfg["agent_name"], cfg["workspace"], cfg["interval_sec"], cfg["model_primary"])
 
@@ -726,15 +957,22 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
 
     if args.once:
-        cycle(cfg, openrouter_key)
+        try:
+            cycle(cfg, openrouter_key, memory=memory)
+        except StaleDataError as e:
+            LOG.error("STALE DATA: %s. Stopping.", e)
+            sys.exit(1)
         return
 
+    interval = max(int(cfg.get("interval_sec", 300)), 1)
     while not stop["flag"]:
         try:
-            cycle(cfg, openrouter_key)
+            cycle(cfg, openrouter_key, memory=memory)
+        except StaleDataError as e:
+            LOG.error("STALE DATA: %s. Waiting for fresh data...", e)
         except Exception as exc:
             LOG.exception("cycle failed: %s", exc)
-        for _ in range(int(cfg["interval_sec"])):
+        for _ in range(interval):
             if stop["flag"]:
                 break
             time.sleep(1)

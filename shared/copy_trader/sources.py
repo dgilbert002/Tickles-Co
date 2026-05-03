@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Protocol
 
-from shared.copy_trader_trader.protocol import SIDE_BUY, SIDE_SELL, CopySource, SourceFill
+from shared.copy_trader.protocol import SIDE_BUY, SIDE_SELL, CopySource, SourceFill
 
 LOG = logging.getLogger("tickles.copy.sources")
 

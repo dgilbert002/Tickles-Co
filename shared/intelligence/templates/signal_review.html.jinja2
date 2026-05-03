@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="30">
+    <title>Signal Review — {{ generated_at }}</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --border: #30363d;
+            --long: #238636;
+            --short: #da3633;
+            --unclear: #8b949e;
+            --accent: #58a6ff;
+            --row-alt: #161b22;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            margin: 0;
+            padding: 1rem;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        h1 {
+            margin: 0 0 0.5rem;
+            font-size: 1.25rem;
+            color: var(--accent);
+        }
+        .meta {
+            color: var(--unclear);
+            margin-bottom: 1rem;
+            font-size: 0.85rem;
+        }
+        .truncation-banner {
+            background: #da3633;
+            color: #fff;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.4rem 0.6rem;
+            text-align: left;
+            vertical-align: top;
+            overflow-wrap: break-word;
+        }
+        th {
+            background: var(--row-alt);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+        tr:nth-child(even) {
+            background: var(--row-alt);
+        }
+        .dir-long { color: var(--long); font-weight: 700; }
+        .dir-short { color: var(--short); font-weight: 700; }
+        .dir-unclear { color: var(--unclear); }
+        .thumb-inline img, .thumb-link img {
+            max-width: 120px;
+            max-height: 90px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+        }
+        .thumb-oversized {
+            color: var(--unclear);
+            font-size: 0.8rem;
+        }
+        .thumb-missing {
+            color: var(--unclear);
+            font-style: italic;
+        }
+        details {
+            margin-top: 0.3rem;
+        }
+        summary {
+            cursor: pointer;
+            color: var(--accent);
+            font-size: 0.8rem;
+            user-select: none;
+        }
+        pre {
+            background: var(--row-alt);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.5rem;
+            overflow-x: auto;
+            font-size: 0.75rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: var(--border);
+        }
+        a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .col-time { width: 110px; }
+        .col-platform { width: 70px; }
+        .col-symbol { width: 90px; }
+        .col-dir { width: 60px; }
+        .col-conf { width: 50px; }
+        .col-thumb { width: 130px; }
+        .col-llm { width: 200px; }
+    </style>
+</head>
+<body>
+    <h1>Signal Review</h1>
+    <div class="meta">
+        Generated: {{ generated_at }} UTC &middot;
+        Rows: {{ rows|length }} &middot;
+        Lookback: {{ lookback_h }}h &middot;
+        {% if truncated %}
+        <span style="color:#da3633;font-weight:700;">TRUNCATED — size cap exceeded</span>
+        {% endif %}
+        Auto-refresh: 30s
+    </div>
+
+    {% if truncation_banner %}
+    <div class="truncation-banner">{{ truncation_banner }}</div>
+    {% endif %}
+
+    <table>
+        <thead>
+            <tr>
+                <th class="col-time">Time</th>
+                <th class="col-platform">Platform</th>
+                <th>Trader</th>
+                <th class="col-symbol">Symbol</th>
+                <th class="col-dir">LLM</th>
+                <th class="col-conf">Conf</th>
+                <th class="col-dir">Quant</th>
+                <th class="col-conf">Conf</th>
+                <th class="col-dir">Consensus</th>
+                <th class="col-conf">Conf</th>
+                <th class="col-thumb">Chart</th>
+                <th class="col-llm">LLM I/O</th>
+                <th>Links</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td class="col-time">{{ row['created_at'] }}</td>
+                <td class="col-platform">{{ row['platform'] or "—" }}</td>
+                <td>{{ row['trader_handle'] or "—" }}</td>
+                <td class="col-symbol">{{ row['symbol'] or "—" }}</td>
+                <td class="col-dir">
+                    {% if row['llm_direction'] == "long" %}
+                    <span class="dir-long">LONG</span>
+                    {% elif row['llm_direction'] == "short" %}
+                    <span class="dir-short">SHORT</span>
+                    {% else %}
+                    <span class="dir-unclear">{{ row['llm_direction'] or "—" }}</span>
+                    {% endif %}
+                </td>
+                <td class="col-conf">{{ "%.0f"|format(row['llm_confidence'] * 100) if row['llm_confidence'] is not none else "—" }}%</td>
+                <td class="col-dir">
+                    {% if row['quant_direction'] == "long" %}
+                    <span class="dir-long">LONG</span>
+                    {% elif row['quant_direction'] == "short" %}
+                    <span class="dir-short">SHORT</span>
+                    {% else %}
+                    <span class="dir-unclear">{{ row['quant_direction'] or "—" }}</span>
+                    {% endif %}
+                </td>
+                <td class="col-conf">{{ "%.0f"|format(row['quant_confidence'] * 100) if row['quant_confidence'] is not none else "—" }}%</td>
+                <td class="col-dir">
+                    {% if row['consensus_direction'] == "long" %}
+                    <span class="dir-long">LONG</span>
+                    {% elif row['consensus_direction'] == "short" %}
+                    <span class="dir-short">SHORT</span>
+                    {% else %}
+                    <span class="dir-unclear">{{ row['consensus_direction'] or "—" }}</span>
+                    {% endif %}
+                </td>
+                <td class="col-conf">{{ "%.0f"|format(row['consensus_confidence'] * 100) if row['consensus_confidence'] is not none else "—" }}%</td>
+                <td class="col-thumb">
+                    {% if row['media_local_path'] %}
+                    {{ render_thumb(row['media_local_path']) | safe }}
+                    {% else %}
+                    <span class="thumb-missing">(no image)</span>
+                    {% endif %}
+                </td>
+                <td class="col-llm">
+                    {% if row['llm_raw_request_path'] or row['llm_raw_response_path'] %}
+                    <details>
+                        <summary>LLM I/O</summary>
+                        {% if row['llm_raw_request_path'] %}
+                        <div><span class="badge">REQ</span> {{ row['llm_raw_request_path'] }}</div>
+                        {% endif %}
+                        {% if row['llm_raw_response_path'] %}
+                        <div><span class="badge">RESP</span> {{ row['llm_raw_response_path'] }}</div>
+                        {% endif %}
+                        {% if row['prompt_version'] %}
+                        <div style="margin-top:0.3rem;color:var(--unclear);font-size:0.75rem;">Prompt: {{ row['prompt_version'] }}</div>
+                        {% endif %}
+                        {% if row['prefilter_provider'] %}
+                        <div style="color:var(--unclear);font-size:0.75rem;">Provider: {{ row['prefilter_provider'] }} / {{ row['vision_model_resolved'] or "?" }}</div>
+                        {% endif %}
+                        {% if row['llm_levels_json'] %}
+                        <pre>{{ row['llm_levels_json'] | tojson(indent=2) }}</pre>
+                        {% endif %}
+                        {% if row['correlation_id'] %}
+                        <div style="color:var(--unclear);font-size:0.75rem;">Corr: {{ row['correlation_id'] }}</div>
+                        {% endif %}
+                    </details>
+                    {% else %}
+                    <span style="color:var(--unclear);font-size:0.8rem;">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if row['discord_url'] %}
+                    <a href="{{ row['discord_url'] }}" target="_blank" rel="noopener">Discord ↗</a><br>
+                    {% endif %}
+                    {% if row['news_item_id'] %}
+                    <span style="color:var(--unclear);font-size:0.75rem;">News #{{ row['news_item_id'] }}</span>
+                    {% endif %}
+                    {% if row['media_item_id'] %}
+                    <span style="color:var(--unclear);font-size:0.75rem;">Media #{{ row['media_item_id'] }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>

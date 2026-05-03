@@ -15,10 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from shared.copy_trader_trader.mapper import CopyMapper, MappingResult
-from shared.copy_trader_trader.protocol import CopySource, CopyTrade, SourceFill
-from shared.copy_trader_trader.sources import BaseCopySource
-from shared.copy_trader_trader.store import CopyStore
+from shared.copy_trader.mapper import CopyMapper, MappingResult
+from shared.copy_trader.protocol import CopySource, CopyTrade, SourceFill
+from shared.copy_trader.sources import BaseCopySource
+from shared.copy_trader.store import CopyStore
 
 LOG = logging.getLogger("tickles.copy.service")
 

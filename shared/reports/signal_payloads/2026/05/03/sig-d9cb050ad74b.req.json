@@ -1,0 +1,14 @@
+{
+  "provider": "openrouter",
+  "model_requested": "google/gemini-2.5-flash",
+  "system_prompt": "You are a fast image classifier. Look at this chart image and decide: is it a trade setup (clear entry/stop-loss/take-profit levels), commentary (market discussion without levels), meme (joke/image macro), or unclear?\n\nRespond ONLY with JSON:\n  {\n    \"is_trade_setup\": true | false,\n    \"message_type\": \"trade_setup\" | \"commentary\" | \"meme\" | \"unclear\",\n    \"reasoning\": \"brief one-line reason (max 100 chars)\"\n  }\nNo markdown, no prose outside the JSON.",
+  "user_text": "Chart for UNKNOWN.",
+  "temperature": 0.7,
+  "timestamp_utc": "2026-05-03T15:15:50.654953+00:00",
+  "image_b64_sha256": "2b88e0b8276586d72c340d340bf61c03",
+  "image_b64_length": 48552,
+  "extra": {
+    "operation": "vision_prefilter",
+    "correlation_id": "sig-d9cb050ad74b"
+  }
+}

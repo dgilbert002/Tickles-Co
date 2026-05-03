@@ -27,6 +27,7 @@ from ..protocol import McpTool
 from ..registry import ToolRegistry
 from .context import ToolContext
 from .db_helper import query, resolve_instrument_id
+from shared.utils.freshness import freshness_envelope, validate_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ def _handle_md_quote(p: Dict[str, Any]) -> Dict[str, Any]:
     if not rows:
         return {"status": "no_data", "message": f"No candles for {venue}/{symbol}"}
     r = rows[0]
-    return {
+    res = {
         "status": "ok",
         "symbol": symbol,
         "venue": venue,
@@ -252,6 +253,8 @@ def _handle_md_quote(p: Dict[str, Any]) -> Dict[str, Any]:
         "volume": _decimal_to_float(r["volume"]),
         "source": r["source"],
     }
+    # Apply Freshness Guard (default 180s)
+    return freshness_envelope(res, context=f"md.quote:{venue}/{symbol}")
 
 
 def _handle_md_candles(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -304,7 +307,7 @@ def _handle_md_candles(p: Dict[str, Any]) -> Dict[str, Any]:
     except RuntimeError as exc:
         return {"status": "error", "message": f"Query failed: {exc}"}
     candles = [_format_candle(r) for r in rows]
-    return {
+    res = {
         "status": "ok",
         "symbol": symbol,
         "venue": venue,
@@ -312,6 +315,29 @@ def _handle_md_candles(p: Dict[str, Any]) -> Dict[str, Any]:
         "count": len(candles),
         "candles": candles,
     }
+    
+    # If we are fetching the most recent data (no 'to' timestamp),
+    # validate that the latest candle is fresh.
+    if not to_ts and candles:
+        latest_ts = candles[-1]["timestamp"]
+        threshold = float(p.get("freshness_threshold", 180.0))
+        
+        try:
+            validate_freshness(latest_ts, threshold, f"md.candles:{venue}/{symbol}")
+            res["freshness"] = {
+                "status": "fresh",
+                "checked_at": datetime.now(timezone.utc).isoformat()
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error_code": "STALE_DATA",
+                "message": str(e),
+                "symbol": symbol,
+                "venue": venue
+            }
+    
+    return res
 
 
 def _handle_candles_coverage(p: Dict[str, Any]) -> Dict[str, Any]:
