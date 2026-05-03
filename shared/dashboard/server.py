@@ -418,6 +418,12 @@ def build_app(
         )
         attach_drawer_routes(app, prefix=prefix)
 
+        # Phase X.6 — mount config snapshot endpoint.
+        from shared.dashboard.config_routes import (
+            attach_routes as attach_config_routes,
+        )
+        attach_config_routes(app, prefix=prefix)
+
     # Phase 5 — mount /manage/* panel routes
     from shared.intelligence.manage_panel.server_routes import attach_routes
     attach_routes(app)

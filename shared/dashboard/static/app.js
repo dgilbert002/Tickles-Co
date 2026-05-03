@@ -13,7 +13,9 @@ const state = {
     learningDimension: '',    // memory-feed dimension filter (empty = all)
     newsWindow: '24h',        // PHASE_X.4 — news feed window: 24h / 7d / 30d
     newsSource: '',           // news source filter (empty = all)
-    newsHasMedia: ''          // tri-state: '' (any), 'true', 'false'
+    newsHasMedia: '',         // tri-state: '' (any), 'true', 'false'
+    configSnapshot: null,     // PHASE_X.6 — last fetched {shared, companies} payload
+    configSearch: ''          // PHASE_X.6 — case-insensitive substring filter
 };
 
 async function api(path, opts = {}) {
@@ -148,6 +150,9 @@ function renderTab(tabId, snap) {
             break;
         case 'news':
             renderNews();
+            break;
+        case 'config':
+            renderConfig();
             break;
     }
 }
@@ -609,6 +614,173 @@ async function renderNews() {
         return;
     }
     renderNewsRows((res && res.rows) || []);
+}
+
+// ---------------------------------------------------------------------------
+// Phase X.6 — Config tab
+// ---------------------------------------------------------------------------
+//
+// Read-only view of:
+//   * shared:    tickles_shared.public.system_config (grouped by namespace)
+//   * companies: tickles_<short_name>.public.company_config
+//
+// Backed by GET /api/config/snapshot. Secrets are redacted server-side
+// (the route never sees the raw value), so this code can render every
+// row without conditional masking.
+
+const CONFIG_SECRET_REDACTION = '***';   // mirrors config_provider.SECRET_REDACTION
+
+function _configRowMatchesSearch(row, namespace, q) {
+    if (!q) return true;
+    const hay = [
+        row.key || '',
+        row.value === null || row.value === undefined ? '' : String(row.value),
+        namespace || ''
+    ].join(' ').toLowerCase();
+    return hay.indexOf(q) !== -1;
+}
+
+function _configValueCell(value, isSecret) {
+    if (value === null || value === undefined) return '<span class="muted">—</span>';
+    if (isSecret) return `<span class="pill warn" title="Redacted server-side">${_esc(value)}</span>`;
+    // Long values can blow up the layout; clamp visually with title-attr fallback.
+    const s = String(value);
+    if (s.length > 120) {
+        return `<code title="${_esc(s)}">${_esc(s.slice(0, 117))}…</code>`;
+    }
+    return `<code>${_esc(s)}</code>`;
+}
+
+function _configFmtTimestamp(ts) {
+    // Returns RAW text — callers are responsible for HTML-escaping
+    // exactly once. Returning _esc(...) here would double-escape at
+    // the call sites (which all wrap this in _esc(...) themselves).
+    if (!ts) return '—';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    return d.toLocaleString();
+}
+
+function _renderSharedConfig(shared, q) {
+    // shared = { namespace: [ {key, value, is_secret, updated_at}, ... ] }
+    const container = document.getElementById('config-shared-body');
+    if (!container) return 0;
+    const namespaces = Object.keys(shared || {}).sort();
+    if (!namespaces.length) {
+        container.innerHTML = '<div class="muted" style="padding: 12px;">No shared config.</div>';
+        return 0;
+    }
+    let total = 0;
+    const sections = namespaces.map(ns => {
+        const rows = (shared[ns] || []).filter(r => _configRowMatchesSearch(r, ns, q));
+        if (!rows.length) return '';
+        total += rows.length;
+        const body = rows.map(r => `
+            <tr>
+                <td><code>${_esc(r.key || '—')}</code></td>
+                <td>${_configValueCell(r.value, !!r.is_secret)}</td>
+                <td>${r.is_secret ? '<span class="pill warn">secret</span>' : ''}</td>
+                <td class="muted" style="white-space: nowrap;">${_esc(_configFmtTimestamp(r.updated_at))}</td>
+            </tr>`).join('');
+        return `
+            <div class="card" style="margin: 8px 0; padding: 8px 12px;">
+                <h4 style="margin: 4px 0 8px 0;"><span class="pill">${_esc(ns || '(global)')}</span>
+                    <span class="muted" style="font-size: 11px; margin-left: 8px;">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
+                </h4>
+                <table>
+                    <thead><tr><th>Key</th><th>Value</th><th></th><th>Updated</th></tr></thead>
+                    <tbody>${body}</tbody>
+                </table>
+            </div>`;
+    }).filter(Boolean).join('');
+    container.innerHTML = sections || '<div class="muted" style="padding: 12px;">No matches.</div>';
+    return total;
+}
+
+function _renderCompanyConfig(companies, q) {
+    // companies = { short_name: [ {key, value, updated_at}, ... ] }
+    const container = document.getElementById('config-companies-body');
+    if (!container) return 0;
+    const names = Object.keys(companies || {}).sort();
+    if (!names.length) {
+        container.innerHTML = '<div class="muted" style="padding: 12px;">No active companies.</div>';
+        return 0;
+    }
+    let total = 0;
+    const sections = names.map(name => {
+        const rows = (companies[name] || []).filter(r => _configRowMatchesSearch(r, name, q));
+        if (!rows.length && q) return '';        // hide empty matches when searching
+        total += rows.length;
+        const body = rows.length ? rows.map(r => `
+            <tr>
+                <td><code>${_esc(r.key || '—')}</code></td>
+                <td>${_configValueCell(r.value, false)}</td>
+                <td class="muted" style="white-space: nowrap;">${_esc(_configFmtTimestamp(r.updated_at))}</td>
+            </tr>`).join('') : `<tr><td colspan="3" class="muted">No company-scoped config.</td></tr>`;
+        return `
+            <div class="card" style="margin: 8px 0; padding: 8px 12px;">
+                <h4 style="margin: 4px 0 8px 0;"><span class="company-tag">${_esc(name)}</span>
+                    <span class="muted" style="font-size: 11px; margin-left: 8px;">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
+                </h4>
+                <table>
+                    <thead><tr><th>Key</th><th>Value</th><th>Updated</th></tr></thead>
+                    <tbody>${body}</tbody>
+                </table>
+            </div>`;
+    }).filter(Boolean).join('');
+    container.innerHTML = sections || '<div class="muted" style="padding: 12px;">No matches.</div>';
+    return total;
+}
+
+function _renderConfigFromState() {
+    // Re-render from the cached snapshot — used by the search input
+    // so we don't refetch every keystroke.
+    const snap = state.configSnapshot || { shared: {}, companies: {} };
+    const q = (state.configSearch || '').trim().toLowerCase();
+    const sharedCount = _renderSharedConfig(snap.shared || {}, q);
+    const companyCount = _renderCompanyConfig(snap.companies || {}, q);
+    const countEl = document.getElementById('config-row-count');
+    if (countEl) {
+        const total = sharedCount + companyCount;
+        countEl.textContent = q ? `${total} match${total === 1 ? '' : 'es'}` : `${total} rows`;
+    }
+}
+
+let _configSearchWired = false;
+
+function _wireConfigSearch() {
+    if (_configSearchWired) return;
+    const input = document.getElementById('config-search');
+    if (!input) return;
+    input.addEventListener('input', e => {
+        state.configSearch = e.target.value || '';
+        _renderConfigFromState();
+    });
+    _configSearchWired = true;
+}
+
+async function renderConfig() {
+    _wireConfigSearch();
+    const sharedBody = document.getElementById('config-shared-body');
+    const companyBody = document.getElementById('config-companies-body');
+    if (sharedBody) sharedBody.innerHTML = '<div class="muted" style="padding: 12px;">Loading…</div>';
+    if (companyBody) companyBody.innerHTML = '<div class="muted" style="padding: 12px;">Loading…</div>';
+    let res;
+    try {
+        res = await api('/api/config/snapshot');
+    } catch (e) {
+        console.error('Config snapshot fetch failed', e);
+        if (sharedBody) sharedBody.innerHTML = '<div class="muted" style="padding: 12px;">Unable to load shared config.</div>';
+        if (companyBody) companyBody.innerHTML = '<div class="muted" style="padding: 12px;">Unable to load company config.</div>';
+        const countEl = document.getElementById('config-row-count');
+        if (countEl) countEl.textContent = '—';
+        return;
+    }
+    state.configSnapshot = {
+        shared: (res && res.shared) || {},
+        companies: (res && res.companies) || {}
+    };
+    _renderConfigFromState();
 }
 
 function renderOverview(snap) {
