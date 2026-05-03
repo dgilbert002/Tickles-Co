@@ -412,6 +412,12 @@ def build_app(
         )
         attach_news_routes(app, prefix=prefix)
 
+        # Phase X.5 — mount cross-tab interpretation drawer endpoint.
+        from shared.dashboard.interpretation_drawer_routes import (
+            attach_routes as attach_drawer_routes,
+        )
+        attach_drawer_routes(app, prefix=prefix)
+
     # Phase 5 — mount /manage/* panel routes
     from shared.intelligence.manage_panel.server_routes import attach_routes
     attach_routes(app)

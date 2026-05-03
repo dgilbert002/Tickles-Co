@@ -193,3 +193,133 @@ tbody tr:hover { background: var(--panel-2); }
 .prompt-scores { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 2px; flex-wrap: wrap; }
 .prompt-arrow { color: var(--muted); }
 .prompt-note { font-size: 11px; color: var(--muted); margin-top: 4px; word-break: break-word; }
+
+/* ----------------------------------------------------------------- */
+/* Phase X.5 — Cross-tab Interpretation Drawer                       */
+/* ----------------------------------------------------------------- */
+.interp-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 900;
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+.interp-drawer-backdrop.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.interp-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 100vw);
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  z-index: 1000;
+  transform: translateX(0);
+  transition: transform 0.22s ease;
+  overflow: hidden;
+}
+.interp-drawer.hidden {
+  transform: translateX(100%);
+  pointer-events: none;
+}
+.interp-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex: 0 0 auto;
+}
+.interp-drawer-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.interp-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.interp-drawer-body .drawer-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: var(--panel-2);
+}
+.interp-drawer-body .drawer-section h3 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.interp-drawer-body .drawer-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.interp-drawer-body .drawer-label {
+  flex: 0 0 110px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.interp-drawer-body .drawer-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  color: var(--text);
+}
+.interp-drawer-body .drawer-empty {
+  color: var(--muted);
+  font-style: italic;
+  padding: 24px 0;
+  text-align: center;
+}
+.interp-drawer-body pre.drawer-json {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+}
+.interp-drawer-body .drawer-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+/* Make rows openable across tabs. */
+.feed-row,
+.card[id^="sig-"],
+.card[id^="pos-"],
+.card[id^="interp-"] {
+  cursor: pointer;
+}
+.card.drawer-open,
+.feed-row.drawer-open {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

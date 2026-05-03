@@ -570,7 +570,7 @@ function renderNewsRows(rows) {
             ? `<span class="pill ok">${mediaCount || 1}</span>`
             : '<span class="muted">—</span>';
         return `
-        <tr class="feed-row">
+        <tr class="feed-row" data-news-item-id="${_esc(r.id)}">
             <td class="muted" style="white-space: nowrap;">${_esc(ts)}</td>
             <td><span class="pill ${srcCls}">${_esc(source)}</span></td>
             <td>${_newsHeadlineCell(r)}</td>
@@ -698,8 +698,9 @@ function renderSignals(data) {
         const srcLink = srcUrl
             ? `<a href="${_esc(srcUrl)}" target="_blank" class="btn secondary" style="font-size: 11px; padding: 4px 8px;">View Source</a>`
             : '';
+        const niid = s.news_item_id !== null && s.news_item_id !== undefined ? ` data-news-item-id="${_esc(s.news_item_id)}"` : '';
         return `
-        <div class="card" id="sig-${s.id}">
+        <div class="card" id="sig-${s.id}" data-interp-id="${_esc(s.id)}"${niid}>
             <h2>
                 <span><span class="company-tag">${_esc(company)}</span>Signal #${s.id}</span>
                 <a href="#sig-${s.id}" class="anchor">⚓</a>
@@ -732,8 +733,12 @@ function renderPositions(data) {
         const sl = p.stop_loss !== null && p.stop_loss !== undefined ? _fmtNum(p.stop_loss, 4) : '—';
         const tp1 = p.take_profit_1 !== null && p.take_profit_1 !== undefined ? _fmtNum(p.take_profit_1, 4) : '—';
         const status = p.status || '—';
+        const pInterp = p.signal_interpretation_id;
+        const pNews = p.news_item_id;
+        const interpAttr = pInterp !== null && pInterp !== undefined ? ` data-interp-id="${_esc(pInterp)}"` : '';
+        const niidAttr = pNews !== null && pNews !== undefined ? ` data-news-item-id="${_esc(pNews)}"` : '';
         return `
-        <div class="card" id="pos-${p.id}">
+        <div class="card" id="pos-${p.id}"${interpAttr}${niidAttr}>
             <h2>
                 <span><span class="company-tag">${_esc(company)}</span>Pos #${p.id}</span>
                 <a href="#pos-${p.id}" class="anchor">⚓</a>
@@ -767,8 +772,9 @@ function renderInterpretations(data) {
         const fallbackImg = mediaUrl
             ? `<img src="${_esc(mediaUrl)}" alt="Original Chart" style="width: 100%;">`
             : `<div class="muted" style="padding: 20px; text-align: center;">No image available</div>`;
+        const iNews = i.news_item_id !== null && i.news_item_id !== undefined ? ` data-news-item-id="${_esc(i.news_item_id)}"` : '';
         return `
-        <div class="card" id="interp-${i.id}">
+        <div class="card" id="interp-${i.id}" data-interp-id="${_esc(i.id)}"${iNews}>
             <h2>
                 <span><span class="company-tag">${_esc(company)}</span>Interp #${i.id}</span>
                 <a href="#interp-${i.id}" class="anchor">⚓</a>
@@ -923,6 +929,354 @@ function handleAnchors() {
     }
 }
 
+/* ============================================================
+ * Phase X.5 — Cross-tab Interpretation Drawer
+ * ------------------------------------------------------------
+ * Opens a side panel with the LLM/quant/ChartHacker interpretation
+ * timeline for a given news_item_id (or single interp id). Wired into
+ * the News, Signals, Positions, and Interpretations tabs via click
+ * delegation on rows that carry data-news-item-id / data-interp-id.
+ * ============================================================ */
+
+const DRAWER_FETCH_LIMIT = 10;
+let _drawerLastFocus = null;
+
+function _drawerEl() {
+    return document.getElementById('interp-drawer');
+}
+
+function _drawerBackdropEl() {
+    return document.getElementById('interp-drawer-backdrop');
+}
+
+function _drawerBodyEl() {
+    return document.getElementById('interp-drawer-body');
+}
+
+function _drawerSetLoading() {
+    const body = _drawerBodyEl();
+    if (body) {
+        body.innerHTML = '<div class="muted" style="padding: 20px; text-align: center;">Loading…</div>';
+    }
+}
+
+function _drawerSetError(msg) {
+    const body = _drawerBodyEl();
+    if (body) {
+        body.innerHTML = `<div class="muted" style="padding: 20px; text-align: center;">${_esc(msg)}</div>`;
+    }
+}
+
+function _clearDrawerOpenAccent() {
+    document.querySelectorAll('.drawer-open').forEach(el => el.classList.remove('drawer-open'));
+}
+
+async function openInterpretationDrawer({ newsItemId = null, interpId = null, sourceEl = null } = {}) {
+    if (newsItemId === null && interpId === null) return;
+    const drawer = _drawerEl();
+    const backdrop = _drawerBackdropEl();
+    if (!drawer || !backdrop) return;
+
+    _drawerLastFocus = document.activeElement;
+    _clearDrawerOpenAccent();
+    if (sourceEl) sourceEl.classList.add('drawer-open');
+
+    drawer.classList.remove('hidden');
+    drawer.setAttribute('aria-hidden', 'false');
+    backdrop.classList.remove('hidden');
+    backdrop.setAttribute('aria-hidden', 'false');
+    _drawerSetLoading();
+    try { drawer.focus({ preventScroll: true }); } catch {}
+
+    const params = new URLSearchParams();
+    if (newsItemId !== null) {
+        params.set('news_item_id', String(newsItemId));
+        params.set('limit', String(DRAWER_FETCH_LIMIT));
+    } else {
+        params.set('id', String(interpId));
+    }
+
+    let res;
+    try {
+        res = await api(`/api/interpretations/drawer?${params.toString()}`);
+    } catch (e) {
+        console.error('Drawer fetch failed', e);
+        _drawerSetError('Unable to load interpretation.');
+        return;
+    }
+    const rows = (res && Array.isArray(res.rows)) ? res.rows : [];
+    renderDrawer(rows, { newsItemId, interpId });
+}
+
+function closeInterpretationDrawer() {
+    const drawer = _drawerEl();
+    const backdrop = _drawerBackdropEl();
+    if (drawer) {
+        drawer.classList.add('hidden');
+        drawer.setAttribute('aria-hidden', 'true');
+    }
+    if (backdrop) {
+        backdrop.classList.add('hidden');
+        backdrop.setAttribute('aria-hidden', 'true');
+    }
+    _clearDrawerOpenAccent();
+    if (_drawerLastFocus && typeof _drawerLastFocus.focus === 'function') {
+        try { _drawerLastFocus.focus({ preventScroll: true }); } catch {}
+    }
+    _drawerLastFocus = null;
+}
+
+function _drawerRow(label, value) {
+    if (value === null || value === undefined || value === '') return '';
+    return `<div class="drawer-row"><span class="drawer-label">${_esc(label)}</span><span class="drawer-value">${value}</span></div>`;
+}
+
+function _drawerJsonBlock(value) {
+    if (value === null || value === undefined) return '';
+    let txt;
+    try {
+        txt = JSON.stringify(value, null, 2);
+    } catch {
+        txt = String(value);
+    }
+    if (!txt || txt === '{}' || txt === '[]' || txt === 'null') return '';
+    return `<pre class="drawer-json">${_esc(txt)}</pre>`;
+}
+
+function _drawerTagsBlock(tags) {
+    if (!Array.isArray(tags) || !tags.length) return '';
+    const pills = tags
+        .filter(t => t !== null && t !== undefined && t !== '')
+        .map(t => `<span class="pill">${_esc(t)}</span>`)
+        .join(' ');
+    if (!pills) return '';
+    return `<div class="drawer-tags">${pills}</div>`;
+}
+
+function _drawerSection(title, innerHtml) {
+    if (!innerHtml) return '';
+    return `<div class="drawer-section"><h3>${_esc(title)}</h3>${innerHtml}</div>`;
+}
+
+function _drawerFmtConfidence(v) {
+    if (v === null || v === undefined || v === '') return '';
+    const n = Number(v);
+    if (!isFinite(n)) return _esc(String(v));
+    return n.toFixed(2);
+}
+
+function _drawerFmtTs(v) {
+    if (!v) return '';
+    try { return _esc(new Date(v).toLocaleString()); }
+    catch { return _esc(String(v)); }
+}
+
+function _drawerSectionConsensus(row) {
+    const dir = row.consensus_direction || '—';
+    const dirHtml = `<span class="pill ${_dirPill(dir)}">${_esc(dir)}</span>`;
+    let inner = '';
+    inner += _drawerRow('Direction', dirHtml);
+    inner += _drawerRow('Confidence', _drawerFmtConfidence(row.consensus_confidence));
+    inner += _drawerRow('Method', _esc(row.consensus_method || ''));
+    inner += _drawerRow('Symbol', _esc(row.instrument && row.instrument.symbol));
+    inner += _drawerRow('Exchange', _esc(row.instrument && row.instrument.exchange));
+    inner += _drawerRow('Timeframe', _esc(row.instrument && row.instrument.timeframe));
+    inner += _drawerRow('Created', _drawerFmtTs(row.created_at));
+    inner += _drawerRow('Prompt v', _esc(row.prompt_version));
+    inner += _drawerRow('Model', _esc(row.model_version));
+    return _drawerSection('Consensus', inner);
+}
+
+function _drawerSectionLLM(row) {
+    const llm = row.llm || {};
+    let inner = '';
+    inner += _drawerRow('Direction', _esc(llm.direction || ''));
+    inner += _drawerRow('Confidence', _drawerFmtConfidence(llm.confidence));
+    if (llm.reasoning) inner += _drawerRow('Reasoning', _esc(llm.reasoning));
+    if (llm.cost_usd !== null && llm.cost_usd !== undefined && llm.cost_usd !== '') {
+        inner += _drawerRow('Cost (USD)', _esc(llm.cost_usd));
+    }
+    const levels = _drawerJsonBlock(llm.levels);
+    if (levels) inner += `<div class="drawer-row"><span class="drawer-label">Levels</span><span class="drawer-value">${levels}</span></div>`;
+    return _drawerSection('LLM Track', inner);
+}
+
+function _drawerSectionQuant(row) {
+    const q = row.quant || {};
+    let inner = '';
+    inner += _drawerRow('Direction', _esc(q.direction || ''));
+    inner += _drawerRow('Confidence', _drawerFmtConfidence(q.confidence));
+    if (q.cost_usd !== null && q.cost_usd !== undefined && q.cost_usd !== '') {
+        inner += _drawerRow('Cost (USD)', _esc(q.cost_usd));
+    }
+    const ind = _drawerJsonBlock(q.indicators);
+    if (ind) inner += `<div class="drawer-row"><span class="drawer-label">Indicators</span><span class="drawer-value">${ind}</span></div>`;
+    return _drawerSection('Quant Track', inner);
+}
+
+function _drawerSectionChartHacker(row) {
+    const ch = row.chart_hacker || {};
+    let inner = '';
+    if (ch.ai_agreement_score !== null && ch.ai_agreement_score !== undefined && ch.ai_agreement_score !== '') {
+        inner += _drawerRow('Agreement Score', _esc(ch.ai_agreement_score));
+    }
+    if (ch.ai_comment) inner += _drawerRow('Comment', _esc(ch.ai_comment));
+    const chart = _drawerJsonBlock(ch.chart_analysis);
+    if (chart) inner += `<div class="drawer-row"><span class="drawer-label">Chart</span><span class="drawer-value">${chart}</span></div>`;
+    const tt = _drawerJsonBlock(ch.trader_trades);
+    if (tt) inner += `<div class="drawer-row"><span class="drawer-label">Trader Trades</span><span class="drawer-value">${tt}</span></div>`;
+    const cht = _drawerJsonBlock(ch.chart_hacker_trades);
+    if (cht) inner += `<div class="drawer-row"><span class="drawer-label">CH Trades</span><span class="drawer-value">${cht}</span></div>`;
+    return _drawerSection('ChartHacker', inner);
+}
+
+function _drawerSectionTags(row) {
+    const t = row.tags || {};
+    const blocks = [
+        ['Pattern', _drawerTagsBlock(t.pattern)],
+        ['Setup', _drawerTagsBlock(t.setup)],
+        ['Regime', _drawerTagsBlock(t.regime)],
+        ['Session', _drawerTagsBlock(t.session)],
+    ];
+    const inner = blocks
+        .filter(([, html]) => html)
+        .map(([label, html]) => `<div class="drawer-row"><span class="drawer-label">${_esc(label)}</span><span class="drawer-value">${html}</span></div>`)
+        .join('');
+    return _drawerSection('Tags', inner);
+}
+
+function _drawerSectionThesis(row) {
+    const th = row.thesis || {};
+    let inner = '';
+    if (th.trader_stated) inner += _drawerRow('Trader', _esc(th.trader_stated));
+    if (th.llm_inferred) inner += _drawerRow('LLM', _esc(th.llm_inferred));
+    if (th.reason_agreement_score !== null && th.reason_agreement_score !== undefined && th.reason_agreement_score !== '') {
+        inner += _drawerRow('Reason Score', _esc(th.reason_agreement_score));
+    }
+    return _drawerSection('Thesis', inner);
+}
+
+function _drawerSectionNews(row) {
+    const n = row.news || {};
+    let inner = '';
+    if (n.headline) inner += _drawerRow('Headline', _esc(n.headline));
+    if (n.source) inner += _drawerRow('Source', _esc(n.source));
+    if (n.channel_name) inner += _drawerRow('Channel', _esc(n.channel_name));
+    if (n.author) inner += _drawerRow('Author', _esc(n.author));
+    if (n.collected_at) inner += _drawerRow('Collected', _drawerFmtTs(n.collected_at));
+    if (n.published_at) inner += _drawerRow('Published', _drawerFmtTs(n.published_at));
+    return _drawerSection('News', inner);
+}
+
+function _drawerSectionMedia(row) {
+    const m = row.media || {};
+    let inner = '';
+    if (m.media_type) inner += _drawerRow('Type', _esc(m.media_type));
+    if (m.source_url) inner += _drawerRow('Source URL', `<a href="${_esc(m.source_url)}" target="_blank" rel="noreferrer">link</a>`);
+    if (row.media_item_id) {
+        // URL context: use encodeURIComponent on the path segment, not _esc
+        // (which is for HTML attribute escaping). Numeric IDs are safe either
+        // way today, but this matches the codebase's other URL builders.
+        const mediaUrl = `api/media/${encodeURIComponent(String(row.media_item_id))}`;
+        inner += _drawerRow('Preview', `<img src="${_esc(mediaUrl)}" alt="media" style="max-width: 100%; border-radius: 4px;">`);
+    }
+    return _drawerSection('Media', inner);
+}
+
+function _drawerCard(row, idx) {
+    const heading = `Interpretation #${_esc(row.id)}`;
+    const sections = [
+        _drawerSectionConsensus(row),
+        _drawerSectionLLM(row),
+        _drawerSectionQuant(row),
+        _drawerSectionChartHacker(row),
+        _drawerSectionTags(row),
+        _drawerSectionThesis(row),
+        _drawerSectionNews(row),
+        _drawerSectionMedia(row),
+    ].join('');
+    return `<article class="drawer-card" data-idx="${idx}"><h2 class="drawer-card-title">${heading}</h2>${sections}</article>`;
+}
+
+function renderDrawer(rows, ctx = {}) {
+    const body = _drawerBodyEl();
+    if (!body) return;
+    if (!Array.isArray(rows) || !rows.length) {
+        const what = ctx.newsItemId !== null && ctx.newsItemId !== undefined
+            ? `news item #${ctx.newsItemId}`
+            : (ctx.interpId !== null && ctx.interpId !== undefined ? `interpretation #${ctx.interpId}` : 'this row');
+        body.innerHTML = `<div class="drawer-empty">No interpretations found for ${_esc(what)}.</div>`;
+        return;
+    }
+    body.innerHTML = rows.map((r, i) => _drawerCard(r, i)).join('');
+}
+
+function _drawerExtractIdsFromEvent(e) {
+    const el = e.target.closest('[data-interp-id], [data-news-item-id]');
+    if (!el) return null;
+    // Don't trigger when clicking nested links/buttons (anchors, source links).
+    if (e.target.closest('a, button')) return null;
+    const interpRaw = el.getAttribute('data-interp-id');
+    const newsRaw = el.getAttribute('data-news-item-id');
+    const interpId = interpRaw ? Number(interpRaw) : null;
+    const newsItemId = newsRaw ? Number(newsRaw) : null;
+    // Prefer news_item_id (returns the full timeline); fall back to interp id.
+    if (newsItemId && Number.isFinite(newsItemId)) {
+        return { newsItemId, interpId: null, sourceEl: el };
+    }
+    if (interpId && Number.isFinite(interpId)) {
+        return { newsItemId: null, interpId, sourceEl: el };
+    }
+    return null;
+}
+
+let _drawerWired = false;
+
+function _wireDrawerClicks() {
+    // Idempotent — DOMContentLoaded fires once today, but if any future code
+    // re-runs the bootstrap (hot-reload, soft-reinit) we must not stack
+    // duplicate document-level listeners. Per-element listeners are guarded
+    // with a dataset flag so re-rendering tab content also stays safe.
+    if (_drawerWired) return;
+    _drawerWired = true;
+
+    const containers = [
+        document.getElementById('news-feed-table'),
+        document.querySelector('#tab-signals .grid'),
+        document.querySelector('#tab-positions .grid'),
+        document.querySelector('#tab-interpretations .grid'),
+    ];
+    containers.forEach(c => {
+        if (!c || c.dataset.drawerWired === '1') return;
+        c.dataset.drawerWired = '1';
+        c.addEventListener('click', (e) => {
+            const ids = _drawerExtractIdsFromEvent(e);
+            if (!ids) return;
+            e.preventDefault();
+            openInterpretationDrawer(ids);
+        });
+    });
+
+    const closeBtn = document.getElementById('interp-drawer-close');
+    if (closeBtn && closeBtn.dataset.drawerWired !== '1') {
+        closeBtn.dataset.drawerWired = '1';
+        closeBtn.addEventListener('click', closeInterpretationDrawer);
+    }
+    const backdrop = _drawerBackdropEl();
+    if (backdrop && backdrop.dataset.drawerWired !== '1') {
+        backdrop.dataset.drawerWired = '1';
+        backdrop.addEventListener('click', closeInterpretationDrawer);
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        const drawer = _drawerEl();
+        if (drawer && !drawer.classList.contains('hidden')) {
+            closeInterpretationDrawer();
+        }
+    });
+}
+
 // Init
 window.addEventListener('DOMContentLoaded', () => {
     console.log("DOM Content Loaded. Initializing...");
@@ -1039,6 +1393,9 @@ window.addEventListener('DOMContentLoaded', () => {
             refresh();
         });
     }
+
+    // Phase X.5 — wire cross-tab interpretation drawer click delegation.
+    _wireDrawerClicks();
 
     // AUTH DISABLED PER USER REQUEST
     setToken("dev_token");
