@@ -1,0 +1,46 @@
+[
+  {
+    "path": "/root/.openclaw/workspace/rubicon_surgeon/TRADE_LOG.md",
+    "company": "rubicon_surgeon",
+    "agent": "surgeon",
+    "size_bytes": 96848,
+    "mtime_utc": "2026-04-24T10:37:33.206728+00:00",
+    "kind": "TRADE_LOG.md",
+    "status": "applied",
+    "entries_written": 1,
+    "renamed_to": "/root/.openclaw/workspace/rubicon_surgeon/TRADE_LOG.md.migrated"
+  },
+  {
+    "path": "/root/.openclaw/workspace/rubicon_surgeon/TRADE_STATE.md",
+    "company": "rubicon_surgeon",
+    "agent": "surgeon",
+    "size_bytes": 448,
+    "mtime_utc": "2026-04-24T10:37:33.206728+00:00",
+    "kind": "TRADE_STATE.md",
+    "status": "applied",
+    "entries_written": 1,
+    "renamed_to": "/root/.openclaw/workspace/rubicon_surgeon/TRADE_STATE.md.migrated"
+  },
+  {
+    "path": "/root/.openclaw/workspace/rubicon_surgeon2/TRADE_LOG.md",
+    "company": "rubicon_surgeon2",
+    "agent": "surgeon",
+    "size_bytes": 466,
+    "mtime_utc": "2026-04-20T09:47:20.744446+00:00",
+    "kind": "TRADE_LOG.md",
+    "status": "applied",
+    "entries_written": 1,
+    "renamed_to": "/root/.openclaw/workspace/rubicon_surgeon2/TRADE_LOG.md.migrated"
+  },
+  {
+    "path": "/root/.openclaw/workspace/rubicon_surgeon2/TRADE_STATE.md",
+    "company": "rubicon_surgeon2",
+    "agent": "surgeon",
+    "size_bytes": 972,
+    "mtime_utc": "2026-04-20T09:47:16.486435+00:00",
+    "kind": "TRADE_STATE.md",
+    "status": "applied",
+    "entries_written": 1,
+    "renamed_to": "/root/.openclaw/workspace/rubicon_surgeon2/TRADE_STATE.md.migrated"
+  }
+]
