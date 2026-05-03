@@ -10,7 +10,10 @@ const state = {
     selectedTraderId: null,
     queueWS: null,
     learningWindow: '1m',     // PHASE_Y §11 Q3: default 30d shown as "1M"
-    learningDimension: ''     // memory-feed dimension filter (empty = all)
+    learningDimension: '',    // memory-feed dimension filter (empty = all)
+    newsWindow: '24h',        // PHASE_X.4 — news feed window: 24h / 7d / 30d
+    newsSource: '',           // news source filter (empty = all)
+    newsHasMedia: ''          // tri-state: '' (any), 'true', 'false'
 };
 
 async function api(path, opts = {}) {
@@ -142,6 +145,9 @@ function renderTab(tabId, snap) {
             break;
         case 'learning':
             renderLearning();
+            break;
+        case 'news':
+            renderNews();
             break;
     }
 }
@@ -473,6 +479,136 @@ function renderAgentBrainCards(rows) {
             </div>
         </div>`;
     }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Phase X.4 — News Feed tab
+// ---------------------------------------------------------------------------
+
+// UI label → query value. Mirrors shared/dashboard/news_routes.py
+// _WINDOW_LABEL_TO_DAYS so the JS and the server agree on labels.
+const NEWS_WINDOW_LABELS = ['24h', '7d', '30d'];
+const NEWS_DEFAULT_LIMIT = 100;       // mirrors news_provider.NEWS_DEFAULT_LIMIT
+const NEWS_TABLE_COLSPAN = 6;         // matches index.html news-feed-table cols
+
+function _highlightNewsWindow() {
+    document.querySelectorAll('#news-window-tabs .window-tab').forEach(el => {
+        el.classList.toggle('active', el.dataset.window === state.newsWindow);
+    });
+}
+
+function _newsSourcePill(source) {
+    // Map source label to a pill class for visual differentiation.
+    const s = (source || '').toLowerCase();
+    if (s === 'discord' || s === 'telegram') return 'ok';
+    if (s === 'twitter' || s === 'rss') return 'warn';
+    if (s === 'manual') return 'bad';
+    return '';
+}
+
+function _sentimentClass(sentiment) {
+    // Optional sentiment scoring → pill colour. Provider returns either a
+    // numeric score or a string label (positive/negative/neutral) — handle both.
+    if (sentiment === null || sentiment === undefined || sentiment === '') return '';
+    const n = Number(sentiment);
+    if (isFinite(n)) {
+        if (n > 0.15) return 'ok';
+        if (n < -0.15) return 'bad';
+        return 'warn';
+    }
+    const s = String(sentiment).toLowerCase();
+    if (s === 'positive' || s === 'bullish') return 'ok';
+    if (s === 'negative' || s === 'bearish') return 'bad';
+    return 'warn';
+}
+
+function _fmtSentiment(sentiment) {
+    if (sentiment === null || sentiment === undefined || sentiment === '') return '—';
+    const n = Number(sentiment);
+    if (isFinite(n)) {
+        const sign = n > 0 ? '+' : '';
+        return `${sign}${n.toFixed(2)}`;
+    }
+    return String(sentiment);
+}
+
+function _newsHeadlineCell(row) {
+    // Combine headline + truncated content snippet into one cell. The
+    // provider already truncates content server-side; we just escape and wrap.
+    const headline = _esc(row.headline || '—');
+    const snippet = row.content ? _esc(row.content) : '';
+    const channel = row.channel_name ? `<span class="muted">${_esc(row.channel_name)}</span>` : '';
+    const author = row.author ? `<span class="muted">${_esc(row.author)}</span>` : '';
+    const meta = [channel, author].filter(Boolean).join(' · ');
+    return `
+        <div class="feed-headline">${headline}</div>
+        ${snippet ? `<div class="feed-content">${snippet}</div>` : ''}
+        ${meta ? `<div class="feed-meta">${meta}</div>` : ''}`;
+}
+
+function renderNewsRows(rows) {
+    // Populate the news-feed table body and the row-count badge.
+    const tbody = document.querySelector('#news-feed-table tbody');
+    const countEl = document.getElementById('news-row-count');
+    if (!tbody) return;
+    if (!Array.isArray(rows) || !rows.length) {
+        tbody.innerHTML = `<tr><td colspan="${NEWS_TABLE_COLSPAN}" class="muted">No news in this window.</td></tr>`;
+        if (countEl) countEl.textContent = '0 items';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => {
+        const ts = r.collected_at ? new Date(r.collected_at).toLocaleString() : '—';
+        const source = r.source || '—';
+        const srcCls = _newsSourcePill(source);
+        const instruments = Array.isArray(r.instruments) && r.instruments.length
+            ? r.instruments.slice(0, 6).map(s => `<span class="pill">${_esc(s)}</span>`).join(' ')
+            : '<span class="muted">—</span>';
+        const sentCls = _sentimentClass(r.sentiment);
+        const sentTxt = _fmtSentiment(r.sentiment);
+        const mediaCount = Number(r.media_count || 0);
+        const mediaTxt = r.has_media
+            ? `<span class="pill ok">${mediaCount || 1}</span>`
+            : '<span class="muted">—</span>';
+        return `
+        <tr class="feed-row">
+            <td class="muted" style="white-space: nowrap;">${_esc(ts)}</td>
+            <td><span class="pill ${srcCls}">${_esc(source)}</span></td>
+            <td>${_newsHeadlineCell(r)}</td>
+            <td>${instruments}</td>
+            <td><span class="pill ${sentCls}">${_esc(sentTxt)}</span></td>
+            <td>${mediaTxt}</td>
+        </tr>`;
+    }).join('');
+    if (countEl) countEl.textContent = `${rows.length} items`;
+}
+
+async function renderNews() {
+    _highlightNewsWindow();
+    const tbody = document.querySelector('#news-feed-table tbody');
+    // Always replace the body with "Loading…" before fetching — the default
+    // markup ships one placeholder row, so a `children.length` check would
+    // never fire on subsequent refreshes and stale rows would linger.
+    if (tbody) {
+        tbody.innerHTML = `<tr><td colspan="${NEWS_TABLE_COLSPAN}" class="muted">Loading…</td></tr>`;
+    }
+    const params = new URLSearchParams();
+    params.set('window', state.newsWindow);
+    if (state.newsSource) params.set('source', state.newsSource);
+    if (state.newsHasMedia !== '') params.set('has_media', state.newsHasMedia);
+    params.set('limit', String(NEWS_DEFAULT_LIMIT));
+    let res;
+    try {
+        res = await api(`/api/news/feed?${params.toString()}`);
+    } catch (e) {
+        console.error('News feed fetch failed', e);
+        if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="${NEWS_TABLE_COLSPAN}" class="muted">Unable to load news.</td></tr>`;
+        }
+        const countEl = document.getElementById('news-row-count');
+        if (countEl) countEl.textContent = '—';
+        return;
+    }
+    renderNewsRows((res && res.rows) || []);
 }
 
 function renderOverview(snap) {
@@ -867,6 +1003,32 @@ window.addEventListener('DOMContentLoaded', () => {
         dimSel.addEventListener('change', () => {
             state.learningDimension = dimSel.value || '';
             if (state.currentTab === 'learning') renderLearning();
+        });
+    }
+
+    // Phase X.4 — News tab controls.
+    document.querySelectorAll('#news-window-tabs .window-tab').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            const w = el.dataset.window;
+            if (!NEWS_WINDOW_LABELS.includes(w)) return;
+            state.newsWindow = w;
+            _highlightNewsWindow();
+            if (state.currentTab === 'news') renderNews();
+        });
+    });
+    const newsSrcSel = document.getElementById('news-source-filter');
+    if (newsSrcSel) {
+        newsSrcSel.addEventListener('change', () => {
+            state.newsSource = newsSrcSel.value || '';
+            if (state.currentTab === 'news') renderNews();
+        });
+    }
+    const newsMediaSel = document.getElementById('news-media-filter');
+    if (newsMediaSel) {
+        newsMediaSel.addEventListener('change', () => {
+            state.newsHasMedia = newsMediaSel.value || '';
+            if (state.currentTab === 'news') renderNews();
         });
     }
 

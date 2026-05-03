@@ -57,6 +57,7 @@
         <a data-tab="interpretations">Interpretations</a>
         <a data-tab="queue">Live Queue</a>
         <a data-tab="learning">Learning</a>
+        <a data-tab="news">News</a>
         <a data-tab="trader-drill" class="hidden">Trader Drill</a>
     </nav>
 
@@ -263,6 +264,61 @@
                             <div class="muted">Loading…</div>
                         </div>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Phase X.4 — News Feed Tab -->
+        <div id="tab-news" class="tab-content">
+            <div class="card" style="margin-bottom: 16px;">
+                <h2>
+                    News Feed
+                    <span class="window-tabs" id="news-window-tabs">
+                        <a class="window-tab" data-window="24h">24h</a>
+                        <a class="window-tab" data-window="7d">7d</a>
+                        <a class="window-tab" data-window="30d">30d</a>
+                    </span>
+                </h2>
+                <div class="row" style="gap: 12px; flex-wrap: wrap; align-items: center;">
+                    <label class="muted" style="font-size: 12px;">Source
+                        <select id="news-source-filter" class="input" style="margin-left: 6px;">
+                            <option value="">All sources</option>
+                            <option value="discord">Discord</option>
+                            <option value="telegram">Telegram</option>
+                            <option value="twitter">Twitter</option>
+                            <option value="rss">RSS</option>
+                            <option value="web">Web</option>
+                            <option value="manual">Manual</option>
+                        </select>
+                    </label>
+                    <label class="muted" style="font-size: 12px;">Media
+                        <select id="news-media-filter" class="input" style="margin-left: 6px;">
+                            <option value="">Any</option>
+                            <option value="true">With media</option>
+                            <option value="false">Text only</option>
+                        </select>
+                    </label>
+                    <span class="muted" id="news-row-count" style="margin-left: auto; font-size: 12px;">—</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="scroll" style="max-height: 640px;">
+                    <table id="news-feed-table">
+                        <thead>
+                            <tr>
+                                <th>When</th>
+                                <th>Source</th>
+                                <th>Headline</th>
+                                <th>Instruments</th>
+                                <th>Sentiment</th>
+                                <th>Media</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="6" class="muted">Loading…</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>

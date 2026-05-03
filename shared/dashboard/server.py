@@ -406,6 +406,12 @@ def build_app(
         )
         attach_learning_routes(app, prefix=prefix)
 
+        # Phase X.4 — mount news-feed endpoints under both prefixes.
+        from shared.dashboard.news_routes import (
+            attach_routes as attach_news_routes,
+        )
+        attach_news_routes(app, prefix=prefix)
+
     # Phase 5 — mount /manage/* panel routes
     from shared.intelligence.manage_panel.server_routes import attach_routes
     attach_routes(app)
