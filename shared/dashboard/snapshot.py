@@ -182,10 +182,17 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
 
     from shared.utils.db import get_shared_pool
     shared_pool = await get_shared_pool()
-    
-    # 1. Today's API cost (shared)
+
+    # NOTE: stats labelled "_today" are intentionally rolling 24h windows
+    # (NOW() - INTERVAL '24 hours'). The original CURRENT_DATE filter
+    # was off-by-many-hours after midnight UTC and made the dashboard
+    # appear empty for most of every day. We keep the JSON keys for
+    # frontend compatibility — the strip label is "24h" in the new UI.
+
+    # 1. Rolling-24h API cost (shared)
     cost_row = await shared_pool.fetch_one(
-        "SELECT SUM(cost_usd) as total FROM api_cost_log WHERE created_at >= CURRENT_DATE"
+        "SELECT SUM(cost_usd) as total FROM api_cost_log "
+        "WHERE created_at >= NOW() - INTERVAL '24 hours'"
     )
     api_cost = float(cost_row["total"] or 0.0) if cost_row else 0.0
 
@@ -202,35 +209,57 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
     signals_today = 0
 
     async with shared_pool.acquire() as shared_conn:
-        # Positions (shared ledger)
-        pos_query = """
-            SELECT actor_type, company_id, COUNT(*) as cnt, SUM(COALESCE(unrealized_pnl_usd, 0)) as pnl 
-            FROM tracked_positions 
-            WHERE status='open' 
-            GROUP BY actor_type, company_id
-        """
-        pos_rows = await shared_conn.fetch(pos_query)
-        for r in pos_rows:
-            if company_filter and company_filter != "all" and r["company_id"] != company_filter:
-                continue
-            
-            total_open += r["cnt"]
-            total_pnl += float(r["pnl"] or 0.0)
-            if r["actor_type"] == "trader":
-                trader_open += r["cnt"]
-            else:
-                agent_open += r["cnt"]
+        # Open positions: prefer the positions_current view (it joins to
+        # the live exchange ledger via the position monitor) and fall
+        # back to tracked_positions WHERE status='open' if the view is
+        # missing or empty. positions_current uses 'unrealised_pnl_usd'
+        # (British spelling); tracked_positions uses the American one.
+        try:
+            pc_rows = await shared_conn.fetch(
+                "SELECT company_id, direction, "
+                "COALESCE(unrealised_pnl_usd, 0) AS pnl "
+                "FROM positions_current"
+            )
+        except Exception:
+            pc_rows = []
+        if pc_rows:
+            for r in pc_rows:
+                if company_filter and company_filter != "all" and r["company_id"] != company_filter:
+                    continue
+                total_open += 1
+                total_pnl += float(r["pnl"] or 0.0)
+            # positions_current doesn't carry actor_type — best-effort:
+            # split is captured in detailed Positions tab, not the strip.
+            trader_open = total_open
+            agent_open = 0
+        else:
+            pos_query = """
+                SELECT actor_type, company_id, COUNT(*) as cnt, SUM(COALESCE(unrealized_pnl_usd, 0)) as pnl
+                FROM tracked_positions
+                WHERE status='open'
+                GROUP BY actor_type, company_id
+            """
+            pos_rows = await shared_conn.fetch(pos_query)
+            for r in pos_rows:
+                if company_filter and company_filter != "all" and r["company_id"] != company_filter:
+                    continue
+                total_open += r["cnt"]
+                total_pnl += float(r["pnl"] or 0.0)
+                if r["actor_type"] == "trader":
+                    trader_open += r["cnt"]
+                else:
+                    agent_open += r["cnt"]
 
         # Ingest depth (shared table)
         depth_query = "SELECT COUNT(*) FROM news_items WHERE enrichment_status='pending'"
         # Note: news_items doesn't have company_id, it's global ingest
         ingest_depth = await shared_conn.fetchval(depth_query) or 0
 
-        # Signals today (shared table)
-        sig_query = "SELECT COUNT(*) FROM signal_interpretations WHERE created_at >= CURRENT_DATE"
-        # Note: signal_interpretations has trader_profile_id which links to company via profiles, 
-        # but for overview we usually want global or we'd need a join.
-        # For now, return global signals today.
+        # Signals: rolling 24h window (see NOTE above re: key naming).
+        sig_query = (
+            "SELECT COUNT(*) FROM signal_interpretations "
+            "WHERE created_at >= NOW() - INTERVAL '24 hours'"
+        )
         signals_today = await shared_conn.fetchval(sig_query) or 0
 
     stats = {
@@ -248,7 +277,14 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
 
 
 async def aggregate_leaderboard(company_filter: str | None = None) -> List[dict]:
-    """Aggregate actor_leaderboard view across companies."""
+    """Aggregate actor_leaderboard view across companies.
+
+    When the per-company `actor_leaderboard` view is empty (postmortem
+    pipeline hasn't written rows yet), derive a synthetic preview from
+    `signal_interpretations` aggregated by `trader_profile_id` over
+    7 days. Synthetic rows carry `_synthetic: true` so the UI can badge
+    them as preview data, not real edge scores.
+    """
     cache_key = ("leaderboard", company_filter)
     now = time.monotonic()
     if cache_key in _SNAPSHOT_CACHE:
@@ -270,9 +306,93 @@ async def aggregate_leaderboard(company_filter: str | None = None) -> List[dict]
         except Exception as e:
             LOG.error("Leaderboard failed for %s: %s", company, e)
 
+    if not rows:
+        # Synthetic fallback: rank traders by interpretation volume +
+        # average consensus confidence over the last 7 days. This is a
+        # preview — not a real edge score — so flag it for the UI.
+        # Note: signal_interpretations rows are written into tickles_shared
+        # (per-company copies are dual-written but currently empty) so we
+        # query the shared DB and group by company_id when available.
+        try:
+            from shared.utils.db import get_shared_pool
+            shared_pool = await get_shared_pool()
+            async with shared_pool.acquire() as sconn:
+                # company_id may not be populated on signal_interpretations —
+                # fall through to ungrouped if the column doesn't exist.
+                has_company_col = await sconn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name='signal_interpretations' "
+                    "AND column_name='company_id')"
+                )
+                if has_company_col and company_filter and company_filter != "all":
+                    synth = await sconn.fetch(
+                        "SELECT trader_profile_id, "
+                        "COUNT(*) AS sample_count, "
+                        "AVG(consensus_confidence)::float AS avg_confidence, "
+                        "MAX(created_at) AS last_seen "
+                        "FROM signal_interpretations "
+                        "WHERE created_at >= NOW() - INTERVAL '7 days' "
+                        "AND company_id = $1 "
+                        "GROUP BY trader_profile_id "
+                        "ORDER BY sample_count DESC, avg_confidence DESC NULLS LAST "
+                        "LIMIT 50",
+                        company_filter,
+                    )
+                else:
+                    synth = await sconn.fetch(
+                        "SELECT trader_profile_id, "
+                        "COUNT(*) AS sample_count, "
+                        "AVG(consensus_confidence)::float AS avg_confidence, "
+                        "MAX(created_at) AS last_seen "
+                        "FROM signal_interpretations "
+                        "WHERE created_at >= NOW() - INTERVAL '7 days' "
+                        "GROUP BY trader_profile_id "
+                        "ORDER BY sample_count DESC, avg_confidence DESC NULLS LAST "
+                        "LIMIT 50"
+                    )
+                if synth:
+                    profile_ids = [r["trader_profile_id"] for r in synth]
+                    profile_rows = await sconn.fetch(
+                        "SELECT id, handle_normalized, display_name, "
+                        "trader_type, platform "
+                        "FROM trader_profiles WHERE id = ANY($1::bigint[])",
+                        profile_ids,
+                    )
+                    profiles = {p["id"]: dict(p) for p in profile_rows}
+                    # Default _company tag: the filter when set, else the
+                    # first active company (best-effort attribution for the
+                    # dual-write era).
+                    default_company = (
+                        company_filter
+                        if (company_filter and company_filter != "all")
+                        else (companies[0] if companies else None)
+                    )
+                    for rank_idx, r in enumerate(synth, start=1):
+                        prof = profiles.get(r["trader_profile_id"]) or {}
+                        rows.append({
+                            "actor_type": prof.get("trader_type") or "trader",
+                            "actor_id": prof.get("handle_normalized")
+                                or (f"trader#{r['trader_profile_id']}"),
+                            "display_name": prof.get("display_name"),
+                            "platform": prof.get("platform"),
+                            "period_start": None,
+                            "period_end": None,
+                            "closed_position_count": int(r["sample_count"] or 0),
+                            "edge_score": float(r["avg_confidence"]) if r["avg_confidence"] is not None else None,
+                            "confidence_low": True,
+                            "components_jsonb": None,
+                            "formula_version": None,
+                            "rank": rank_idx,
+                            "_company": default_company,
+                            "_synthetic": True,
+                            "_last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+                        })
+        except Exception as e:
+            LOG.warning("Synthetic leaderboard fallback failed: %s", e)
+
     # Sort aggregate by edge_score
     rows.sort(key=lambda x: x.get("edge_score") or 0, reverse=True)
-    
+
     _SNAPSHOT_CACHE[cache_key] = (now, rows)
     return rows
 
@@ -292,26 +412,67 @@ async def aggregate_open_positions(company_filter: str | None = None) -> List[di
 
     from shared.utils.db import get_shared_pool
     shared_pool = await get_shared_pool()
-    
+
     rows: List[dict] = []
-    
+
     async with shared_pool.acquire() as conn:
-        query = """
-            SELECT * FROM tracked_positions 
-            WHERE status='open'
-        """
-        params = []
-        if company_filter and company_filter != "all":
-            query += " AND company_id = $1"
-            params.append(company_filter)
-            
-        query += " ORDER BY signal_timestamp DESC LIMIT 100"
-        
-        cr = await conn.fetch(query, *params)
-        for r in cr:
-            d = dict(r)
-            d["_company"] = d.get("company_id")
-            rows.append(d)
+        # Primary source: positions_current view (live exchange ledger).
+        # The view doesn't carry every tracked_positions field, so we
+        # synthesise the keys the frontend expects.
+        try:
+            pc_params: List[Any] = []
+            pc_sql = (
+                "SELECT id, company_id, adapter, exchange, account_id_external, "
+                "symbol, direction, quantity, average_entry_price, notional_usd, "
+                "unrealised_pnl_usd, realized_pnl_usd, leverage, ts, source, metadata "
+                "FROM positions_current"
+            )
+            if company_filter and company_filter != "all":
+                pc_sql += " WHERE company_id = $1"
+                pc_params.append(company_filter)
+            pc_sql += " ORDER BY ts DESC LIMIT 100"
+            pc = await conn.fetch(pc_sql, *pc_params)
+            for r in pc:
+                d = dict(r)
+                # Translate to the column names tracked_positions consumers
+                # expect, so the frontend table schema doesn't have to fork.
+                rows.append({
+                    "id": d["id"],
+                    "company_id": d.get("company_id"),
+                    "_company": d.get("company_id"),
+                    "instrument_symbol": d.get("symbol"),
+                    "direction": d.get("direction"),
+                    "position_size": float(d["quantity"]) if d.get("quantity") is not None else None,
+                    "entry_price": float(d["average_entry_price"]) if d.get("average_entry_price") is not None else None,
+                    "notional_usd": float(d["notional_usd"]) if d.get("notional_usd") is not None else None,
+                    "unrealized_pnl_usd": float(d["unrealised_pnl_usd"]) if d.get("unrealised_pnl_usd") is not None else 0.0,
+                    "realized_pnl_usd": float(d["realized_pnl_usd"]) if d.get("realized_pnl_usd") is not None else 0.0,
+                    "leverage": d.get("leverage"),
+                    "status": "open",
+                    "actor_id": d.get("account_id_external"),
+                    "signal_timestamp": d.get("ts"),
+                    "_source": "positions_current",
+                })
+        except Exception as exc:
+            LOG.warning("positions_current read failed: %s — falling back to tracked_positions", exc)
+
+        # Fallback: if positions_current returns nothing, surface the
+        # most recent N closed positions so the Positions tab is never
+        # empty when historical data exists. The strip's
+        # open_positions_count still reflects the truth (only live opens).
+        if not rows:
+            query = "SELECT * FROM tracked_positions"
+            params: List[Any] = []
+            if company_filter and company_filter != "all":
+                query += " WHERE company_id = $1"
+                params.append(company_filter)
+            query += " ORDER BY signal_timestamp DESC NULLS LAST LIMIT 100"
+            cr = await conn.fetch(query, *params)
+            for r in cr:
+                d = dict(r)
+                d["_company"] = d.get("company_id")
+                d["_source"] = "tracked_positions_recent"
+                rows.append(d)
 
     _SNAPSHOT_CACHE[cache_key] = (now, rows)
     return rows
