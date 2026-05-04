@@ -1399,31 +1399,80 @@ async def write_signal_interpretation(
 # ---------------------------------------------------------------------------
 # Symbol extraction from text — finds tickers like $BTC, BTCUSDT, ETH/USDT
 # ---------------------------------------------------------------------------
+_FOREX_3LETTER = "EUR|GBP|JPY|CHF|CAD|AUD|NZD|USD"
+_INDEX_PATTERN = _re.compile(r"\b(NAS|SPX|US30|US100|NQ|DJI|DAX|FTSE)\d*\b")
 _TICKER_PATTERNS = [
-    _re.compile(r"\b([A-Z]{2,6})/([A-Z]{3,5})\b"),   # BTC/USDT, ETH/USD
-    _re.compile(r"\b([A-Z]{2,6})(USDT|USD|BUSD)\b"),  # BTCUSDT, ETHBUSD
-    _re.compile(r"\$([A-Z]{2,6})\b"),                   # $BTC, $SOL
-    _re.compile(r"\b(XAU|XAG)(USD)\b"),                 # XAUUSD, XAGUSD
-    _re.compile(r"\b(NAS|SPX|US30|US100|NQ)\d*\b"),     # NAS100, SPX500
+    _re.compile(r"\b([A-Z]{2,6})/([A-Z]{3,5})\b"),                # BTC/USDT, ETH/USD
+    # Forex pair (no slash) — narrow to the eight majors so USDJPY,
+    # EURUSD, GBPCHF etc. resolve without colliding with crypto-quote form.
+    _re.compile(rf"\b({_FOREX_3LETTER})({_FOREX_3LETTER})\b"),
+    _re.compile(r"\b([A-Z]{2,6})(USDT|USD|BUSD)\b"),               # BTCUSDT, ETHBUSD
+    _re.compile(r"\$([A-Z]{2,6})\b"),                                # $BTC, $SOL
+    _re.compile(r"\b(XAU|XAG)(USD)\b"),                              # XAUUSD, XAGUSD
 ]
 
-# Common crypto/forex symbols we recognise
+# Common crypto/forex symbols we recognise. Forex bases (EUR/GBP/JPY/etc.)
+# are included so EURUSD, GBPUSD, USDJPY etc. resolve via the dedicated
+# forex pattern — without them they previously fell through to the
+# LLM-vision fallback and got tagged BTC by default.
 _KNOWN_BASES = {
+    # Crypto
     "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "DOT", "AVAX", "LINK",
     "MATIC", "BNB", "LTC", "UNI", "AAVE", "NEAR", "APT", "SUI", "FTM",
     "OP", "ARB", "INJ", "TIA", "SEI", "JUP", "WIF", "PEPE", "BONK",
-    "XAU", "XAG", "NAS", "SPX", "AAPL", "TSLA", "MSFT", "NVDA", "AMD",
+    # Wrapped / staked / stablecoins (treated as crypto bases too)
+    "WBTC", "WETH", "STETH", "USDC", "DAI", "TUSD",
+    # Forex majors and minors
+    "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "USD",
+    # Metals + selected equities. Indices live in _INDEX_PATTERN — they
+    # use their own quote convention (XAU/USD, NAS100 etc.) and shouldn't
+    # be USDT-defaulted by the bare-base path.
+    "XAU", "XAG", "AAPL", "TSLA", "MSFT", "NVDA", "AMD",
+}
+
+# Bare-word alias map for headlines that mention an instrument by name
+# without a ticker decoration ("Gold breaks out", "ETH dropping",
+# "SOL pumping"). Only consulted when the regex patterns find nothing.
+# Keep narrow — false positives mis-tag interpretations.
+_BARE_WORD_ALIASES = {
+    "GOLD": "XAU/USD",
+    "SILVER": "XAG/USD",
+    "OIL": "WTI/USD",
+    "BRENT": "BRENT/USD",
+    "BITCOIN": "BTC/USDT",
+    "ETHEREUM": "ETH/USDT",
+    "SOLANA": "SOL/USDT",
+}
+
+# Currencies whose pair should NOT default to USDT (forex doesn't use it).
+_FOREX_BASES = {"EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "USD"}
+
+# Standalone crypto bases — mentioned bare ("ETH dropped", "SOL pumping")
+# get a USDT default. Restrict to liquid majors so we don't misfire on
+# ambiguous 3-letter words.
+_BARE_CRYPTO_BASES = {
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "DOT", "AVAX", "LINK",
+    "BNB", "LTC", "MATIC", "UNI", "AAVE", "NEAR", "APT", "SUI",
 }
 
 
 def _extract_symbol_from_text(text: str) -> Optional[str]:
     """Try to extract a trading symbol from free text.
 
-    Returns canonical slash form (e.g. 'BTC/USDT') or None.
+    Returns canonical slash form (e.g. 'BTC/USDT', 'EUR/USD', 'XAU/USD')
+    or ``None`` when no recognised symbol is present. Indices and
+    out-of-band markets return ``None`` here — they're routed by
+    callers that already know the venue.
     """
     if not text:
         return None
     upper = text.upper()
+
+    # Index symbols (NAS100, SPX500, etc.) shouldn't be coerced into a
+    # USDT pair — return None so callers route them to their own venue.
+    if _INDEX_PATTERN.search(upper):
+        return None
+
     for pat in _TICKER_PATTERNS:
         m = pat.search(upper)
         if m:
@@ -1434,8 +1483,22 @@ def _extract_symbol_from_text(text: str) -> Optional[str]:
                     return f"{base}/{quote}"
             elif len(groups) == 1:
                 base = groups[0]
-                if base in _KNOWN_BASES:
-                    return f"{base}/USDT"  # default quote for crypto
+                if base in _KNOWN_BASES and base not in _FOREX_BASES:
+                    # Forex bases alone (`$EUR`) are ambiguous — skip.
+                    return f"{base}/USDT"
+
+    # Bare-word fallback (only when nothing above matched).
+    # Walk word-by-word so multi-word headlines hit the alias map first
+    # ("Gold breaks 2400") before falling to bare crypto bases ("ETH down 4%").
+    for raw in _re.findall(r"[A-Z]{3,8}", upper):
+        if raw in _BARE_WORD_ALIASES:
+            return _BARE_WORD_ALIASES[raw]
+        if raw in _BARE_CRYPTO_BASES:
+            return f"{raw}/USDT"
+        if raw in _FOREX_BASES:
+            # Bare forex base alone is too ambiguous (could be USD context
+            # in any sentence). Skip — only resolve forex via paired regex.
+            continue
     return None
 
 
@@ -2034,6 +2097,12 @@ class InterpretationService:
         # --- Post-LLM instrument resolution ---
         # If the collector didn't provide an instrument, use what the LLM
         # identified from the chart image. This replaces the old F8 hard-fail.
+        #
+        # TODO(dashboard-rebuild D2.4): the chart-vision prompt template
+        # (around line 656) skews toward crypto and tags ambiguous charts
+        # as BTC by default. The text-side fixes here cover headlines,
+        # but the LLM-vision branch still needs a prompt-bias pass.
+        # Re-tagging the existing 446 mistagged rows is out of scope.
         if symbol_from_llm and llm_result and llm_result.instrument:
             llm_instrument = llm_result.instrument.strip().upper()
             if llm_instrument and llm_instrument != "UNKNOWN":
