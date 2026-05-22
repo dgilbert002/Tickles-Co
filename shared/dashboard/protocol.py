@@ -99,6 +99,8 @@ class DashboardSnapshot:
     signals_today_pct_change: float = 0.0
     api_cost_today_usd: float = 0.0
     api_cost_monthly_pct: float = 0.0
+    budget_limit_usd: float = 100.0
+    budget_remaining_usd: float = 100.0
     open_positions_count: int = 0
     open_positions_unrealized_pnl: float = 0.0
     open_positions_trader_count: int = 0

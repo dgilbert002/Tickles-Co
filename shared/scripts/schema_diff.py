@@ -26,7 +26,7 @@ NOISE_PATTERNS = [
     re.compile(r"^-- Dumped (from|by) .*$", re.MULTILINE),
     re.compile(r"^-- Started on .*$", re.MULTILINE),
     re.compile(r"^-- Completed on .*$", re.MULTILINE),
-    re.compile(r"OWNER TO \w+;", re.MULTILINE),
+    re.compile(r"^ALTER .* OWNER TO .*$", re.MULTILINE),
     re.compile(r"^SET .*$", re.MULTILINE),
     re.compile(r"^SELECT pg_catalog\..*$", re.MULTILINE),
     re.compile(r"^--\s*$", re.MULTILINE), # Empty comments

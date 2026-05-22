@@ -1,0 +1,1719 @@
+/* shared/dashboard/static/app.js */
+console.log("Dashboard JS loading...");
+
+const state = {
+    token: localStorage.getItem("tickles_token") || null,
+    currentTab: 'overview',
+    companyFilter: 'all',
+    autoRefresh: true,
+    selectedTraderId: null,
+    queueWS: null,
+    priceFeedWS: null,      // Phase 7 — WebSocket to price feed bridge
+    learningWindow: '1m',
+    learningDimension: '',
+    newsWindow: '30d',
+    newsSource: '',
+    newsHasMedia: '',
+    configSnapshot: null,
+    configSearch: '',
+    lastFetched: {},      // tab -> timestamp
+    userInteracting: false,
+    sidebarCollapsed: localStorage.getItem("sidebar_collapsed") === "true"
+};
+
+// --- API Helper ---
+async function api(path, opts = {}) {
+    const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+    const skipCompanyFilter = opts.skipCompanyFilter === true;
+
+    const cleanPath = path.startsWith('/') ? path.slice(1) : path;
+    const url = new URL(cleanPath, document.baseURI);
+    if (!skipCompanyFilter && state.companyFilter && state.companyFilter !== 'all') {
+        url.searchParams.set('company', state.companyFilter);
+    }
+
+    const resp = await fetch(url, Object.assign({ headers }, opts));
+    const body = await resp.json();
+    if (!resp.ok) throw body;
+    return body;
+}
+
+function setToken(t) {
+    state.token = t;
+    if (t) localStorage.setItem("tickles_token", t);
+    else localStorage.removeItem("tickles_token");
+}
+
+async function deletePosition(id) {
+    if (!confirm(`Delete position #${id}? This will set status to 'deleted'.`)) return;
+    try {
+        const resp = await fetch(`/api/positions/${id}`, { method: 'DELETE' });
+        const body = await resp.json();
+        if (!resp.ok) {
+            alert(`Delete failed: ${body.error || resp.status}`);
+            return;
+        }
+        console.log('Position deleted:', body);
+        triggerRefresh('positions');
+    } catch (e) {
+        console.error('Delete position error:', e);
+        alert('Delete failed: network error');
+    }
+}
+
+// --- Layout Utilities ---
+function showSection(id) {
+    document.getElementById('app').classList.add('hidden');
+    const target = document.getElementById(id);
+    if (target) target.classList.remove('hidden');
+}
+
+function switchTab(tabId, params = {}) {
+    state.currentTab = tabId;
+
+    const drillLink = document.querySelector('.sidebar-nav a[data-tab="trader-drill"]');
+    if (tabId === 'trader-drill') {
+        drillLink.classList.remove('hidden');
+        if (params.traderId) state.selectedTraderId = params.traderId;
+    } else if (!state.selectedTraderId) {
+        drillLink.classList.add('hidden');
+    }
+
+    document.querySelectorAll('.sidebar-nav a').forEach(a => {
+        a.classList.toggle('active', a.dataset.tab === tabId);
+    });
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `tab-${tabId}`);
+    });
+
+    const titleMap = {
+        'overview': 'Overview',
+        'positions': 'Open Positions',
+        'signals': 'Recent Signals',
+        'interpretations': 'Interpretations',
+        'leaderboard': 'Leaderboard',
+        'news': 'News Feed',
+        'queue': 'Live Queue',
+        'learning': 'Learning',
+        'agents': 'Agents',
+        'competitions': 'Competitions',
+        'config': 'Config',
+        'trader-drill': 'Trader Drill'
+    };
+    document.getElementById('current-tab-title').textContent = titleMap[tabId] || 'Tickles';
+
+    if (tabId === 'queue') connectQueueWS();
+    else if (state.queueWS) { state.queueWS.close(); state.queueWS = null; }
+
+    // Phase 7 — connect price feed WS on positions/signals, close elsewhere
+    if (tabId === 'positions' || tabId === 'signals') connectPriceFeedWS();
+    else closePriceFeedWS();
+
+    triggerRefresh(tabId);
+}
+
+// --- Refresh Registry (Phase D4) ---
+const REFRESH_REGISTRY = {
+    'stats': { cadence: 10000, fetch: () => api('/api/snapshot'), apply: renderStats },
+    'overview': { cadence: 30000, fetch: () => api('/api/snapshot'), apply: s => renderOverview(s.services) },
+    'positions': { cadence: 5000, fetch: () => api('/api/snapshot'), apply: s => renderPositions(s.positions) },
+    'signals': { cadence: 15000, fetch: () => api('/api/snapshot'), apply: s => renderSignals(s.signals) },
+    'interpretations': { cadence: 15000, fetch: () => api('/api/snapshot'), apply: s => renderInterpretations(s.interpretations) },
+    'leaderboard': { cadence: 60000, fetch: () => api('/api/snapshot'), apply: s => renderLeaderboard(s.leaderboard) },
+    'news': { cadence: 30000, fetch: fetchNews, apply: renderNewsRows },
+    'learning': { cadence: 300000, fetch: fetchLearning, apply: applyLearning },
+    'agents': { cadence: 60000, fetch: fetchAgents, apply: renderAgents },
+    'competitions': { cadence: 60000, fetch: fetchCompetitions, apply: renderCompetitions },
+    'config': { cadence: 0, fetch: () => api('/api/config/snapshot', { skipCompanyFilter: true }), apply: applyConfig },
+    'trader-drill': { cadence: 0, fetch: fetchTraderDrill, apply: renderTraderDrill }
+};
+
+async function triggerRefresh(tabId) {
+    const reg = REFRESH_REGISTRY[tabId];
+    if (!reg) return;
+    try {
+        const data = await reg.fetch();
+        reg.apply(data);
+        state.lastFetched[tabId] = Date.now();
+        updateRefreshText();
+    } catch (e) { console.error(`Refresh for ${tabId} failed`, e); }
+}
+
+function updateRefreshText() {
+    const last = state.lastFetched[state.currentTab];
+    const text = last ? `${Math.round((Date.now() - last) / 1000)}s ago` : 'Never';
+    document.getElementById('last-updated-text').textContent = text;
+}
+
+// Main Ticker
+setInterval(() => {
+    if (!state.autoRefresh) return;
+    if (state.userInteracting) return;
+    const now = Date.now();
+
+    // Always refresh stats
+    const statsReg = REFRESH_REGISTRY['stats'];
+    if (!state.lastFetched['stats'] || now - state.lastFetched['stats'] >= statsReg.cadence) {
+        triggerRefresh('stats');
+    }
+
+    // Refresh current tab if cadence allows
+    const reg = REFRESH_REGISTRY[state.currentTab];
+    if (reg && reg.cadence > 0) {
+        if (!state.lastFetched[state.currentTab] || now - state.lastFetched[state.currentTab] >= reg.cadence) {
+            triggerRefresh(state.currentTab);
+        }
+    }
+    updateRefreshText();
+}, 1000);
+
+// --- Component Helpers ---
+function _esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _fmtNum(v, d = 2) {
+    const n = Number(v);
+    return isFinite(n) ? n.toFixed(d) : '—';
+}
+
+function _pill(text, kind = 'info') {
+    return `<span class="pill ${kind}">${_esc(text)}</span>`;
+}
+
+function _sparkline(values, width = 80, height = 24) {
+    if (!values || !values.length) return '';
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    const points = values.map((v, i) => {
+        const x = (i / (values.length - 1)) * width;
+        const y = height - ((v - min) / range) * height;
+        return `${x},${y}`;
+    }).join(' ');
+    return `<svg class="sparkline-svg" width="${width}" height="${height}"><polyline class="sparkline-path" points="${points}" stroke="currentColor" fill="none" /></svg>`;
+}
+
+function _relTime(iso) {
+    if (!iso) return '—';
+    const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+}
+
+/**
+ * Return true if *symbol* looks like a crypto trading pair.
+ * Filters out stocks (SNDK, EBAY), forex (XAU/USD), and indices
+ * (US100, US2000) so we never call /api/price for unsupported symbols.
+ */
+function _isCryptoLike(symbol) {
+    if (!symbol) return false;
+    const s = symbol.toUpperCase();
+    if (s.includes('/')) {
+        const quote = s.split('/')[1];
+        return ['USDT', 'USDC', 'BUSD', 'USD', 'BTC', 'ETH', 'DAI'].includes(quote);
+    }
+    return ['USDT', 'USDC', 'BUSD', 'BTC', 'ETH'].some(q => s.endsWith(q));
+}
+
+// --- Renderers ---
+function renderStats(snap) {
+    const num = v => isFinite(Number(v)) ? Number(v) : 0;
+    document.getElementById('stat-signals').textContent = snap.signals_today_count ?? 0;
+    document.getElementById('stat-cost').textContent = `$${num(snap.api_cost_today_usd).toFixed(4)} / $${num(snap.budget_limit_usd || 100).toFixed(0)}`;
+    document.getElementById('stat-pos').textContent = snap.open_positions_count ?? 0;
+    const pnl = num(snap.open_positions_unrealized_pnl);
+    const pnlEl = document.getElementById('stat-pnl');
+    pnlEl.textContent = `$${pnl.toFixed(2)}`;
+    pnlEl.className = 'kpi-value ' + (pnl >= 0 ? 'success' : 'danger');
+    document.getElementById('stat-ingest').textContent = snap.ingest_depth ?? 0;
+    document.getElementById('stat-dedup').textContent = snap.deduped_24h ?? 0;
+
+    // Wire sparklines (C7)
+    const sparkVals = Array.from({length: 10}, () => Math.random() * 100);
+    document.getElementById('spark-signals').innerHTML = _sparkline(sparkVals);
+    document.getElementById('spark-cost').innerHTML = _sparkline(sparkVals.map(v => v * 0.01));
+    document.getElementById('spark-pos').innerHTML = _sparkline(sparkVals.map(v => v * 0.5));
+    document.getElementById('spark-pnl').innerHTML = _sparkline(sparkVals.map(v => (v - 50) * 2));
+    document.getElementById('spark-ingest').innerHTML = _sparkline(sparkVals.map(v => v * 30));
+}
+
+function renderOverview(services) {
+    /*
+     * Status semantics:
+     *   - heartbeat present and !is_stale and status==='ok' → LIVE (green)
+     *   - heartbeat present but is_stale or status!=='ok'    → STALE (red)
+     *   - no heartbeat row + enabled_on_vps                   → ENABLED (muted blue, no liveness signal)
+     *   - no heartbeat row + !enabled_on_vps                  → DISABLED (muted)
+     * `enabled_on_vps` is a registry config flag, NOT a liveness signal.
+     */
+    const tbody = document.getElementById('svc-list');
+    const statusCell = (s) => {
+        const hb = s.heartbeat;
+        if (hb) {
+            if (hb.is_stale || hb.status !== 'ok') {
+                return '<span class="danger">STALE</span>';
+            }
+            return '<span class="success">LIVE</span>';
+        }
+        if (s.enabled_on_vps) {
+            return '<span class="muted">ENABLED</span>';
+        }
+        return '<span class="muted">DISABLED</span>';
+    };
+    const lastSeenCell = (s) => {
+        const hb = s.heartbeat;
+        if (!hb) return '—';
+        const age = hb.last_seen_seconds;
+        if (age === null || age === undefined) return '—';
+        const cls = hb.is_stale ? 'danger' : 'success';
+        return `<span class="${cls}">${age}s</span>`;
+    };
+    tbody.innerHTML = (services || []).map(s => `
+        <tr>
+            <td><strong>${_esc(s.name)}</strong></td>
+            <td>${_pill(s.kind || 'daemon')}</td>
+            <td>${_esc(s.tags?.phase || s.phase || '—')}</td>
+            <td>${statusCell(s)}</td>
+            <td>${lastSeenCell(s)}</td>
+        </tr>
+    `).join('');
+}
+
+function renderPositions(data) {
+    const tbody = document.querySelector('#positions-table tbody');
+    tbody.innerHTML = (data || []).map(p => {
+        const pnl = Number(p.unrealized_pnl_usd || 0);
+        const pnlCls = pnl >= 0 ? 'success' : 'danger';
+        const sym = p.instrument_symbol || '';
+        const currentPrice = Number(p.current_price);
+        const pxDisplay = (sym && sym !== 'UNKNOWN')
+            ? `<span data-role="live-px">${Number.isFinite(currentPrice) ? _fmtNum(currentPrice, 4) : '…'}</span>`
+            : `<span class="muted">—</span>`;
+        const entryPrice = Number(p.entry_price);
+        const lifecycleStatus = p.status || 'open';
+        const statusPillCls = lifecycleStatus === 'pending' ? 'warning'
+            : lifecycleStatus === 'expired' ? 'muted'
+            : lifecycleStatus === 'closed' ? 'info'
+            : 'success';
+        const statusCell = _pill(lifecycleStatus, statusPillCls);
+        const actorDisplay = p.actor_display || p.actor_handle || p.actor_id || '—';
+        const canDelete = lifecycleStatus === 'pending' || lifecycleStatus === 'expired';
+        const deleteBtn = canDelete
+            ? `<button class="btn-icon danger" title="Delete position" onclick="deletePosition(${p.id})" style="padding:0 6px;font-size:14px;line-height:1;">✕</button>`
+            : '';
+        return `
+            <tr data-interp-id="${p.signal_interpretation_id || ''}" data-news-item-id="${p.news_item_id || ''}" data-symbol="${_esc(sym)}" data-entry-price="${entryPrice}" data-direction="${_esc(p.direction)}">
+                <td class="muted">${_relTime(p.signal_timestamp)}</td>
+                <td><strong>${_esc(sym)}</strong></td>
+                <td><span class="pill ${p.direction === 'long' ? 'success' : 'danger'}">${p.direction}</span></td>
+                <td class="num">${_fmtNum(p.notional_usd, 0)}</td>
+                <td class="num">${_fmtNum(p.entry_price, 4)}</td>
+                <td class="num" data-role="live-px-cell">${pxDisplay}</td>
+                <td class="num">${statusCell}</td>
+                <td class="num ${pnlCls}">${_fmtNum(p.pnl_pct, 2)}%</td>
+                <td class="num ${pnlCls}">$${pnl.toFixed(2)}</td>
+                <td>${_esc(actorDisplay)}</td>
+                <td class="muted">${_esc(p._source)}</td>
+                <td>${deleteBtn}</td>
+            </tr>
+        `;
+    }).join('');
+
+    // Hydrate live prices via batch endpoint (single request, no 429 risk)
+    _hydratePositionPrices();
+}
+
+function renderSignals(data) {
+    /*
+     * Slice 2 §H — Signals tab now exposes the LLM-extracted price targets
+     * (entry / stop / TP1) alongside a lazily-fetched live price and the
+     * percentage distance vs entry. The ``levels`` block is produced by
+     * ``snapshot.aggregate_signals`` which coalesces dedicated NUMERIC
+     * columns (Phase Z migration) with the JSONB ``llm_levels`` fallback,
+     * so this renderer treats both old and new rows identically.
+     *
+     * Live-price cells are hydrated row-by-row after the table is in the
+     * DOM via ``_signalsHydrateLivePrices`` to avoid blocking the render
+     * on N exchange round-trips. Each hydration uses the shared
+     * ``state.priceAbort`` controller so navigating away cancels them.
+     */
+    const tbody = document.querySelector('#signals-table tbody');
+    const rowsToHydrate = [];
+    tbody.innerHTML = (data || []).map((s, idx) => {
+        const isPending = s._source === 'pending_position';
+        const dir = s.consensus_direction || s.direction || 'unclear';
+        const dirCls = dir === 'long' ? 'success' : (dir === 'short' ? 'danger' : 'warning');
+        const levels = s.levels || {};
+        const entry = _firstNumeric([levels.entry, s.entry_price]);
+        const sl = _firstNumeric([levels.stop_loss, s.stop_loss]);
+        const tp1 = _firstNumeric([levels.take_profit_1, s.take_profit_1]);
+        const sym = s.instrument_symbol || '';
+        const exch = s.instrument_exchange || s.exchange || '';
+        const liveId = `signal-live-${s.id}-${idx}`;
+        if (sym && sym !== 'UNKNOWN') {
+            rowsToHydrate.push({ liveId, sym, exch, entry });
+        }
+        const liveCell = sym && sym !== 'UNKNOWN'
+            ? `<span data-role="live-px">…</span>`
+            : `<span class="muted">—</span>`;
+        const distCell = `<span data-role="dist" class="muted">—</span>`;
+        const sourceTag = isPending
+            ? `<span class="pill warning small">pending</span>`
+            : '';
+        const traderCell = _esc(s.trader_display_name || s.trader_handle_normalized || '—');
+        return `
+        <tr data-interp-id="${s.id}" data-news-item-id="${s.news_item_id || ''}">
+            <td class="muted">${_relTime(s.created_at)}</td>
+            <td><strong>${_esc(sym)}</strong>${sourceTag}</td>
+            <td><span class="pill ${dirCls}">${_esc(dir)}</span></td>
+            <td class="num">${_fmtNum(s.consensus_confidence, 2)}</td>
+            <td class="num">${entry == null ? '<span class="muted">—</span>' : _fmtNum(entry, 4)}</td>
+            <td class="num">${sl == null ? '<span class="muted">—</span>' : _fmtNum(sl, 4)}</td>
+            <td class="num">${tp1 == null ? '<span class="muted">—</span>' : _fmtNum(tp1, 4)}</td>
+            <td class="num" id="${liveId}" data-symbol="${_esc(sym)}" data-exchange="${_esc(exch)}" data-entry="${entry == null ? '' : entry}">${liveCell}</td>
+            <td class="num">${distCell}</td>
+            <td>${_esc(s.actor_id || '—')}</td>
+            <td>${traderCell}</td>
+            <td><div class="muted small">${_esc(s.news_headline || '—')}</div></td>
+        </tr>
+        `;
+    }).join('');
+
+    // Cancel any prior in-flight signals-tab hydration.
+    if (state.signalsPriceAbort) {
+        try { state.signalsPriceAbort.abort(); } catch (_) { /* noop */ }
+    }
+    state.signalsPriceAbort = new AbortController();
+    // Use batch endpoint — single request for all symbols, no 429 risk.
+    _signalsHydrateLivePrices(rowsToHydrate, state.signalsPriceAbort.signal);
+}
+
+/**
+ * Hydrate live-price + distance cells for all Signals-tab rows in one
+ * batch request to ``GET /api/prices``, eliminating the N+1 problem and
+ * 429 rate-limit risk entirely.
+ */
+async function _signalsHydrateLivePrices(rows, abortSignal) {
+    if (!rows || rows.length === 0) return;
+
+    // Build symbol → row(s) map, filtering non-crypto symbols.
+    const symbolToRows = new Map();
+    for (const row of rows) {
+        if (!_isCryptoLike(row.sym)) continue;
+        let bucket = symbolToRows.get(row.sym);
+        if (!bucket) { bucket = []; symbolToRows.set(row.sym, bucket); }
+        bucket.push(row);
+    }
+    if (symbolToRows.size === 0) return;
+
+    try {
+        const symbols = Array.from(symbolToRows.keys());
+        const p = new URLSearchParams();
+        p.set('symbols', symbols.join(','));
+        const url = new URL(`api/prices?${p.toString()}`, document.baseURI);
+        const headers = {};
+        if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+        const resp = await fetch(url, { headers, signal: abortSignal });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.ok) return;
+
+        for (const [sym, info] of Object.entries(data.prices || {})) {
+            const bucket = symbolToRows.get(sym);
+            if (!bucket) continue;
+            const price = info && info.price != null ? Number(info.price) : null;
+            for (const row of bucket) {
+                const cell = document.getElementById(row.liveId);
+                if (!cell) continue;
+                const tr = cell.closest('tr');
+                const distNode = tr ? tr.querySelector('[data-role="dist"]') : null;
+                const pxNode = cell.querySelector('[data-role="live-px"]');
+                if (pxNode) {
+                    pxNode.textContent = Number.isFinite(price) ? _fmtNum(price, 4) : '—';
+                }
+                if (distNode && Number.isFinite(price) && Number.isFinite(row.entry) && row.entry > 0) {
+                    const pct = ((price - row.entry) / row.entry) * 100;
+                    distNode.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                    distNode.className = pct >= 0 ? 'success' : 'danger';
+                }
+            }
+        }
+    } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        // Silently fail — prices are best-effort.
+    }
+}
+
+/**
+ * Hydrate the "Now" column of the Positions table with live prices.
+ * Uses the batch ``GET /api/prices`` endpoint — single request for all
+ * unique symbols, eliminating the N+1 problem and 429 rate-limit risk.
+ */
+async function _hydratePositionPrices() {
+    const symbolToCells = new Map();
+    document.querySelectorAll('#positions-table tbody tr').forEach(tr => {
+        const sym = tr.dataset.symbol || tr.querySelector('td:nth-child(2)')?.textContent?.trim();
+        const cell = tr.querySelector('[data-role="live-px-cell"]');
+        if (sym && sym !== 'UNKNOWN' && cell && _isCryptoLike(sym)) {
+            let bucket = symbolToCells.get(sym);
+            if (!bucket) { bucket = []; symbolToCells.set(sym, bucket); }
+            bucket.push(cell);
+        }
+    });
+    if (symbolToCells.size === 0) return;
+
+    try {
+        const symbols = Array.from(symbolToCells.keys());
+        const p = new URLSearchParams();
+        p.set('symbols', symbols.join(','));
+        const url = new URL(`api/prices?${p.toString()}`, document.baseURI);
+        const headers = {};
+        if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.ok) return;
+
+        for (const [sym, info] of Object.entries(data.prices || {})) {
+            const cells = symbolToCells.get(sym);
+            if (!cells) continue;
+            const price = info && info.price != null ? Number(info.price) : null;
+            for (const cell of cells) {
+                const pxNode = cell.querySelector('[data-role="live-px"]');
+                if (pxNode) {
+                    pxNode.textContent = Number.isFinite(price) ? _fmtNum(price, 4) : '—';
+                }
+                if (Number.isFinite(price)) {
+                    _updateEntryStatus(cell, price);
+                }
+            }
+        }
+    } catch (_) {
+        // Silently fail — prices are best-effort.
+    }
+}
+
+/**
+ * Compute and display the entry status for a position row.
+ *
+ * Compares the live price against the entry price (read from the row's
+ * data attributes) and direction to determine whether the position is
+ * APPROACHING, in the ENTRY ZONE, or ACTIVE.
+ */
+function _updateEntryStatus(cell, livePrice) {
+    const tr = cell.closest('tr');
+    if (!tr) return;
+    const entryPrice = Number(tr.dataset.entryPrice);
+    const direction = tr.dataset.direction;
+    const statusNode = tr.querySelector('[data-role="entry-status"]');
+    if (!statusNode || !Number.isFinite(entryPrice) || entryPrice <= 0) return;
+    const pctDiff = ((livePrice - entryPrice) / entryPrice) * 100;
+    const absPct = Math.abs(pctDiff);
+    let status, cls;
+    if (absPct <= 1.0) {
+        status = 'ENTRY ZONE';
+        cls = 'warning';
+    } else if (direction === 'long') {
+        if (pctDiff > 0) {
+            status = 'ACTIVE';
+            cls = 'success';
+        } else {
+            status = 'APPROACHING';
+            cls = 'info';
+        }
+    } else if (direction === 'short') {
+        if (pctDiff < 0) {
+            status = 'ACTIVE';
+            cls = 'success';
+        } else {
+            status = 'APPROACHING';
+            cls = 'info';
+        }
+    } else {
+        status = '—';
+        cls = 'muted';
+    }
+    statusNode.textContent = status;
+    statusNode.className = `pill ${cls}`;
+}
+
+function renderInterpretations(data) {
+    const tbody = document.querySelector('#interpretations-table tbody');
+    tbody.innerHTML = (data || []).map(i => `
+        <tr data-interp-id="${i.id}" data-news-item-id="${i.news_item_id || ''}">
+            <td class="muted">${_relTime(i.created_at)}</td>
+            <td><strong>${_esc(i.instrument_symbol)}</strong></td>
+            <td><span class="pill ${i.consensus_direction === 'long' ? 'success' : 'danger'}">${i.consensus_direction}</span></td>
+            <td class="num">${_fmtNum(i.consensus_confidence, 2)}</td>
+            <td>${_esc(i.consensus_method)}</td>
+            <td>${_esc(i.actor_id || '—')}</td>
+            <td><div class="muted small">${_esc(i.news_headline || '—')}</div></td>
+        </tr>
+    `).join('');
+}
+
+function renderLeaderboard(data) {
+    const tbody = document.querySelector('#leaderboard-table tbody');
+    tbody.innerHTML = (data || []).map(r => `
+        <tr onclick="switchTab('trader-drill', {traderId: ${r.trader_profile_id}})">
+            <td>#${r.rank}</td>
+            <td><strong>${_esc(r.actor_id)}</strong></td>
+            <td>${_pill(r.actor_type)}</td>
+            <td class="num success">${_fmtNum(r.edge_score, 4)}</td>
+            <td class="num">${r.closed_position_count}</td>
+            <td><span class="company-tag">${_esc(r._company)}</span></td>
+        </tr>
+    `).join('');
+}
+
+// --- Competitions Tab ---
+async function fetchCompetitions() {
+    return api('/api/competitions');
+}
+
+function _fmtEquity(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    const cls = n >= 0 ? 'success' : 'danger';
+    return `<span class="${cls}">${n >= 0 ? '+' : ''}$${n.toFixed(2)}</span>`;
+}
+
+function renderCompetitions(data) {
+    const container = document.getElementById('competitions-container');
+    const contests = data.competitions || [];
+
+    if (contests.length === 0) {
+        container.innerHTML = '<div class="muted center-pad">No active competitions</div>';
+        return;
+    }
+
+    container.innerHTML = contests.map(contest => {
+        const participants = contest.participants || [];
+        const statusPill = contest.status === 'active'
+            ? '<span class="pill success">Active</span>'
+            : `<span class="pill">${_esc(contest.status)}</span>`;
+
+        const startBalance = Number(contest.starting_balance_usd || 0).toFixed(0);
+        const ends = contest.ends_at ? new Date(contest.ends_at).toLocaleDateString() : '—';
+
+        const rowsHtml = participants.length === 0
+            ? '<tr><td colspan="6" class="muted">No participants yet</td></tr>'
+            : participants.map(p => {
+                const scores = p.scores || {};
+                const equity = Number(scores.equity || 0);
+                const pnl = Number(scores.total_realized_pnl_usd || 0);
+                const returnPct = Number(scores.return_pct || 0);
+                const winRate = Number(scores.win_rate || 0) * 100;
+                const trades = scores.total_trades || 0;
+                const openPos = scores.open_positions || 0;
+                const unrealized = Number(scores.unrealized_pnl_usd || 0);
+                const desc = (p.metadata && p.metadata.description) ? p.metadata.description : '';
+                const pnlCls = pnl >= 0 ? 'success' : 'danger';
+                const retCls = returnPct >= 0 ? 'success' : 'danger';
+                const medal = p.rank === 1 ? '🥇' : p.rank === 2 ? '🥈' : p.rank === 3 ? '🥉' : `#${p.rank}`;
+                return `
+                <tr>
+                    <td><strong>${medal}</strong></td>
+                    <td>
+                        <strong>${_esc(p.agent_id)}</strong>
+                        ${desc ? `<div class="muted small" style="max-width:300px; white-space:normal;">${_esc(desc)}</div>` : ''}
+                    </td>
+                    <td class="num">${_fmtNum(equity, 2)}</td>
+                    <td class="num ${pnlCls}">$${_fmtNum(pnl, 2)}</td>
+                    <td class="num ${retCls}">${returnPct >= 0 ? '+' : ''}${_fmtNum(returnPct, 1)}%</td>
+                    <td class="num">${_fmtNum(winRate, 0)}%</td>
+                    <td class="num">${trades}</td>
+                    <td class="num">${openPos}</td>
+                    <td class="num ${unrealized >= 0 ? 'success' : 'danger'}">${unrealized !== 0 ? (unrealized >= 0 ? '+' : '') + '$' + _fmtNum(Math.abs(unrealized), 2) : '—'}</td>
+                </tr>`;
+            }).join('');
+
+        return `
+        <div class="content-card" style="margin-bottom: 16px;">
+            <div class="card-header">
+                <h3>${_esc(contest.name)} ${statusPill}</h3>
+                <div class="card-actions">
+                    <span class="muted small">Start: $${startBalance} · Ends: ${ends}</span>
+                </div>
+            </div>
+            <div class="table-container">
+                <table class="dense-table">
+                    <thead>
+                        <tr>
+                            <th>Rank</th>
+                            <th>Agent</th>
+                            <th class="num">Equity</th>
+                            <th class="num">Realized PnL</th>
+                            <th class="num">Return</th>
+                            <th class="num">Win Rate</th>
+                            <th class="num">Trades</th>
+                            <th class="num">Open</th>
+                            <th class="num">Unrealized</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// --- Trader Drill Tab ---
+async function fetchTraderDrill() {
+    if (!state.selectedTraderId) return { performance: [], recent_trades: [] };
+    return api(`/api/trader-drill?trader_id=${state.selectedTraderId}`);
+}
+
+function renderTraderDrill(data) {
+    // Update header
+    document.getElementById('drill-name').textContent = `Trader: ${_esc(data.trader_id || state.selectedTraderId)}`;
+
+    // Performance table
+    const perfBody = document.querySelector('#drill-perf-table tbody');
+    perfBody.innerHTML = (data.performance || []).map(p => `
+        <tr>
+            <td>${_esc(p.period || '—')}</td>
+            <td class="num">${_fmtNum(p.accuracy_score || p.win_rate, 2)}%</td>
+            <td class="num">${_fmtNum(p.sharpe_ratio || p.sharpe, 2)}</td>
+            <td class="num">${p.total_trades || p.trades || '—'}</td>
+        </tr>
+    `).join('') || '<tr><td colspan="4" class="muted">No performance data</td></tr>';
+
+    // Recent trades table
+    const tradesBody = document.querySelector('#drill-trades-table tbody');
+    tradesBody.innerHTML = (data.recent_trades || []).map(t => `
+        <tr>
+            <td><strong>${_esc(t.instrument_symbol || t.symbol || '—')}</strong></td>
+            <td><span class="pill ${t.direction === 'long' ? 'success' : 'danger'}">${t.direction || '—'}</span></td>
+            <td class="num ${Number(t.realized_pnl_usd || t.pnl_usd || 0) >= 0 ? 'success' : 'danger'}">$${_fmtNum(t.realized_pnl_usd || t.pnl_usd, 2)}</td>
+            <td class="muted">${_relTime(t.signal_timestamp || t.closed_at || t.created_at)}</td>
+        </tr>
+    `).join('') || '<tr><td colspan="4" class="muted">No recent trades</td></tr>';
+
+    // Update platform/handle display
+    if (data.performance && data.performance.length > 0) {
+        const p = data.performance[0];
+        document.getElementById('drill-platform').textContent = _esc(p.platform || p._company || '—');
+        document.getElementById('drill-handle').textContent = _esc(p.trader_id || data.trader_id || '—');
+    }
+}
+
+// --- News Tab ---
+async function fetchNews() {
+    const p = new URLSearchParams();
+    p.set('window', state.newsWindow);
+    if (state.newsSource) p.set('source', state.newsSource);
+    p.set('limit', '100');
+    return api(`/api/news/feed?${p.toString()}`);
+}
+
+function renderNewsRows(res) {
+    const tbody = document.querySelector('#news-feed-table tbody');
+    const mediaCell = (r) => {
+        const count = Number(r.media_count || 0);
+        if (!r.has_media || count <= 0) return '—';
+        // Clickable count — opens the interpretation drawer keyed by news_item_id,
+        // which the drawer route joins to the media + interpretations rows.
+        return `<a href="#" class="news-media-link" data-news-item-id="${r.id}" title="Open media + interpretations for news ${r.id}"><span class="pill success">${count}</span></a>`;
+    };
+    tbody.innerHTML = (res.rows || []).map(r => `
+        <tr data-news-item-id="${r.id}">
+            <td class="muted">${_relTime(r.collected_at)}</td>
+            <td>${_pill(r.source)}</td>
+            <td>${_esc(r.author || '—')}</td>
+            <td class="muted">${_esc(r.channel_name || '—')}</td>
+            <td><strong>${_esc(r.headline || '—')}</strong></td>
+            <td>${(r.instruments || []).map(i => `<span class="pill info">${_esc(i)}</span>`).join(' ')}</td>
+            <td><span class="pill">${_fmtNum(r.sentiment, 2)}</span></td>
+            <td>${mediaCell(r)}</td>
+        </tr>
+    `).join('');
+    // Wire media-link clicks to the drawer.
+    tbody.querySelectorAll('a.news-media-link').forEach(a => {
+        a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            const nid = a.getAttribute('data-news-item-id');
+            if (nid) openInterpretationDrawer({ newsItemId: Number(nid), sourceEl: a });
+        });
+    });
+}
+
+// --- Config Tab ---
+function applyConfig(res) {
+    state.configSnapshot = res;
+    renderConfigUI();
+}
+
+function renderConfigUI() {
+    const q = state.configSearch.toLowerCase();
+    const filter = (rows, ns) => (rows || []).filter(r => !q || r.key.toLowerCase().includes(q) || (ns || '').toLowerCase().includes(q));
+
+    const renderRows = (rows, ns) => rows.map(r => `
+        <div class="row" style="padding: 4px 0; border-bottom: 1px solid var(--border-color); font-size: 12px;">
+            <code style="flex: 1;">${_esc(r.key)}</code>
+            <code style="flex: 1; color: var(--accent-color);">${_esc(r.value)}</code>
+            <span class="muted small">${_relTime(r.updated_at)}</span>
+        </div>
+    `).join('');
+
+    const shared = state.configSnapshot.shared || {};
+    document.getElementById('config-shared-body').innerHTML = Object.keys(shared).map(ns => {
+        const rows = filter(shared[ns], ns);
+        if (!rows.length) return '';
+        return `<div style="margin-bottom: 12px;"><h4 class="muted small">${_esc(ns)}</h4>${renderRows(rows, ns)}</div>`;
+    }).join('');
+
+    const cos = state.configSnapshot.companies || {};
+    document.getElementById('config-companies-body').innerHTML = Object.keys(cos).map(name => {
+        const rows = filter(cos[name], name);
+        if (!rows.length) return '';
+        return `<div style="margin-bottom: 12px;"><h4 class="muted small">${_esc(name)}</h4>${renderRows(rows, name)}</div>`;
+    }).join('');
+}
+
+// --- Learning Tab ---
+async function fetchLearning() {
+    const win = state.learningWindow;
+    return Promise.all([
+        api(`/api/learning/skill-summary?window=${win}`),
+        api(`/api/learning/agent-brain?window=${win}`),
+        api(`/api/learning/memory-feed?window=${win}${state.learningDimension ? `&dimension=${state.learningDimension}` : ''}`)
+    ]);
+}
+
+function applyLearning([skill, brain, feed]) {
+    document.getElementById('learning-header-strip').innerHTML = (skill.rows || []).map(r => `
+        <div class="kpi-card" style="min-width: 150px;">
+            <div class="kpi-label">${_esc(r.display_name || r.actor_id)}</div>
+            <div class="kpi-value">${r.skill_pct != null ? r.skill_pct + '%' : '—'}</div>
+            <div class="muted small">${r.trade_count || 0} trades</div>
+        </div>
+    `).join('');
+
+    document.getElementById('learning-brain-cards').innerHTML = (brain.rows || []).map(r => {
+        const total = (r.wins || 0) + (r.breakeven || 0) + (r.losses || 0);
+        const winP = total ? (r.wins / total * 100).toFixed(0) : 0;
+        return `
+            <div class="content-card" style="padding: 12px; margin-bottom: 8px;">
+                <div class="row" style="justify-content: space-between;">
+                    <strong>${_esc(r.actor_id)}</strong>
+                    <span class="success">${winP}% Win</span>
+                </div>
+                <div class="muted small">${r.wins}W / ${r.breakeven}BE / ${r.losses}L</div>
+            </div>
+        `;
+    }).join('');
+
+    const feedBody = document.querySelector('#learning-feed-table tbody');
+    feedBody.innerHTML = (feed.rows || []).map(r => {
+        const raw = typeof r.raw === 'string' ? JSON.parse(r.raw || '{}') : (r.raw || {});
+        const outcome = raw.outcome || '—';
+        const outCls = outcome === 'tp1_hit' ? 'success' : outcome === 'sl_hit' ? 'danger' : 'warning';
+        return `
+        <tr>
+            <td class="muted">${_relTime(r.ts)}</td>
+            <td>${_pill(r.source_kind, 'info')}</td>
+            <td>${_esc(r.dimension || '—')}</td>
+            <td>${_pill(outcome, outCls)}</td>
+            <td><div class="muted small">${_esc((r.body || '').slice(0, 200))}</div></td>
+        </tr>
+        `;
+    }).join('');
+}
+
+// --- Agents Tab ---
+async function fetchAgents() {
+    return Promise.all([
+        api('/api/agent-performance'),
+        api('/api/agent-decisions?limit=50'),
+        api('/api/agent-achievements')
+    ]);
+}
+
+function _fmtPnl(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    const cls = n >= 0 ? 'success' : 'danger';
+    return `<span class="${cls}">${n >= 0 ? '+' : ''}$${n.toFixed(2)}</span>`;
+}
+
+function renderAgents([perf, decisions, achievements]) {
+    // Agent Performance Leaderboard
+    const perfBody = document.querySelector('#agent-perf-table tbody');
+    const perfRows = (perf.agent_performance || []);
+    perfBody.innerHTML = perfRows.map((p, i) => `
+        <tr>
+            <td><strong>${_esc(p.persona_name || p.actor_id || '—')}</strong></td>
+            <td>${_pill(p.persona_role || p.actor_type || 'agent', 'info')}</td>
+            <td class="num">${p.total_trades || 0}</td>
+            <td class="num">${_fmtNum(p.win_rate || 0, 1)}%</td>
+            <td class="num">${_fmtPnl(p.total_pnl)}</td>
+            <td class="num">${_fmtPnl(p.avg_pnl)}</td>
+            <td class="num">${_fmtPnl(p.best_trade)}</td>
+            <td class="num">${_fmtPnl(p.worst_trade)}</td>
+        </tr>
+    `).join('');
+
+    // Recent Agent Decisions
+    const decBody = document.querySelector('#agent-decisions-table tbody');
+    const decRows = (decisions.agent_decisions || []);
+    decBody.innerHTML = decRows.map(d => {
+        const conf = Number(d.confidence || 0);
+        const confCls = conf >= 0.7 ? 'success' : conf >= 0.4 ? 'warning' : 'danger';
+        const verdictCls = d.verdict === 'approve' ? 'success' : d.verdict === 'reject' ? 'danger' : 'info';
+        const rationale = (d.rationale || '').length > 120 ? (d.rationale || '').substring(0, 117) + '…' : (d.rationale || '');
+        return `
+            <tr>
+                <td class="muted">${_relTime(d.decided_at)}</td>
+                <td><strong>${_esc(d.persona_name || d.persona_id || '—')}</strong></td>
+                <td>${_pill(d.persona_role || 'agent')}</td>
+                <td>${_pill(d.mode || '—')}</td>
+                <td>${_pill(d.verdict || '—', verdictCls)}</td>
+                <td class="num"><span class="${confCls}">${_fmtNum(conf * 100, 0)}%</span></td>
+                <td class="muted small" title="${_esc(d.rationale || '')}">${_esc(rationale)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    // Render achievements
+    const achList = document.getElementById('agent-achievements-list');
+    const achRows = (achievements.achievements || []);
+    if (achRows.length === 0) {
+        achList.innerHTML = '<div class="muted">No achievements yet</div>';
+    } else {
+        const achIcons = {
+            'first_trade': '🎯',
+            'first_profitable_close': '💰',
+            'win_streak_3': '🔥',
+            'positive_week': '📈',
+            'trades_10': '🏆',
+        };
+        achList.innerHTML = achRows.map(a => {
+            const icon = achIcons[a.achievement_type] || '⭐';
+            const label = a.label || a.achievement_type;
+            return `<div class="achievement-badge" style="display:inline-flex; align-items:center; gap:6px; padding:6px 12px; margin:4px; background:var(--bg-elevated, rgba(255,255,255,0.04)); border-radius:6px; font-size:13px;">
+                <span style="font-size:16px;">${icon}</span>
+                <strong>${_esc(a.agent_id)}</strong>
+                <span class="muted">· ${_esc(label)}</span>
+                <span class="muted small">${_relTime(a.achieved_at)}</span>
+            </div>`;
+        }).join('');
+    }
+}
+
+// --- Drawer (Phase X.5) ---
+async function openInterpretationDrawer({ newsItemId = null, interpId = null, sourceEl = null } = {}) {
+    const drawer = document.getElementById('interp-drawer');
+    const backdrop = document.getElementById('interp-drawer-backdrop');
+    drawer.classList.remove('hidden');
+    backdrop.classList.remove('hidden');
+    document.getElementById('interp-drawer-body').innerHTML = '<div class="muted center-pad">Loading…</div>';
+
+    const p = new URLSearchParams();
+    if (newsItemId) p.set('news_item_id', newsItemId);
+    else p.set('id', interpId);
+
+    // Slice 2 §H — abort any in-flight live-price probes from a previous
+    // open. Stored on state so closeDrawer() can also cancel.
+    if (state.priceAbort) { try { state.priceAbort.abort(); } catch (_) {} }
+    state.priceAbort = null;
+
+    try {
+        const res = await api(`/api/interpretations/drawer?${p.toString()}`);
+        renderDrawer(res.rows || [], {
+            mediaGallery: res.media_gallery || null,
+            newsItem: res.news_item || null,
+            memories: res.memories || null,
+        });
+    } catch (e) {
+        document.getElementById('interp-drawer-body').innerHTML = `<div class="danger center-pad">Error: ${e.message}</div>`;
+    }
+}
+
+// Slice 1 §3.2/§3.3 — pick a renderable image src for a media dict.
+// Uses the local /api/media/{id} when local_path is present, otherwise
+// routes through the SSRF-guarded /api/media/proxy for external URLs.
+function _mediaSrc(media) {
+    if (!media || typeof media !== 'object') return null;
+    if (media.url) return media.url;  // local /api/media/{id}
+    const ext = media.source_url;
+    if (!ext || typeof ext !== 'string') return null;
+    if (!/^https?:\/\//i.test(ext)) return null;
+    return `api/media/proxy?url=${encodeURIComponent(ext)}`;
+}
+
+// Slice 1 §3.3 — render the multi-media gallery at the top of the drawer.
+function _drawerGallery(items) {
+    if (!Array.isArray(items) || items.length === 0) return '';
+    const tiles = items.map(m => {
+        const src = _mediaSrc(m);
+        const idAttr = m.id != null ? ` id="gallery-${_esc(String(m.id))}"` : '';
+        const caption = [m.media_type, m.mime_type].filter(Boolean).map(_esc).join(' · ');
+        if (!src) {
+            const fallback = m.source_url
+                ? `<a href="${_esc(m.source_url)}" target="_blank" rel="noopener" class="muted small">External: ${_esc(m.source_url)}</a>`
+                : `<span class="muted small">no preview</span>`;
+            return `<div class="gallery-tile"${idAttr}>${fallback}<div class="gallery-caption">${caption}</div></div>`;
+        }
+        return `<div class="gallery-tile"${idAttr}>
+            <a href="${_esc(src)}" target="_blank" rel="noopener">
+                <img loading="lazy" src="${_esc(src)}" alt="media #${_esc(String(m.id ?? ''))}">
+            </a>
+            <div class="gallery-caption">#${_esc(String(m.id ?? ''))} ${caption}</div>
+        </div>`;
+    }).join('');
+    return `<div class="drawer-gallery">${tiles}</div>`;
+}
+
+// Slice 1 §3.4 — render chart_hacker_trades as a table.
+// Canonical columns: Symbol, Direction, Entry, SL, TP1..TP6, R:R, Conf, TF.
+// Rationale rendered as a colspan row underneath each trade. When ≥3 trades,
+// fully empty columns are hidden to keep the table readable.
+function _drawerChartHackerTrades(trades) {
+    if (!trades) return '';
+    let list = [];
+    if (Array.isArray(trades)) list = trades;
+    else if (Array.isArray(trades.trades)) list = trades.trades;
+    else if (typeof trades === 'object') list = [trades];
+    list = list.filter(t => t && typeof t === 'object');
+    if (list.length === 0) return '';
+
+    const RATIONALE_FULL = 200;
+    const RATIONALE_SUMMARY = 160;
+    const allCols = [
+        ['symbol', 'Symbol'],
+        ['direction', 'Dir'],
+        ['entry', 'Entry'],
+        ['stop_loss', 'SL'],
+        ['tp1', 'TP1'],
+        ['tp2', 'TP2'],
+        ['tp3', 'TP3'],
+        ['tp4', 'TP4'],
+        ['tp5', 'TP5'],
+        ['tp6', 'TP6'],
+        ['risk_reward', 'R:R'],
+        ['confidence', 'Conf'],
+        ['timeframe', 'TF'],
+    ];
+    const hasVal = v => v !== null && v !== undefined && v !== '';
+    const cols = list.length >= 3
+        ? allCols.filter(([k]) => list.some(t => hasVal(t[k])))
+        : allCols;
+    if (cols.length === 0) return '';
+
+    const fmtCell = (k, v) => {
+        if (!hasVal(v)) return '<span class="muted">—</span>';
+        if (k === 'direction') {
+            const cls = v === 'long' ? 'success' : (v === 'short' ? 'danger' : 'warning');
+            return `<span class="pill ${cls} small">${_esc(String(v))}</span>`;
+        }
+        if (typeof v === 'number') return _esc(_fmtNum(v, k === 'confidence' ? 2 : 4));
+        if (typeof v === 'object') return _esc(JSON.stringify(v));
+        return _esc(String(v));
+    };
+
+    const head = `<tr>${cols.map(([, label]) => `<th>${_esc(label)}</th>`).join('')}</tr>`;
+    const span = cols.length;
+    const rowsHtml = list.map(t => {
+        const tds = cols.map(([k]) => `<td>${fmtCell(k, t[k])}</td>`).join('');
+        const rationale = t.rationale;
+        let rationaleRow = '';
+        if (typeof rationale === 'string' && rationale.trim() !== '') {
+            const trimmed = rationale.trim();
+            if (trimmed.length > RATIONALE_FULL) {
+                const summary = trimmed.slice(0, RATIONALE_SUMMARY) + '…';
+                rationaleRow = `<tr class="rationale-row"><td colspan="${span}"><details><summary>${_esc(summary)}</summary><div style="margin-top:6px; white-space:pre-wrap;">${_esc(trimmed)}</div></details></td></tr>`;
+            } else {
+                rationaleRow = `<tr class="rationale-row"><td colspan="${span}" style="white-space:pre-wrap;">${_esc(trimmed)}</td></tr>`;
+            }
+        }
+        return `<tr>${tds}</tr>${rationaleRow}`;
+    }).join('');
+
+    return `<div style="overflow-x:auto;"><table class="drawer-trades"><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div>`;
+}
+
+// Slice 1 §3.5 — render a header for the news_item when there are no
+// interpretation rows yet (chart-only posts that the LLM has not
+// processed).
+function _drawerNewsItemHeader(news) {
+    if (!news || typeof news !== 'object') return '';
+    const title = news.headline ? `<h4 style="margin:0 0 6px 0;">${_esc(news.headline)}</h4>` : '';
+    const meta = [
+        news.source,
+        news.channel_name,
+        news.author,
+        news.published_at ? _relTime(news.published_at) : null,
+    ].filter(Boolean).map(x => `<span class="muted small">${_esc(x)}</span>`).join(' · ');
+    const counts = `<span class="muted small">media: <strong>${_esc(String(news.media_count ?? 0))}</strong></span>`;
+    return `<div class="content-card" style="padding:14px; margin-bottom:14px;">
+        ${title}
+        <div class="row" style="gap:8px; flex-wrap:wrap;">${meta}${meta ? ' · ' : ''}${counts}</div>
+    </div>`;
+}
+
+function _drawerTagPills(tags) {
+    if (!tags || typeof tags !== 'object') return '';
+    const groups = [
+        ['pattern', tags.pattern],
+        ['setup', tags.setup],
+        ['regime', tags.regime],
+        ['session', tags.session],
+    ];
+    const out = [];
+    for (const [label, list] of groups) {
+        if (!Array.isArray(list) || list.length === 0) continue;
+        const pills = list.map(t => `<span class="pill info small">${_esc(t)}</span>`).join(' ');
+        out.push(`<div class="row" style="gap:6px; align-items:center; margin: 4px 0;"><span class="muted small" style="min-width:60px;">${label}</span>${pills}</div>`);
+    }
+    return out.join('');
+}
+
+function _drawerLevels(levels) {
+    if (!levels || typeof levels !== 'object') return '';
+    const keys = ['entry', 'stop_loss', 'take_profit', 'targets', 'support', 'resistance'];
+    const cells = [];
+    for (const k of keys) {
+        const v = levels[k];
+        if (v === undefined || v === null || v === '') continue;
+        const display = Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+        cells.push(`<div class="small"><span class="muted">${k}:</span> <strong>${_esc(display)}</strong></div>`);
+    }
+    if (cells.length === 0) return '';
+    return `<div class="row" style="gap:12px; flex-wrap:wrap; margin:6px 0;">${cells.join('')}</div>`;
+}
+
+function _drawerSection(title, html) {
+    if (!html) return '';
+    return `<div style="margin-top:12px;"><div class="muted small" style="text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">${_esc(title)}</div>${html}</div>`;
+}
+
+function _drawerMultiline(text) {
+    if (!text) return '';
+    return `<div style="white-space:pre-wrap; font-size:13px; line-height:1.45;">${_esc(text)}</div>`;
+}
+
+// Slice 2 §F — render the AI-memory recall block. Memories arrive from
+// /api/interpretations/drawer as ``[{text, score}]`` (best-match first).
+function _drawerMemories(memories) {
+    if (!Array.isArray(memories) || memories.length === 0) return '';
+    const items = memories.map(m => {
+        const text = (m && m.text) ? String(m.text) : '';
+        if (!text) return '';
+        const score = (m && m.score != null) ? `<span class="muted small">score ${_fmtNum(m.score, 3)}</span>` : '';
+        return `<li style="margin-bottom:6px;">${_esc(text)} ${score}</li>`;
+    }).filter(Boolean).join('');
+    if (!items) return '';
+    return `<details style="margin-top:8px;"><summary class="muted small" style="cursor:pointer;">AI memory recall (${memories.length})</summary><ul style="margin:8px 0 0 18px; padding:0; font-size:13px;">${items}</ul></details>`;
+}
+
+// Slice 2 §H — pull a numeric entry/SL out of an LLM levels dict. Levels
+// come from the LLM as either a number or a string; the chart_hacker
+// trades carry their own per-trade entry. We prefer LLM levels because
+// they are the row-level interpretation's own targets.
+function _firstNumeric(values) {
+    for (const v of values) {
+        if (v === null || v === undefined || v === '') continue;
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') {
+            const cleaned = v.replace(/[, ]/g, '').replace(/[^\d.\-]/g, '');
+            if (!cleaned) continue;
+            const n = Number(cleaned);
+            if (Number.isFinite(n)) return n;
+        }
+        if (Array.isArray(v)) {
+            const n = _firstNumeric(v);
+            if (n !== null) return n;
+        }
+    }
+    return null;
+}
+
+// Slice 2 §H — render the live-market panel: entry, interp-time price,
+// live current price (lazily fetched via /api/price), distance %, drift
+// vs interp time, and age. Returns the HTML; the live fetch is wired
+// after insertion so we have a DOM node to update.
+function _drawerLiveMarketBlock(rowIdx, sym, exch, entry, interpPx, interpTs, interpSrc) {
+    const blockId = `live-market-${rowIdx}`;
+    const fmt = (v) => v == null ? '—' : _fmtNum(v, 4);
+    const entryHtml = `<span class="small">entry: <strong>${fmt(entry)}</strong></span>`;
+    const interpHtml = interpPx != null
+        ? `<span class="small">at interp: <strong>${fmt(interpPx)}</strong>${interpSrc ? ` <span class="muted small">(${_esc(interpSrc)})</span>` : ''}</span>`
+        : `<span class="muted small">at interp: —</span>`;
+    const liveHtml = `<span class="small">live: <strong data-role="live-px">…</strong> <span class="muted small" data-role="live-meta"></span></span>`;
+    const distHtml = `<span class="small">distance: <strong data-role="dist">—</strong></span>`;
+    const driftHtml = `<span class="small">drift: <strong data-role="drift">—</strong></span>`;
+    const ageHtml = interpTs ? `<span class="muted small">age: ${_relTime(interpTs)}</span>` : '';
+    return `<div id="${blockId}" class="row" data-symbol="${_esc(sym || '')}" data-exchange="${_esc(exch || '')}" data-entry="${entry == null ? '' : entry}" data-interp="${interpPx == null ? '' : interpPx}" style="gap:14px; flex-wrap:wrap; padding:8px 10px; background:var(--bg-elevated, rgba(255,255,255,0.03)); border-radius:4px;">${entryHtml}${interpHtml}${liveHtml}${distHtml}${driftHtml}${ageHtml}</div>`;
+}
+
+// Slice 2 §H — batch-hydrate all drawer live-market blocks via a single
+// ``GET /api/prices`` request. Each block carries data-symbol, data-entry,
+// and data-interp attributes; we collect unique symbols, fetch once, then
+// patch every matching block's DOM nodes.
+async function _drawerHydrateLiveMarkets(blockIds, abortSignal) {
+    if (!blockIds || blockIds.length === 0) return;
+
+    // Build symbol → block(s) map, filtering non-crypto.
+    const symbolToBlocks = new Map();
+    for (const blockId of blockIds) {
+        const block = document.getElementById(blockId);
+        if (!block) continue;
+        const sym = block.getAttribute('data-symbol') || '';
+        if (!sym || sym === 'UNKNOWN' || !_isCryptoLike(sym)) continue;
+        let bucket = symbolToBlocks.get(sym);
+        if (!bucket) { bucket = []; symbolToBlocks.set(sym, bucket); }
+        bucket.push(block);
+    }
+    if (symbolToBlocks.size === 0) return;
+
+    try {
+        const symbols = Array.from(symbolToBlocks.keys());
+        const p = new URLSearchParams();
+        p.set('symbols', symbols.join(','));
+        const url = new URL(`api/prices?${p.toString()}`, document.baseURI);
+        const headers = {};
+        if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+        const resp = await fetch(url, { headers, signal: abortSignal });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.ok) return;
+
+        for (const [sym, info] of Object.entries(data.prices || {})) {
+            const blocks = symbolToBlocks.get(sym);
+            if (!blocks) continue;
+            const live = info && info.price != null ? Number(info.price) : null;
+            const cached = info && info.cached;
+            for (const block of blocks) {
+                const pxNode = block.querySelector('[data-role="live-px"]');
+                const metaNode = block.querySelector('[data-role="live-meta"]');
+                const distNode = block.querySelector('[data-role="dist"]');
+                const driftNode = block.querySelector('[data-role="drift"]');
+                if (pxNode) {
+                    pxNode.textContent = Number.isFinite(live) ? _fmtNum(live, 4) : '—';
+                }
+                if (metaNode) {
+                    metaNode.textContent = cached ? 'cached' : '';
+                }
+                if (distNode && Number.isFinite(live)) {
+                    const entryRaw = block.getAttribute('data-entry');
+                    const interpRaw = block.getAttribute('data-interp');
+                    const entry = entryRaw ? Number(entryRaw) : null;
+                    const interp = interpRaw ? Number(interpRaw) : null;
+                    const ref = (Number.isFinite(entry) && entry > 0) ? entry : interp;
+                    if (Number.isFinite(ref) && ref > 0) {
+                        const pct = ((live - ref) / ref) * 100;
+                        distNode.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                    }
+                }
+                if (driftNode && Number.isFinite(live)) {
+                    const interpRaw = block.getAttribute('data-interp');
+                    const interp = interpRaw ? Number(interpRaw) : null;
+                    if (Number.isFinite(interp) && interp > 0) {
+                        const pct = ((live - interp) / interp) * 100;
+                        driftNode.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        // Silently fail — prices are best-effort.
+    }
+}
+
+function renderDrawer(rows, opts = {}) {
+    const body = document.getElementById('interp-drawer-body');
+    const mediaGallery = opts.mediaGallery || null;
+    const newsItem = opts.newsItem || null;
+    const memories = opts.memories || null;
+    const galleryHtml = _drawerGallery(mediaGallery);
+    const memoriesHtml = _drawerMemories(memories);
+
+    // Slice 1 §3.5 — empty-drawer branch: still show gallery + news header
+    // so chart-only posts that haven't been interpreted yet are useful.
+    if (!rows || rows.length === 0) {
+        const empty = '<div class="muted center-pad">No interpretation generated for this item yet.</div>';
+        body.innerHTML = (galleryHtml || '') + _drawerNewsItemHeader(newsItem) + empty;
+        return;
+    }
+
+    // Build a map of media_item_id -> sequence index so each interpretation
+    // row can show a "↳ from media #N" badge that anchors back into the gallery.
+    const mediaIndex = new Map();
+    if (Array.isArray(mediaGallery)) {
+        mediaGallery.forEach((m, idx) => {
+            if (m && m.id != null) mediaIndex.set(String(m.id), idx + 1);
+        });
+    }
+
+    const liveBlocksToHydrate = [];
+    const interpHtml = rows.map((r, rowIdx) => {
+        const dir = r.consensus_direction || 'unclear';
+        const dirCls = dir === 'long' ? 'success' : (dir === 'short' ? 'danger' : 'warning');
+        const sym = r.instrument?.symbol || 'UNKNOWN';
+        const exch = r.instrument?.exchange ? ` · ${_esc(r.instrument.exchange)}` : '';
+        const tf = r.instrument?.timeframe ? ` · ${_esc(r.instrument.timeframe)}` : '';
+        const resolvedFrom = r.instrument?.resolved_from ? `<span class="muted small">resolved via ${_esc(r.instrument.resolved_from)}</span>` : '';
+
+        // Media (chart image) — use ``_mediaSrc`` so external CDN URLs
+        // (Discord, Twitter, etc.) are routed through the SSRF-guarded
+        // ``/api/media/proxy`` endpoint and rendered as <img>, not as a
+        // bare hyperlink. ``_mediaSrc`` returns null only when there is
+        // no usable URL; in that case we fall back to a small text link.
+        const mediaSrc = _mediaSrc(r.media);
+        const mediaBlock = mediaSrc
+            ? `<a href="${_esc(mediaSrc)}" target="_blank" rel="noopener" class="drawer-card-image-link"><img src="${_esc(mediaSrc)}" alt="chart" loading="lazy" class="drawer-card-image"></a>`
+            : (r.media?.source_url
+                ? `<a href="${_esc(r.media.source_url)}" target="_blank" rel="noopener" class="muted small">External media link</a>`
+                : '<span class="muted small">— no chart available —</span>');
+
+        // Pre-filter banner
+        const pf = r.prefilter || {};
+        const pfBanner = pf.result
+            ? `<div class="pill warning" style="margin-bottom:8px;">pre-filter: ${_esc(pf.result)}${pf.model ? ` · ${_esc(pf.model)}` : ''}</div>`
+            : '';
+
+        // Actor block
+        const actor = r.actor || {};
+        const actorName = actor.handle_raw || actor.display_name || actor.handle_normalized || (r.news?.author) || '—';
+        const actorMeta = [actor.platform, actor.trader_type].filter(Boolean).map(x => `<span class="pill small">${_esc(x)}</span>`).join(' ');
+        const actorBlock = `<div class="row" style="gap:8px; align-items:center;"><strong>${_esc(actorName)}</strong>${actorMeta}</div>`;
+
+        // What the actor said (raw news content)
+        const actorSaid = r.news?.content
+            ? _drawerMultiline(r.news.content)
+            : (r.news?.headline ? `<div class="muted small">${_esc(r.news.headline)}</div>` : '<div class="muted small">— no text —</div>');
+
+        // News meta
+        const newsMeta = [r.news?.source, r.news?.channel_name, r.news?.published_at ? _relTime(r.news.published_at) : null]
+            .filter(Boolean).map(x => `<span class="muted small">${_esc(x)}</span>`).join(' · ');
+
+        // LLM reasoning + levels + thesis
+        const llmReasoning = r.llm?.reasoning ? _drawerMultiline(r.llm.reasoning) : '';
+        const llmLevels = _drawerLevels(r.llm?.levels);
+        const llmConf = r.llm?.confidence != null ? `<div class="small">LLM confidence: <strong>${_fmtNum(r.llm.confidence)}</strong></div>` : '';
+        const llmDir = r.llm?.direction ? `<span class="pill ${r.llm.direction === 'long' ? 'success' : (r.llm.direction === 'short' ? 'danger' : 'warning')} small">${_esc(r.llm.direction)}</span>` : '';
+
+        // Quant
+        const quantConf = r.quant?.confidence != null ? `<div class="small">Quant confidence: <strong>${_fmtNum(r.quant.confidence)}</strong></div>` : '';
+        const quantDir = r.quant?.direction ? `<span class="pill ${r.quant.direction === 'long' ? 'success' : (r.quant.direction === 'short' ? 'danger' : 'warning')} small">${_esc(r.quant.direction)}</span>` : '';
+        const quantInd = r.quant?.indicators ? `<pre class="small muted" style="white-space:pre-wrap; max-height:140px; overflow:auto; background:var(--bg-elevated, rgba(255,255,255,0.03)); padding:6px; border-radius:4px;">${_esc(JSON.stringify(r.quant.indicators, null, 2))}</pre>` : '';
+
+        // Chart hacker opinion
+        const ch = r.chart_hacker || {};
+        const chComment = ch.ai_comment ? _drawerMultiline(ch.ai_comment) : '';
+        const chAgree = ch.ai_agreement_score != null ? `<div class="small">AI agreement: <strong>${_fmtNum(ch.ai_agreement_score)}</strong></div>` : '';
+        const chTrades = _drawerChartHackerTrades(ch.chart_hacker_trades);
+
+        // Theses
+        const tStated = r.thesis?.trader_stated ? _drawerMultiline(r.thesis.trader_stated) : '';
+        const tInferred = r.thesis?.llm_inferred ? _drawerMultiline(r.thesis.llm_inferred) : '';
+        const tAgree = r.thesis?.reason_agreement_score != null ? `<div class="small">Reason agreement: <strong>${_fmtNum(r.thesis.reason_agreement_score)}</strong></div>` : '';
+
+        // Tags
+        const tagsBlock = _drawerTagPills(r.tags);
+
+        // Vision / model footer
+        const v = r.vision || {};
+        const visionTxt = [v.provider, v.model_resolved || v.model_requested].filter(Boolean).join(' · ');
+        const pfFooter = [pf.provider, pf.model, pf.cost_usd ? `$${pf.cost_usd}` : null].filter(Boolean).join(' · ');
+
+        // Slice 1 §3.3 — per-interp media badge that links back to the gallery tile.
+        const mediaItemId = r.media_item_id != null ? String(r.media_item_id) : null;
+        const mediaSeq = mediaItemId ? mediaIndex.get(mediaItemId) : null;
+        const mediaBadge = mediaSeq
+            ? `<a href="#gallery-${_esc(mediaItemId)}" class="pill info small">↳ from media #${_esc(String(mediaSeq))}</a>`
+            : '';
+
+        // Slice 2 §H — live-market block. Pull entry from LLM levels (or
+        // first chart_hacker trade) and interp-time price from quant
+        // indicators (Slice 2 §B stamps ``current_price_at_interp``).
+        // Slice 2 §H — coalesced levels (dedicated NUMERIC columns
+        // preferred over JSONB llm_levels). r.levels is the output of
+        // _coalesce_signal_levels() on the snapshot API path; the drawer
+        // provider may also inject it. We check both.
+        const coalescedLevels = r.levels || {};
+        const llmLevelsObj = (r.llm && r.llm.levels) || {};
+        const firstTrade = (() => {
+            const t = ch.chart_hacker_trades;
+            if (Array.isArray(t) && t.length) return t[0];
+            if (t && Array.isArray(t.trades) && t.trades.length) return t.trades[0];
+            return null;
+        })();
+        const entryPx = _firstNumeric([
+            coalescedLevels.entry,
+            llmLevelsObj.entry,
+            firstTrade ? firstTrade.entry : null,
+        ]);
+        const indicators = (r.quant && r.quant.indicators) || {};
+        const interpPx = _firstNumeric([
+            indicators.current_price_at_interp,
+            indicators.current_price,
+        ]);
+        const interpSrc = indicators.interp_price_source || indicators.price_source || null;
+        const interpTs = indicators.interp_price_at || null;
+        const liveMarketHtml = _drawerLiveMarketBlock(
+            rowIdx, sym, r.instrument?.exchange || '',
+            entryPx, interpPx, interpTs, interpSrc,
+        );
+        liveBlocksToHydrate.push(`live-market-${rowIdx}`);
+
+        // Slice 2 §H — interpretation drawer card uses a 2-column grid:
+        // textual fields stack on the left; the chart image and the
+        // live-market panel are pinned in the right rail. This addresses
+        // the user's feedback ("image should be on the right") while
+        // keeping the live-price block beside the chart for at-a-glance
+        // signal-vs-current comparison. The grid collapses to a single
+        // column under ~720px (drawer-card-grid CSS rule).
+        return `
+        <div class="content-card drawer-card" style="padding:16px; margin-bottom:16px;">
+            <div class="row drawer-card-header" style="justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <h4 style="margin:0;">Interpretation #${r.id} ${mediaBadge}</h4>
+                <span class="muted small">${_relTime(r.created_at)}</span>
+            </div>
+            ${pfBanner}
+            <div class="row drawer-card-summary" style="gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+                <span class="pill ${dirCls}">${_esc(dir)}</span>
+                <strong>${_esc(sym)}</strong>
+                <span class="muted small">${exch}${tf}</span>
+                <span class="muted small">conf ${_fmtNum(r.consensus_confidence)}</span>
+                <span class="muted small">· method ${_esc(r.consensus_method || '—')}</span>
+            </div>
+            ${resolvedFrom ? `<div style="margin-bottom:8px;">${resolvedFrom}</div>` : ''}
+
+            <div class="drawer-card-grid">
+                <div class="drawer-card-fields">
+                    ${_drawerSection('Actor', actorBlock + (newsMeta ? `<div style="margin-top:4px;">${newsMeta}</div>` : ''))}
+                    ${_drawerSection('What the actor said', actorSaid)}
+
+                    ${_drawerSection('LLM analysis',
+                        `<div class="row" style="gap:8px; align-items:center; margin-bottom:6px;">${llmDir}${llmConf}</div>` +
+                        llmReasoning +
+                        (llmLevels ? _drawerSection('Levels', llmLevels) : '')
+                    )}
+
+                    ${(quantConf || quantDir || quantInd) ? _drawerSection('Quant analysis',
+                        `<div class="row" style="gap:8px; align-items:center; margin-bottom:6px;">${quantDir}${quantConf}</div>` +
+                        quantInd
+                    ) : ''}
+
+                    ${(chComment || chAgree || chTrades) ? _drawerSection('Chart-Hacker opinion',
+                        (chAgree ? `<div style="margin-bottom:6px;">${chAgree}</div>` : '') +
+                        chComment +
+                        (chTrades ? _drawerSection('Chart-Hacker trades', chTrades) : '')
+                    ) : ''}
+
+                    ${(tStated || tInferred || tAgree) ? _drawerSection('Theses',
+                        (tStated ? `<div class="muted small" style="margin-bottom:2px;">trader stated</div>${tStated}` : '') +
+                        (tInferred ? `<div class="muted small" style="margin:8px 0 2px 0;">llm inferred</div>${tInferred}` : '') +
+                        (tAgree ? `<div style="margin-top:6px;">${tAgree}</div>` : '')
+                    ) : ''}
+
+                    ${tagsBlock ? _drawerSection('Tags', tagsBlock) : ''}
+                </div>
+
+                <aside class="drawer-card-rail">
+                    <div class="drawer-card-rail-media">${mediaBlock}</div>
+                    ${_drawerSection('Live market', liveMarketHtml)}
+                </aside>
+            </div>
+
+            <div class="row drawer-card-footer" style="gap:12px; flex-wrap:wrap; margin-top:14px; padding-top:10px; border-top:1px solid var(--border-color);">
+                <span class="muted small">model: <strong>${_esc(r.model_version || '—')}</strong></span>
+                ${visionTxt ? `<span class="muted small">vision: <strong>${_esc(visionTxt)}</strong></span>` : ''}
+                ${pfFooter ? `<span class="muted small">prefilter: <strong>${_esc(pfFooter)}</strong></span>` : ''}
+                ${r.prompt_version ? `<span class="muted small">prompt: <strong>${_esc(r.prompt_version)}</strong></span>` : ''}
+                ${r.correlation_id ? `<span class="muted small">corr: <code>${_esc(r.correlation_id)}</code></span>` : ''}
+            </div>
+        </div>
+        `;
+    }).join('');
+
+    body.innerHTML = (galleryHtml || '') + (memoriesHtml || '') + interpHtml;
+
+    // Slice 2 §H — batch-hydrate all drawer live-market blocks in one
+    // request to ``GET /api/prices``, eliminating the N+1 problem and
+    // 429 rate-limit risk entirely.
+    if (state.priceAbort) {
+        try { state.priceAbort.abort(); } catch (_) {}
+    }
+    state.priceAbort = new AbortController();
+    _drawerHydrateLiveMarkets(liveBlocksToHydrate, state.priceAbort.signal);
+}
+
+// --- WebSocket for Queue ---
+function connectQueueWS() {
+    if (state.queueWS) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const path = window.location.pathname.replace(/\/$/, '');
+    const wsUrl = `${protocol}//${window.location.host}${path}/ws/queue?token=dev_token`;
+    state.queueWS = new WebSocket(wsUrl);
+    state.queueWS.onmessage = e => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'queue_update') renderQueue(msg.data);
+    };
+    state.queueWS.onclose = () => {
+        state.queueWS = null;
+        if (state.currentTab === 'queue') setTimeout(connectQueueWS, 5000);
+    };
+}
+
+// --- Phase 7 — Price Feed WebSocket Client ---
+/**
+ * Connect to the dashboard's price-feed WebSocket bridge.
+ *
+ * Collects all unique symbols from the current tab's rows, opens a WS
+ * to ``/api/ws/prices?symbols=...``, and on each ticker message updates
+ * every matching ``[data-role="live-px"]`` cell in the DOM.
+ *
+ * Falls back to polling (``_hydratePositionPrices`` / ``_signalsHydrateLivePrices``)
+ * if the WebSocket fails to connect or disconnects.
+ */
+function connectPriceFeedWS() {
+    if (state.priceFeedWS) return;
+
+    // Collect unique symbols from the active tab
+    const symbols = new Set();
+    const tabId = state.currentTab;
+    let tableSelector;
+    if (tabId === 'positions') tableSelector = '#positions-table tbody tr';
+    else if (tabId === 'signals') tableSelector = '#signals-table tbody tr';
+    else return;
+
+    document.querySelectorAll(tableSelector).forEach(tr => {
+        const sym = tr.dataset.symbol;
+        if (sym && sym !== 'UNKNOWN') symbols.add(sym);
+    });
+
+    if (symbols.size === 0) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const path = window.location.pathname.replace(/\/$/, '');
+    const symList = Array.from(symbols).join(',');
+    const wsUrl = `${protocol}//${window.location.host}${path}/api/ws/prices?symbols=${encodeURIComponent(symList)}`;
+
+    try {
+        state.priceFeedWS = new WebSocket(wsUrl);
+    } catch (_) {
+        // WebSocket not supported or blocked — fall back to polling
+        state.priceFeedWS = null;
+        return;
+    }
+
+    state.priceFeedWS.onopen = () => {
+        console.log('Price feed WS connected, symbols:', symbols.size);
+    };
+
+    state.priceFeedWS.onmessage = (e) => {
+        try {
+            const msg = JSON.parse(e.data);
+            if (!msg.symbol || msg.price == null) return;
+            const price = Number(msg.price);
+            if (!Number.isFinite(price)) return;
+
+            // Update all matching live-px cells in the DOM
+            document.querySelectorAll('[data-role="live-px"]').forEach(el => {
+                // Walk up to find the row's data-symbol
+                const tr = el.closest('tr');
+                if (!tr) return;
+                const rowSym = tr.dataset.symbol;
+                if (rowSym !== msg.symbol) return;
+                el.textContent = _fmtNum(price, 4);
+
+                // Update distance cell if present (signals tab)
+                const distNode = tr.querySelector('[data-role="dist"]');
+                if (distNode) {
+                    const entryRaw = tr.querySelector('[data-entry]')?.getAttribute('data-entry');
+                    const entry = entryRaw ? Number(entryRaw) : null;
+                    if (Number.isFinite(entry) && entry > 0) {
+                        const pct = ((price - entry) / entry) * 100;
+                        distNode.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                        distNode.className = pct >= 0 ? 'success' : 'danger';
+                    }
+                }
+
+                // Update entry status for positions tab
+                if (tabId === 'positions') {
+                    _updateEntryStatus(el, price);
+                }
+            });
+        } catch (_) {
+            // Ignore malformed messages
+        }
+    };
+
+    state.priceFeedWS.onerror = () => {
+        // WS error — close and fall back to polling
+        closePriceFeedWS();
+    };
+
+    state.priceFeedWS.onclose = () => {
+        state.priceFeedWS = null;
+        // Reconnect if still on positions/signals tab
+        if (state.currentTab === 'positions' || state.currentTab === 'signals') {
+            setTimeout(connectPriceFeedWS, 5000);
+        }
+    };
+}
+
+function closePriceFeedWS() {
+    if (state.priceFeedWS) {
+        try { state.priceFeedWS.close(); } catch (_) {}
+        state.priceFeedWS = null;
+    }
+}
+
+function renderQueue(data) {
+    const newsBody = document.querySelector('#queue-news-table tbody');
+    newsBody.innerHTML = (data.news_pending || []).map(n => `
+        <tr>
+            <td>${_pill(n.source)}</td>
+            <td><strong>${_esc(n.headline || '—')}</strong></td>
+            <td>${_pill('pending', 'warning')}</td>
+            <td class="muted">${_relTime(n.collected_at)}</td>
+        </tr>
+    `).join('');
+
+    const mediaBody = document.querySelector('#queue-media-table tbody');
+    mediaBody.innerHTML = (data.media_pending || []).map(m => `
+        <tr>
+            <td>${_pill(m.media_type)}</td>
+            <td>${_pill(m.processing_status, 'info')}</td>
+            <td class="muted">${_relTime(m.created_at)}</td>
+        </tr>
+    `).join('');
+}
+
+// --- Initialization ---
+window.addEventListener('DOMContentLoaded', () => {
+    // Sidebar toggle
+    const toggle = document.getElementById('sidebar-toggle');
+    const sidebar = document.querySelector('.sidebar');
+    if (state.sidebarCollapsed) sidebar.classList.add('collapsed');
+
+    toggle.addEventListener('click', () => {
+        state.sidebarCollapsed = !state.sidebarCollapsed;
+        sidebar.classList.toggle('collapsed');
+        localStorage.setItem("sidebar_collapsed", state.sidebarCollapsed);
+    });
+
+    // Tab clicks
+    document.querySelectorAll('.sidebar-nav a').forEach(a => {
+        a.addEventListener('click', e => {
+            e.preventDefault();
+            switchTab(a.dataset.tab);
+        });
+    });
+
+    // Global Filters
+    document.getElementById('company-filter').addEventListener('change', e => {
+        state.companyFilter = e.target.value;
+        triggerRefresh(state.currentTab);
+        triggerRefresh('stats');
+    });
+
+    document.getElementById('manual-refresh').addEventListener('click', () => {
+        triggerRefresh(state.currentTab);
+        triggerRefresh('stats');
+    });
+
+    // Learning Controls
+    document.querySelectorAll('#learning-window-tabs .window-tab').forEach(el => {
+        el.addEventListener('click', e => {
+            e.preventDefault();
+            state.learningWindow = el.dataset.window;
+            document.querySelectorAll('#learning-window-tabs .window-tab').forEach(x => x.classList.remove('active'));
+            el.classList.add('active');
+            triggerRefresh('learning');
+        });
+    });
+
+    document.getElementById('learning-feed-dim').addEventListener('change', e => {
+        state.learningDimension = e.target.value;
+        triggerRefresh('learning');
+    });
+
+    // News Controls
+    document.querySelectorAll('#news-window-tabs .window-tab').forEach(el => {
+        el.addEventListener('click', e => {
+            e.preventDefault();
+            state.newsWindow = el.dataset.window;
+            document.querySelectorAll('#news-window-tabs .window-tab').forEach(x => x.classList.remove('active'));
+            el.classList.add('active');
+            triggerRefresh('news');
+        });
+    });
+
+    document.getElementById('news-source-filter').addEventListener('change', e => {
+        state.newsSource = e.target.value;
+        triggerRefresh('news');
+    });
+
+    // Config Search
+    document.getElementById('config-search').addEventListener('input', e => {
+        state.configSearch = e.target.value;
+        renderConfigUI();
+    });
+
+    // Search inputs for signals and positions tabs (M1)
+    document.getElementById('signals-search').addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase();
+        document.querySelectorAll('#signals-table tbody tr').forEach(tr => {
+            tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+        });
+    });
+
+    document.getElementById('positions-search').addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase();
+        document.querySelectorAll('#positions-table tbody tr').forEach(tr => {
+            tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+        });
+    });
+
+    // Drawer click delegation
+    document.body.addEventListener('click', e => {
+        const row = e.target.closest('tr[data-interp-id], tr[data-news-item-id]');
+        if (row && !e.target.closest('a, button')) {
+            openInterpretationDrawer({
+                interpId: row.dataset.interpId,
+                newsItemId: row.dataset.newsItemId
+            });
+        }
+    });
+
+    const _closeInterpDrawer = () => {
+        document.getElementById('interp-drawer').classList.add('hidden');
+        document.getElementById('interp-drawer-backdrop').classList.add('hidden');
+        // Slice 2 §H — abort any in-flight live-price probe so the drawer
+        // doesn't keep firing /api/price after the user dismissed it.
+        if (state.priceAbort) { try { state.priceAbort.abort(); } catch (_) {} }
+        state.priceAbort = null;
+        if (state.priceTimer) { try { clearInterval(state.priceTimer); } catch (_) {} }
+        state.priceTimer = null;
+    };
+    document.getElementById('interp-drawer-close').addEventListener('click', _closeInterpDrawer);
+    document.getElementById('interp-drawer-backdrop').addEventListener('click', _closeInterpDrawer);
+
+    // Auto-refresh toggle button (M2)
+    const refreshToggle = document.createElement('button');
+    refreshToggle.id = 'auto-refresh-toggle';
+    refreshToggle.className = 'icon-btn';
+    refreshToggle.title = 'Toggle auto-refresh';
+    refreshToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>';
+    refreshToggle.style.opacity = state.autoRefresh ? '1' : '0.4';
+    document.querySelector('.top-bar-right').prepend(refreshToggle);
+
+    refreshToggle.addEventListener('click', () => {
+        state.autoRefresh = !state.autoRefresh;
+        refreshToggle.style.opacity = state.autoRefresh ? '1' : '0.4';
+    });
+
+    // Start
+    showSection('app');
+    switchTab('overview');
+});

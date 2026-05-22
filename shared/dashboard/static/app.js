@@ -1,1579 +1,444 @@
-/* shared/dashboard/static/app.js */
-console.log("Dashboard JS loading...");
+(()=>{
+/* Tickles v5 — competition inline expand, chart tabs in Discord drawer, trader usernames, compact rows. */
+console.log('Tickles Dashboard v5 loading');
+const state={tab:'floor',company:'all',snap:null,competitions:null,learning:null,news:null,agentPerf:null,sort:{},charts:{},timer:null,expandedAgent:null};
+const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
+const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
+const n=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
+const fmt=(v,d=2)=>{const x=Number(v);return Number.isFinite(x)?x.toFixed(d):'—'};
+const usd=v=>`${n(v)>=0?'+':''}$${Math.abs(n(v)).toFixed(2)}`;
+const pct=v=>`${n(v)>=0?'+':''}${fmt(v,2)}%`;
+const rel=iso=>{if(!iso)return'—';const s=Math.max(0,Math.floor((Date.now()-new Date(iso))/1000));if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`};
+const fmtDate=iso=>{if(!iso)return'—';const d=new Date(iso);return d.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})};
+const initials=v=>(v||'?').split(/[\s._-]/).filter(Boolean).map(x=>x[0]).join('').slice(0,2).toUpperCase();
+const pill=(v,k='')=>`<span class="pill ${k||String(v||'').toLowerCase()}">${esc(v||'—')}</span>`;
+const dirPill=d=>`<span class="pill ${d==='short'?'short':'long'}">${esc(d||'long')}</span>`;
+const traderName=p=>{if(!p)return'trader';const name=p.actor_display||p.display_name||p.trader_display_name||p.actor_handle||p.handle_raw||p.trader_handle_raw||p.handle_normalized||p.trader_handle_normalized||p.actor_id||'trader';return String(name).replace(/^(jarvais_trader_|trader_)/i,'')};
 
-const state = {
-    token: localStorage.getItem("tickles_token") || null,
-    currentTab: 'overview',
-    companyFilter: 'all',
-    autoRefresh: true,
-    refreshInterval: null,
-    selectedTraderId: null,
-    queueWS: null,
-    learningWindow: '1m',     // PHASE_Y §11 Q3: default 30d shown as "1M"
-    learningDimension: '',    // memory-feed dimension filter (empty = all)
-    newsWindow: '24h',        // PHASE_X.4 — news feed window: 24h / 7d / 30d
-    newsSource: '',           // news source filter (empty = all)
-    newsHasMedia: '',         // tri-state: '' (any), 'true', 'false'
-    configSnapshot: null,     // PHASE_X.6 — last fetched {shared, companies} payload
-    configSearch: ''          // PHASE_X.6 — case-insensitive substring filter
-};
+async function api(path,opt={}){const u=new URL(path.replace(/^\//,''),document.baseURI);if(!opt.skipCompany&&state.company!=='all')u.searchParams.set('company',state.company);const r=await fetch(u);const j=await r.json();if(!r.ok)throw j;return j}
+async function load(){try{const needsSnap=['floor','radar','signals','positions','traders','ops'].includes(state.tab)||!state.snap;if(needsSnap)state.snap=await api('/api/snapshot');if(state.tab==='competition'||state.tab==='floor')state.competitions=await api('/api/competitions');if(state.tab==='learning'||state.tab==='floor'||state.tab==='traders')state.learning=await fetchLearning();if(state.tab==='news'||state.tab==='floor')state.news=await api('/api/news/feed?window=30d&limit=120');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
+async function fetchLearning(){const [skill,feed,brain]=await Promise.all([api('/api/learning/skill-summary?window=1m'),api('/api/learning/memory-feed?window=1m'),api('/api/learning/agent-brain?window=1m')]);return{skill,feed,brain}}
+function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],radar:['LIVE ENTRY WATCH','Entry Radar'],competition:['CONTEST MODE','Competition'],signals:['ENTRY WATCH','Signals Watch'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost']};$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
+function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='radar')renderRadarPage();if(state.tab==='competition')renderCompetition();if(state.tab==='signals')renderSignalsPage();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage()}
+function renderStats(){const s=state.snap||{};const pnl=n(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`edge ${fmt(s.top_actor_score,3)}`:'edge —';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
 
-async function api(path, opts = {}) {
-    const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
-    if (state.token) headers["Authorization"] = "Bearer " + state.token;
-    
-    // Use relative paths (base tag handles the prefix)
-    const cleanPath = path.startsWith('/') ? path.slice(1) : path;
-    const url = new URL(cleanPath, document.baseURI);
-    if (state.companyFilter && state.companyFilter !== 'all') {
-        url.searchParams.set('company', state.companyFilter);
-    }
+/* ─── row helpers ─── */
+function rowMain(sym,sub){return`<div class="main-cell"><div class="token-dot">${esc(initials(sym))}</div><div><div class="primary">${esc(sym)}</div><div class="secondary">${esc(sub||'')}</div></div></div>`}
 
-    const resp = await fetch(url, Object.assign({ headers }, opts));
-    if (resp.status === 401) {
-        setToken(null);
-        showSection('login');
-        throw new Error("Unauthorized");
-    }
-    const body = await resp.json();
-    if (!resp.ok) throw body;
-    return body;
+/* ─── competition — INLINE expand, no drawer ─── */
+async function renderCompetition(){
+  const c=state.competitions?.competitions?.[0];
+  if(!c){$('#competition-body').innerHTML='<div class="empty">No active competition</div>';return}
+  const rows=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).map(p=>{
+    const eq=n(p.scores?.equity), rpct=n(p.scores?.return_pct);
+    return `<tr class="comp-row" data-agent="${esc(p.agent_id)}" id="comp-tr-${esc(p.agent_id)}">
+      <td class="num rank">#${p.rank}</td>
+      <td>${rowMain(p.agent_id,p.metadata?.description||p.strategy_ref||'')}</td>
+      <td>${esc(p.strategy_ref||'—')}</td>
+      <td class="num mono">$${fmt(eq,2)}</td>
+      <td class="num">${usd(p.scores?.total_realized_pnl_usd)}<br><span class="secondary small">unreal ${usd(p.scores?.unrealized_pnl_usd)}</span></td>
+      <td class="num ${rpct>=0?'success':'danger'}">${pct(rpct)}</td>
+      <td class="num">${fmt(n(p.scores?.win_rate)*100,1)}%</td>
+      <td class="num">${p.scores?.total_trades||0}</td>
+      <td class="num">${p.scores?.open_positions||0}</td>
+    </tr>`;
+  });
+  $('#competition-body').innerHTML=`<table class="data-table comp-table"><thead><tr>
+    <th class="num">Rank</th><th>Agent / description</th><th>Strategy</th>
+    <th class="num">Equity</th><th class="num">P&L</th><th class="num">Return</th>
+    <th class="num">Win</th><th class="num">Trades</th><th class="num">Open</th>
+  </tr></thead><tbody>${rows.join('')}</tbody></table><div id="comp-expand-zone"></div>`;
+  $$('#competition-body .comp-row').forEach(tr=>tr.onclick=()=>toggleAgentExpand(tr.dataset.agent));
+  // Restore expanded agent after refresh
+  if(state.expandedAgent&&state._agentCache&&state._agentCache.agentId===state.expandedAgent){
+    setTimeout(()=>toggleAgentExpand(state.expandedAgent,true),50);
+  }
 }
 
-function setToken(t) {
-    state.token = t;
-    if (t) localStorage.setItem("tickles_token", t);
-    else localStorage.removeItem("tickles_token");
+async function toggleAgentExpand(agentId,fromCache){
+  const prev=state.expandedAgent;
+  if(prev===agentId&&!fromCache){state.expandedAgent=null;state._agentCache=null;$('#comp-expand-zone').innerHTML='';$$('.comp-row').forEach(r=>r.classList.remove('expanded'));return}
+  $$('.comp-row').forEach(r=>r.classList.remove('expanded'));
+  const tr=document.getElementById('comp-tr-'+agentId); if(tr) tr.classList.add('expanded');
+  state.expandedAgent=agentId;
+  if(fromCache&&state._agentCache&&state._agentCache.agentId===agentId){
+    renderAgentInline(agentId,state._agentCache.data);
+    return;
+  }
+  $('#comp-expand-zone').innerHTML=`<div class="comp-detail"><div class="comp-detail-loading">Loading ${esc(agentId)} positions…</div></div>`;
+  try{
+    const d=await api('/api/competition-agent?agent='+encodeURIComponent(agentId));
+    state._agentCache={agentId,data:d};
+    renderAgentInline(agentId,d);
+  }catch(e){
+    $('#comp-expand-zone').innerHTML=`<div class="comp-detail"><div class="empty">Failed to load agent data</div></div>`;
+  }
 }
 
-function showSection(id) {
-    console.log(`Showing section: ${id}`);
-    document.getElementById('login').classList.add('hidden');
-    document.getElementById('app').classList.add('hidden');
-    const target = document.getElementById(id);
-    if (target) target.classList.remove('hidden');
-    else console.error(`Section not found: ${id}`);
-}
+function renderAgentInline(agentId,d){
+  if(!d||!d.ok){$('#comp-expand-zone').innerHTML='<div class="empty">No agent data</div>';return}
+  const a=d.agent||{}, open=d.open_positions||[], hist=d.history||[];
+  let posTab='live';
 
-function switchTab(tabId, params = {}) {
-    state.currentTab = tabId;
-    
-    // Show/hide Trader Drill tab link
-    const drillLink = document.querySelector('nav a[data-tab="trader-drill"]');
-    if (tabId === 'trader-drill') {
-        drillLink.classList.remove('hidden');
-        if (params.traderId) state.selectedTraderId = params.traderId;
-    } else if (!state.selectedTraderId) {
-        drillLink.classList.add('hidden');
-    }
-
-    document.querySelectorAll('nav a').forEach(a => {
-        a.classList.toggle('active', a.dataset.tab === tabId);
-    });
-    document.querySelectorAll('.tab-content').forEach(content => {
-        content.classList.toggle('active', content.id === `tab-${tabId}`);
-    });
-    
-    // Handle WebSocket for Queue tab
-    if (tabId === 'queue') {
-        connectQueueWS();
-    } else if (state.queueWS) {
-        state.queueWS.close();
-        state.queueWS = null;
-    }
-
-    refresh();
-}
-
-async function refresh() {
-    if (!state.token) return;
-    
-    try {
-        const snap = await api('/api/snapshot');
-        renderStats(snap);
-        renderTab(state.currentTab, snap);
-        
-        // Handle anchor highlighting if present
-        handleAnchors();
-    } catch (e) {
-        console.error("Refresh failed", e);
-    }
-}
-
-function renderStats(snap) {
-    const numOrZero = (v) => {
-        const n = Number(v);
-        return isFinite(n) ? n : 0;
-    };
-    const signals = snap.signals_today_count ?? 0;
-    const cost = numOrZero(snap.api_cost_today_usd);
-    const posCount = snap.open_positions_count ?? 0;
-    const pnl = numOrZero(snap.open_positions_unrealized_pnl);
-    const ingest = snap.ingest_depth ?? 0;
-
-    document.getElementById('stat-signals').textContent = signals;
-    document.getElementById('stat-cost').textContent = `$${cost.toFixed(2)}`;
-    document.getElementById('stat-pos').textContent = posCount;
-    document.getElementById('stat-pnl').textContent = `$${pnl.toFixed(2)}`;
-    document.getElementById('stat-pnl').className = 'stat-value ' + (pnl >= 0 ? 'pnl pos' : 'pnl neg');
-    document.getElementById('stat-ingest').textContent = ingest;
-}
-
-function renderTab(tabId, snap) {
-    const container = document.getElementById(`tab-${tabId}`);
-    if (!container) return;
-
-    switch (tabId) {
-        case 'overview':
-            renderOverview(snap);
-            break;
-        case 'leaderboard':
-            renderLeaderboard(snap.leaderboard);
-            break;
-        case 'signals':
-            renderSignals(snap.signals);
-            break;
-        case 'positions':
-            renderPositions(snap.positions);
-            break;
-        case 'interpretations':
-            renderInterpretations(snap.interpretations);
-            break;
-        case 'trader-drill':
-            renderTraderDrill();
-            break;
-        case 'queue':
-            // Handled by WebSocket
-            break;
-        case 'learning':
-            renderLearning();
-            break;
-        case 'news':
-            renderNews();
-            break;
-        case 'config':
-            renderConfig();
-            break;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Phase Y — Learning tab
-// ---------------------------------------------------------------------------
-
-// UI label → numeric window-days. Mirrors shared/dashboard/learning_routes.py
-// _WINDOW_LABELS so the JS and the server agree on "1M" === 30.
-const LEARNING_WINDOW_DAYS = { '7d': 7, '14d': 14, '1m': 30 };
-
-function _learningWindowDays() {
-    return LEARNING_WINDOW_DAYS[state.learningWindow] || 30;
-}
-
-async function renderLearning() {
-    // Hash round-trip — accept #window=14d and update state before fetching.
-    const hash = window.location.hash || '';
-    const m = hash.match(/window=([a-zA-Z0-9]+)/);
-    if (m && LEARNING_WINDOW_DAYS[m[1].toLowerCase()]) {
-        state.learningWindow = m[1].toLowerCase();
-    }
-    _highlightLearningWindow();
-
-    // Fetch the four data sources in parallel — providers run under a 250ms
-    // budget server-side so this whole render typically completes <300ms.
-    const winLabel = state.learningWindow;
-    const winDays = _learningWindowDays();
-    const dim = state.learningDimension || '';
-    const dimQs = dim ? `&dimension=${encodeURIComponent(dim)}` : '';
-
-    let skillRes, brainRes, feedRes, failedRes, guardRes, promptRes;
-    try {
-        [skillRes, brainRes, feedRes, failedRes, guardRes, promptRes] = await Promise.all([
-            api(`/api/learning/skill-summary?window=${winLabel}`),
-            api(`/api/learning/agent-brain?window=${winLabel}`),
-            api(`/api/learning/memory-feed?window=${winLabel}${dimQs}`),
-            api(`/api/learning/failed-trades?window=${winLabel}`),
-            api(`/api/learning/guard-activity`),
-            api(`/api/learning/prompt-evolution?window=${winDays}&limit=50`)
-        ]);
-    } catch (e) {
-        console.error('Learning tab fetch failed', e);
-        const strip = document.getElementById('learning-header-strip');
-        if (strip) strip.innerHTML = `<div class="muted">Unable to load learning data.</div>`;
-        // Clear stale data from prior render so the user isn't misled by old numbers.
-        const feedTbody = document.querySelector('#learning-feed-table tbody');
-        if (feedTbody) feedTbody.innerHTML = `<tr><td colspan="5" class="muted">—</td></tr>`;
-        const brainBox = document.getElementById('learning-brain-cards');
-        if (brainBox) brainBox.innerHTML = `<div class="muted">—</div>`;
-        const guardBox = document.getElementById('learning-guard-list');
-        if (guardBox) guardBox.innerHTML = `<div class="muted">—</div>`;
-        const promptBox = document.getElementById('learning-prompt-timeline');
-        if (promptBox) promptBox.innerHTML = `<div class="muted">—</div>`;
-        return;
-    }
-
-    renderLearningHeader(skillRes.rows || [], failedRes.rows || [], winDays);
-    renderMemoryFeed(feedRes.rows || []);
-    renderAgentBrainCards(brainRes.rows || []);
-    renderGuardActivity(guardRes.rows || []);
-    renderPromptEvolution(promptRes.rows || []);
-}
-
-function _guardSeverityClass(severity) {
-    // Map provider severity to pill class. Unknown values fall back to neutral.
-    const s = (severity || '').toLowerCase();
-    if (s === 'error') return 'bad';
-    if (s === 'warn' || s === 'warning') return 'warn';
-    if (s === 'info') return 'ok';
-    return '';
-}
-
-function renderGuardActivity(rows) {
-    const container = document.getElementById('learning-guard-list');
-    if (!container) return;
-    if (!Array.isArray(rows) || !rows.length) {
-        container.innerHTML = `<div class="muted">No guard warnings — all systems nominal.</div>`;
-        return;
-    }
-    // Sort by ts DESC (newest first); rows without ts sort last.
-    const sorted = rows.slice().sort((a, b) => {
-        const ta = a && a.ts ? Date.parse(a.ts) : 0;
-        const tb = b && b.ts ? Date.parse(b.ts) : 0;
-        return (tb || 0) - (ta || 0);
-    });
-    container.innerHTML = sorted.map(r => {
-        const sev = _guardSeverityClass(r.severity);
-        const kind = r.kind || '—';
-        const company = r._company || r.company || '';
-        const message = r.message || '';
-        const tsRaw = r.ts;
-        const ts = tsRaw ? new Date(tsRaw).toLocaleString() : '';
-        return `
-        <div class="guard-row">
-            <div class="guard-head">
-                <span class="pill ${sev}">${_esc(r.severity || 'info')}</span>
-                ${company ? `<span class="company-tag">${_esc(company)}</span>` : ''}
-                <span class="guard-kind">${_esc(kind)}</span>
-                ${ts ? `<span class="guard-ts">${_esc(ts)}</span>` : ''}
-            </div>
-            ${message ? `<div class="guard-msg">${_esc(message)}</div>` : ''}
-        </div>`;
+  function buildLive(){
+    if(!open.length)return'<tr><td colspan="11" class="empty">No open positions — waiting for new signals</td></tr>';
+    return open.map((p,i)=>{
+      const upnl=n(p.unrealized_pnl), upct=n(p.unrealized_pnl_pct);
+      const dir=(p.direction||'long').toLowerCase();
+      const cur=p.current_price?fmt(p.current_price,4):'…';
+      const tname=traderName(p);
+      const sigId=p.signal_interpretation_id;
+      return `<tr class="pos-table-row ${upnl>=0?'win':'loss'} clickable" data-sig="${esc(sigId)}">
+        <td><strong>${esc(p.symbol)}</strong></td>
+        <td>${dirPill(dir)}</td>
+        <td class="num mono">${fmt(p.entry_price,4)}</td>
+        <td class="num mono">${cur}</td>
+        <td class="num mono">${p.sl_price?fmt(p.sl_price,4):'—'}</td>
+        <td class="num mono">${p.tp_price?fmt(p.tp_price,4):'—'}</td>
+        <td class="num ${upnl>=0?'success':'danger'}"><strong>${usd(upnl)}</strong></td>
+        <td class="num ${upct>=0?'success':'danger'}">${upct>=0?'+':''}${fmt(upct,2)}%</td>
+        <td class="num">${fmt(p.leverage,1)}x</td>
+        <td><span class="discord-user">${esc(tname)}</span><br><span class="text-muted small">chart ${fmtDate(p.chart_posted_at)}</span></td>
+        <td class="text-muted small">${p.entered_at?fmtDate(p.entered_at):'—'}<br>${rel(p.entered_at)} ago</td>
+      </tr>`;
     }).join('');
-}
-
-function _fmtScore(v) {
-    const n = Number(v);
-    return isFinite(n) ? n.toFixed(3) : '—';
-}
-
-function _fmtDelta(v) {
-    const n = Number(v);
-    if (!isFinite(n)) return '—';
-    const sign = n > 0 ? '+' : '';
-    return `${sign}${n.toFixed(3)}`;
-}
-
-function _deltaClass(v) {
-    const n = Number(v);
-    if (!isFinite(n) || n === 0) return '';
-    return n > 0 ? 'ok' : 'bad';
-}
-
-function renderPromptEvolution(rows) {
-    const container = document.getElementById('learning-prompt-timeline');
-    if (!container) return;
-    if (!Array.isArray(rows) || !rows.length) {
-        container.innerHTML = `<div class="muted">No prompt promotions in this window.</div>`;
-        return;
-    }
-    // Sort by logged_at DESC; rows without logged_at sort last.
-    const sorted = rows.slice().sort((a, b) => {
-        const ta = a && a.logged_at ? Date.parse(a.logged_at) : 0;
-        const tb = b && b.logged_at ? Date.parse(b.logged_at) : 0;
-        return (tb || 0) - (ta || 0);
-    });
-    container.innerHTML = sorted.map(r => {
-        const actor = r.actor_id || '—';
-        const actorType = r.actor_type || '';
-        const company = r._company || r.company || '';
-        const before = _fmtScore(r.score_before);
-        const after = _fmtScore(r.score_after);
-        const delta = _fmtDelta(r.delta);
-        const deltaCls = _deltaClass(r.delta);
-        const note = r.note || '';
-        const ts = r.logged_at ? new Date(r.logged_at).toLocaleString() : '';
-        const period = r.period_end ? new Date(r.period_end).toLocaleDateString() : '';
-        const label = company
-            ? `<span class="company-tag">${_esc(company)}</span>${_esc(actor)}`
-            : _esc(actor);
-        return `
-        <div class="prompt-event">
-            <div class="prompt-marker ${deltaCls}"></div>
-            <div class="prompt-body">
-                <div class="prompt-head">
-                    <span class="prompt-actor">${label}</span>
-                    ${actorType ? `<span class="muted">${_esc(actorType)}</span>` : ''}
-                    ${ts ? `<span class="prompt-ts">${_esc(ts)}</span>` : ''}
-                </div>
-                <div class="prompt-scores">
-                    <span class="muted">${_esc(before)}</span>
-                    <span class="prompt-arrow">→</span>
-                    <span>${_esc(after)}</span>
-                    <span class="pill ${deltaCls}">${_esc(delta)}</span>
-                    ${period ? `<span class="muted">period ${_esc(period)}</span>` : ''}
-                </div>
-                ${note ? `<div class="prompt-note">${_esc(note)}</div>` : ''}
-            </div>
-        </div>`;
+  }
+  function buildHistory(){
+    if(!hist.length)return'<tr><td colspan="10" class="empty">No trade history yet</td></tr>';
+    return hist.map(p=>{
+      const pnl=n(p.pnl); const dir=(p.direction||'long').toLowerCase();
+      const tname=traderName(p);
+      return `<tr class="pos-table-row ${pnl>=0?'win':'loss'}">
+        <td><strong>${esc(p.symbol)}</strong></td>
+        <td>${dirPill(dir)}</td>
+        <td class="num mono">${fmt(p.entry_price,4)}</td>
+        <td class="num mono">${fmt(p.exit_price,4)}</td>
+        <td class="num mono">${fmt(p.sl_price,4)}</td>
+        <td class="num mono">${fmt(p.tp_price,4)}</td>
+        <td class="num ${pnl>=0?'success':'danger'}"><strong>${usd(pnl)}</strong></td>
+        <td><span class="pill ${pnl>=0?'long':'short'} small">${esc(p.exit_reason||'closed')}</span></td>
+        <td>${esc(tname)}</td>
+        <td class="text-muted small">${fmtDate(p.entered_at)} → ${fmtDate(p.exited_at)}</td>
+      </tr>`;
     }).join('');
+  }
+
+  const html=`<div class="comp-detail">
+    <div class="comp-detail-tabs">
+      <button class="comp-dtab active" data-ctab="live">Live · ${open.length}</button>
+      <button class="comp-dtab" data-ctab="history">History · ${hist.length}</button>
+    </div>
+    <div class="comp-stats">
+      <div><label>Equity</label><strong>$${fmt(a.equity_usd,2)}</strong></div>
+      <div><label>Realized P&L</label><strong class="${n(a.realized_pnl_usd)>=0?'success':'danger'}">${usd(a.realized_pnl_usd)}</strong></div>
+      <div><label>Unrealized</label><strong class="${n(a.unrealized_pnl_usd)>=0?'success':'danger'}">${usd(a.unrealized_pnl_usd)}</strong></div>
+      <div><label>Return</label><strong>${fmt(a.return_pct,1)}%</strong></div>
+      <div><label>Win Rate</label><strong>${fmt(n(a.win_rate)*100,1)}%</strong></div>
+      <div><label>Trades</label><strong>${a.total_trades||0}</strong></div>
+    </div>
+    <div id="comp-live-panel" class="comp-panel">
+      <table class="pos-table"><thead><tr>
+        <th>Symbol</th><th>Dir</th><th class="num">Entry</th><th class="num">Live</th><th class="num">SL</th><th class="num">TP</th><th class="num">P&L</th><th class="num">%</th><th class="num">Lev</th><th>Discord</th><th>Entered</th>
+      </tr></thead><tbody>${buildLive()}</tbody></table>
+    </div>
+    <div id="comp-history-panel" class="comp-panel hidden">
+      <table class="pos-table"><thead><tr>
+        <th>Symbol</th><th>Dir</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">SL</th><th class="num">TP</th><th class="num">P&L</th><th>Reason</th><th>Trader</th><th>Period</th>
+      </tr></thead><tbody>${buildHistory()}</tbody></table>
+    </div>
+  </div>`;
+  $('#comp-expand-zone').innerHTML=html;
+  // tab switching
+  $$('#comp-expand-zone .comp-dtab').forEach(b=>b.onclick=()=>{
+    $$('#comp-expand-zone .comp-dtab').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    const tab=b.dataset.ctab;
+    $('#comp-live-panel').classList.toggle('hidden',tab!=='live');
+    $('#comp-history-panel').classList.toggle('hidden',tab!=='history');
+  });
+  // click position rows to open signal intelligence
+  $$('#comp-expand-zone .pos-table-row.clickable').forEach(tr=>tr.onclick=e=>{
+    e.stopPropagation();
+    const sigId=tr.dataset.sig;
+    if(sigId&&sigId!=='null'&&sigId!=='undefined') openCall(sigId);
+  });
 }
 
-function _highlightLearningWindow() {
-    document.querySelectorAll('#learning-window-tabs .window-tab').forEach(el => {
-        el.classList.toggle('active', el.dataset.window === state.learningWindow);
+/* ─── Discord feed — chart tabs drawer ─── */
+function renderNewsPage(){
+  let rows=state.news?.rows||[];
+  rows=filterRows(rows,$('#news-filter')?.value,['author','content','headline','channel_name']);
+  if($('#news-media')?.value==='media')rows=rows.filter(r=>r.has_media);
+  $('#news-list').innerHTML=rows.map(newsMsg).join('')||'<div class="empty">No messages</div>';
+  $$('[data-newsrow]').forEach(el=>el.onclick=()=>openDiscordDrawer(el.dataset.newsrow));
+}
+
+/* ─── Landing pages ─── */
+function renderSignalsPage(){let rows=state.snap?.signals||[];rows=filterRows(rows,$('#signals-filter')?.value,['instrument_symbol','trader_display_name','trader_handle_normalized','status','raw_signal_text']);const st=$('#signals-status')?.value;if(st)rows=rows.filter(r=>r.status===st);renderSignalsTable(rows)}
+function renderPositionsPage(){let rows=state.snap?.positions||[];rows=filterRows(rows,$('#positions-filter')?.value,['instrument_symbol','actor_display','actor_handle','status','signal_source']);const st=$('#positions-status')?.value;if(st)rows=rows.filter(r=>r.status===st);renderPositionsTable(rows)}
+function renderLearningPage(){const l=state.learning||{feed:{rows:[]},skill:{rows:[]},brain:{rows:[]}};$('#learn-total').textContent=l.feed.rows.length;$('#learn-actors').textContent=l.skill.rows.length;$('#learn-brains').textContent=l.brain.rows.length;$('#learn-focus').textContent=(l.feed.rows[0]?.raw&&safeJson(l.feed.rows[0].raw)?.instrument_symbol)||'execution';$('#learning-lessons').innerHTML=l.feed.rows.map(r=>`<div class="lesson"><div class="lesson-kind">${esc(r.source_kind)} · ${esc(r.actor)}</div><div class="lesson-body">${esc(r.body)}</div><div class="lesson-foot">${esc(r.company)} · ${rel(r.ts)}</div></div>`).join('');const body=l.skill.rows.map(r=>`<tr><td>${rowMain(r.display_name||r.actor_id,r.actor_id)}</td><td class="num">${r.skill_pct??'—'}%</td><td class="num">${r.trade_count||0}</td></tr>`).join('');$('#learning-models').innerHTML=`<table class="data-table"><thead><tr><th>Actor</th><th class="num">Skill</th><th class="num">Trades</th></tr></thead><tbody>${body||'<tr><td colspan="3" class="empty">No data</td></tr>'}</tbody></table>`}
+
+/* ─── misc renderers ─── */
+function renderFloor(){const s=state.snap||{};const sigs=filterRows(s.signals||[],$('#floor-signal-filter')?.value,['instrument_symbol','trader_display_name','trader_handle_normalized','status']);table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(sigs,10)]);const live_positions=(s.positions||[]).filter(r=>r.status==='open'||r.status==='partial_exit'||r.status==='active');const ps=filterRows(live_positions,$('#floor-position-filter')?.value,['instrument_symbol','actor_display','actor_handle','status']);table('#floor-positions',[{label:'Position'},{label:'Side'},{label:'Status'},{label:'Entry',num:1},{label:'Now',num:1},{label:'P&L',num:1},{label:'P&L %',num:1},{label:'Notional',num:1},{label:'Source'}],[posRows(ps,10)]);renderCompetitionMini();renderNewsMini();wireRows()}
+function renderCompetitionMini(){const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}const ps=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).slice(0,6);$('#floor-competition').innerHTML=`<div class="competition-card"><div class="secondary">${esc(c.name)} · ${esc(c.status)}</div><div class="leader-mini">${ps.map(p=>`<div class="leader-row"><div class="rank-badge">#${p.rank}</div><div><div class="primary">${esc(p.agent_id)}</div><div class="secondary">${esc(p.strategy_ref||'')}</div></div><div class="num ${n(p.scores?.total_realized_pnl_usd)>=0?'success':'danger'}">${usd(p.scores?.total_realized_pnl_usd)}</div></div>`).join('')}</div></div>`}
+function renderNewsMini(){const rows=state.news?.rows||[];$('#floor-news').innerHTML=rows.slice(0,8).map(newsMsg).join('')||'<div class="empty">No Discord messages</div>'}
+function newsMsg(r){return`<div class="discord-msg" data-newsrow="${r.id}"><div class="discord-avatar">${initials(r.author)}</div><div><div class="discord-head"><span class="discord-user">${esc(r.author||'unknown')}</span><span class="discord-time">${rel(r.published_at||r.collected_at)}</span></div><div class="discord-text">${esc(r.content||r.headline||'')}</div><div class="discord-meta">${r.has_media?pill(`${r.media_count||1} chart${(r.media_count||1)>1?'s':''}`,'pending'):''}${(r.instruments||[]).map(x=>pill(x)).join('')}</div></div></div>`}
+// 2026-05-22 — Δ entry "honesty" fix. The previous formula rendered missing
+// data (current_price=null AND distance_to_entry_pct=null) as "+0.00%" in
+// the success/green class, which the user reads as "exactly at entry, in
+// your favour" — wrong. Now we detect the no-data case explicitly and
+// render '—' in the muted .secondary class. Real zero stays "+0.00%" green.
+function sigRows(rows,limit){return rows.slice(0,limit||rows.length).map(s=>{const dir=s.consensus_direction||s.direction;const trader=traderName(s);const liveRaw=s.current_price;const entryRaw=s.entry_price??s.levels?.entry;const distRaw=s.distance_to_entry_pct;const hasLive=liveRaw!=null&&Number.isFinite(Number(liveRaw))&&Number(liveRaw)>0;const hasEntry=entryRaw!=null&&Number.isFinite(Number(entryRaw))&&Number(entryRaw)>0;const hasStoredDist=distRaw!=null&&Number.isFinite(Number(distRaw))&&Number(distRaw)!==0;const computedDist=hasLive&&hasEntry?((Number(liveRaw)-Number(entryRaw))/Number(entryRaw)*100):null;const dist=computedDist!=null?computedDist:(hasStoredDist?Number(distRaw):null);const distCell=dist==null?'<span class="secondary">—</span>':`<span class="${dist>=0?'success':'danger'}">${pct(dist)}</span>`;return`<tr data-call="${esc(s.signal_interpretation_id||s.id)}" data-news="${esc(s.news_item_id||'')}"><td>${rowMain(s.instrument_symbol||'UNKNOWN',`${trader} · ${rel(s.signal_timestamp||s.created_at)}`)}</td><td>${pill(dir,dir)}</td><td class="num mono">${fmt(entryRaw,6)}</td><td class="num mono">${fmt(s.stop_loss||s.levels?.stop_loss,6)}</td><td class="num mono">${fmt(s.take_profit_1||s.levels?.take_profit_1,6)}</td><td class="num">${distCell}</td><td>${pill(s.status||'signal',s.status)}</td><td><div class="secondary">${esc((s.raw_signal_text||s.news_content||s.news_headline||'').slice(0,90))}</div></td></tr>`}).join('')}
+function posRows(rows,limit){return rows.slice(0,limit||rows.length).map(p=>{const pnl=n(p.unrealized_pnl_usd??p.pnl_usd);return`<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}"><td>${rowMain(p.instrument_symbol||'UNKNOWN',`${traderName(p)} · ${rel(p.signal_timestamp||p.opened_at)}`)}</td><td>${pill(p.direction,p.direction)}</td><td>${pill(p.status,p.status)}</td><td class="num mono">${fmt(p.entry_price,6)}</td><td class="num mono">${fmt(p.current_price,6)}</td><td class="num ${pnl>=0?'success':'danger'}">${usd(pnl)}</td><td class="num ${n(p.pnl_pct)>=0?'success':'danger'}">${pct(n(p.pnl_pct)*100)}</td><td class="num">$${fmt(p.notional_usd,0)}</td><td>${esc(p.signal_source||p._source||'—')}</td></tr>`}).join('')}
+function renderOpsPage(){const s=state.snap||{};const c=chart('cost-chart');if(c)c.setOption({backgroundColor:'transparent',grid:{left:55,right:20,top:20,bottom:35},xAxis:{type:'category',data:['Spent','Remaining','Limit'],axisLabel:{color:'#8f8f9b'}},yAxis:{type:'value',axisLabel:{color:'#8f8f9b',formatter:v=>'$'+v},splitLine:{lineStyle:{color:'#2b2b34'}}},series:[{type:'bar',barWidth:34,data:[n(s.api_cost_today_usd),n(s.budget_remaining_usd||100),n(s.budget_limit_usd||100)],itemStyle:{borderRadius:[10,10,0,0],color:p=>['#fc72ff','#35d07f','#7a5cff'][p.dataIndex]}}]});$('#services-grid').innerHTML=(s.services||[]).map(x=>{const hb=x.heartbeat;let st='disabled';if(hb)st=hb.is_stale?'stale':'live';else if(x.enabled_on_vps)st='enabled';return`<div class="service"><strong>${esc(x.name)}</strong><span>${esc(x.kind||'daemon')} · ${st}</span></div>`}).join('')}
+function renderSignalsTable(rows){table('#signals-table',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call text'}],[sigRows(rows)]);wireRows()}
+function renderPositionsTable(rows){table('#positions-table',[{label:'Position'},{label:'Side'},{label:'Status'},{label:'Entry',num:1},{label:'Now',num:1},{label:'P&L',num:1},{label:'P&L %',num:1},{label:'Notional',num:1},{label:'Source'}],[posRows(rows)]);wireRows()}
+function renderTradersPage(){const pm=perfMap();let rows=(state.snap?.leaderboard||[]).map(t=>({...t,perf:pm[t.actor_id]||pm[`jarvais_${t.actor_id}`]}));const q=$('#traders-filter')?.value;rows=filterRows(rows,q,['actor_id','display_name','platform']);const sort=$('#traders-sort')?.value||'success';rows.sort((a,b)=>sort==='trades'?n(b.perf?.total_trades||b.closed_position_count)-n(a.perf?.total_trades||a.closed_position_count):sort==='pnl'?n(b.perf?.total_pnl)-n(a.perf?.total_pnl):sort==='edge'?n(b.edge_score)-n(a.edge_score):n(b.perf?.win_rate||0)-n(a.perf?.win_rate||0));const body=rows.map(t=>{const p=t.perf||{}, name=t.display_name||t.actor_id;return`<tr data-trader="${esc(t.actor_id)}"><td>${rowMain(name,`${t.platform||'discord'} · ${t.actor_type||'unknown'}`)}</td><td class="num">${fmt(p.win_rate,1)}%</td><td class="num">${p.total_trades??t.closed_position_count??0}</td><td class="num success">${p.wins??'—'}</td><td class="num danger">${p.losses??'—'}</td><td class="num ${n(p.total_pnl)>=0?'success':'danger'}">${p.total_pnl!=null?usd(p.total_pnl):'—'}</td><td class="num">${fmt(t.edge_score,3)}</td><td>${esc(t._company||'—')}</td></tr>`}).join('');table('#traders-table',[{label:'Discord / actor'},{label:'Success',num:1},{label:'Trades',num:1},{label:'Wins',num:1},{label:'Losses',num:1},{label:'P&L',num:1},{label:'Edge',num:1},{label:'Company'}],[body]);$$('#traders-table tr[data-trader]').forEach(tr=>tr.onclick=()=>openTrader(tr.dataset.trader))}
+
+/* ─── Discord drawer with per-chart tabs ─── */
+async function openDiscordDrawer(newsItemId){
+  if(!newsItemId)return;
+  openDrawer('Discord message','DISCORD SIGNAL','<div class="empty">Loading charts from this message…</div>');
+  try{
+    const p=new URLSearchParams();
+    p.set('news_item_id',newsItemId);
+    const res=await api(`/api/interpretations/drawer?${p}`);
+    const allSignals=(res.rows||[]);
+    if(!allSignals.length){
+      $('#drawer-body').innerHTML='<div class="empty">No signal interpretations for this message yet</div>';
+      return;
+    }
+    drawDiscordTabs(allSignals,res);
+  }catch(e){
+    console.error('Discord drawer failed',e);
+    $('#drawer-body').innerHTML='<div class="empty">Could not load charts</div>';
+  }
+}
+
+function drawDiscordTabs(signals,res){
+  const first=signals[0];
+  const msg=res.news||first||{};
+  const trader=traderName(first)||msg.author||'trader';
+  let html=`<div class="discord-drawer-msg">
+    <div class="discord-avatar">${initials(trader)}</div>
+    <div><div class="discord-user">${esc(trader)}</div>
+    <div class="discord-text big">${esc(msg.content||msg.headline||first.raw_signal_text||'')}</div></div>
+  </div>`;
+  if(signals.length>1){
+    html+=`<div class="chart-tabs">`;
+    signals.forEach((s,i)=>{
+      html+=`<button class="chart-tab ${i===0?'active':''}" data-chart-idx="${i}">${esc(s.instrument_symbol||'Chart')} ${s.consensus_direction||''}</button>`;
     });
+    html+=`</div>`;
+  }
+  html+=`<div class="chart-tab-content" id="chart-tab-content">Loading chart #1…</div>`;
+  $('#drawer-body').innerHTML=html;
+
+  // Load first chart immediately
+  loadChartTab(signals[0],0);
+  // Wire tab clicks
+  $$('.chart-tab').forEach(b=>b.onclick=()=>{
+    $$('.chart-tab').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    const idx=parseInt(b.dataset.chartIdx);
+    loadChartTab(signals[idx],idx);
+  });
 }
 
-function _scoreClass(score) {
-    if (!isFinite(score)) return '';
-    if (score >= 0.6) return '';        // ok / accent
-    if (score >= 0.4) return 'warn';
-    return 'bad';
+async function loadChartTab(sig,idx){
+  const el=$('#chart-tab-content'); if(!el)return;
+  if(!sig||!sig.id){el.innerHTML='<div class="empty">No interpretation ID for this chart</div>';return}
+  el.innerHTML='<div class="empty">Loading candles & replay…</div>';
+  try{
+    const r=await api(`/api/signal-replay?id=${encodeURIComponent(sig.id)}`);
+    drawReplayInline(r,el);
+  }catch(e){
+    el.innerHTML=`<div class="empty">Failed to load chart replay</div>`;
+  }
 }
 
-function _outcomePill(outcome) {
-    // Map post-mortem outcome strings to pill colour classes. Distinct from
-    // _dirPill (which classifies long/short). Empty string = neutral pill.
-    const o = (outcome || '').toLowerCase();
-    if (o === 'win' || o === 'tp' || o === 'profit') return 'ok';
-    if (o === 'loss' || o === 'sl' || o === 'stop' || o === 'failed') return 'bad';
-    if (o === 'breakeven' || o === 'be' || o === 'flat') return 'warn';
-    return '';
+function drawReplayInline(r,parentEl){
+  if(!r||!r.ok){parentEl.innerHTML='<div class="empty">No replay data</div>';return}
+  const sig=r.signal||{}, pos=r.position||{}, levels=sig.levels||{}, trader=r.trader||{}, news=r.news||{};
+  const traderName=trader.handle_raw||trader.display_name||trader.handle_normalized||news.author||'trader';
+  const outcome=pos.outcome||pos.status||'tracking';
+  const pnl=n(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
+  const media=r.media_url||r.annotated_chart_url;
+  parentEl.innerHTML=`
+    <section class="drawer-panel chart-panel">
+      <div class="chart-toolbar"><div><h3>${esc(r.symbol)} · ${esc(r.timeframe)} · ${r.coverage?.candle_count||0} candles</h3><p>${esc(sig.direction||'')} · ${sig.confidence?fmt(sig.confidence,3):''} confidence</p></div><div class="replay-actions"><button class="mini" id="replay-play">Replay</button><button class="mini" id="replay-reset">Reset</button></div></div>
+      <div class="chart-split">
+        ${media?`<div class="posted-chart"><img class="chart-img xl" src="${esc(media)}" loading="lazy" decoding="async" onerror="this.onerror=null;this.style.display='none'"></div>`:''}
+        <div id="disc-chart-${esc(r.id)}" class="replay-chart"></div>
+      </div>
+    </section>
+    <section class="drawer-panel levels-panel"><h3>Entry / stop / targets</h3><div class="level-grid wide">${levelCards(levels)}</div></section>
+    <div class="drawer-grid bottom-grid">
+      <section class="drawer-panel"><h3>Trade state</h3><div class="state-grid"><div><label>Outcome</label><strong>${esc(outcome)}</strong></div><div><label>P&L</label><strong class="${pnl>=0?'success':'danger'}">${usd(pnl)}</strong></div><div><label>Max profit</label><strong>${fmt(pos.max_profit_pct,2)}%</strong></div><div><label>Max drawdown</label><strong>${fmt(pos.max_drawdown_pct,2)}%</strong></div><div><label>Distance entry</label><strong>${fmt(pos.distance_to_entry_pct,2)}%</strong></div><div><label>Distance TP1</label><strong>${fmt(pos.distance_to_tp1_pct,2)}%</strong></div></div></section>
+      <section class="drawer-panel"><h3>Reasoning</h3><p class="call-text big"><b>Trader:</b> ${esc(sig.trader_stated_thesis||'—')}</p><p class="call-text big"><b>AI thesis:</b> ${esc(sig.llm_inferred_thesis||'—')}</p><p class="call-text big"><b>LLM:</b> ${esc(sig.llm_reasoning||'—')}</p><p class="call-text big"><b>ChartHacker:</b> ${esc(sig.ai_comment||'—')}</p></section>
+      <section class="drawer-panel"><h3>Tags</h3><div class="tag-row">${Object.entries(sig.tags||{}).flatMap(([k,v])=>Array.isArray(v)?v.map(x=>pill(`${k}:${x}`)):[]).join('')||'<span class="secondary">No tags</span>'}</div><p class="secondary">Agreement: reason ${fmt(sig.reason_agreement_score,3)} · AI ${fmt(sig.ai_agreement_score,2)}</p></section>
+    </div>`;
+  // Init chart
+  const chartId='disc-chart-'+r.id;
+  setTimeout(()=>{
+    state._discReplay=r;
+    state._discChartId=chartId;
+    renderReplayChart(r,chartId);
+    const playBtn=parentEl.querySelector('#replay-play');
+    const resetBtn=parentEl.querySelector('#replay-reset');
+    if(playBtn)playBtn.onclick=()=>animateReplay(r,chartId);
+    if(resetBtn)resetBtn.onclick=()=>renderReplayChart(r,chartId);
+  },100);
 }
 
-function renderLearningHeader(skillRows, failedRows, winDays) {
-    const strip = document.getElementById('learning-header-strip');
-    if (!strip) return;
-
-    if (!skillRows.length && !failedRows.length) {
-        strip.innerHTML = `<div class="muted">No skill or failed-trade data for the last ${winDays} days.</div>`;
-        return;
-    }
-
-    // Top-3 actors by skill_score (drop nulls).
-    const ranked = skillRows
-        .map(r => ({
-            actor_id: r.actor_id || r.actor || '—',
-            actor_type: r.actor_type || '',
-            company: r._company || r.company || '',
-            score: Number(r.skill_score),
-            n: Number(r.n_closed_trades || r.closed_position_count || 0)
-        }))
-        .filter(r => isFinite(r.score))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3);
-
-    // Failed-trade total across companies.
-    let failedTotal = 0;
-    let closedTotal = 0;
-    for (const r of failedRows) {
-        const f = Number(r.failed_count);
-        const c = Number(r.total_closed);
-        if (isFinite(f)) failedTotal += f;
-        if (isFinite(c)) closedTotal += c;
-    }
-    const hasClosed = closedTotal > 0;
-    const failedRatio = hasClosed ? failedTotal / closedTotal : 0;
-    let failedClass = 'ok';
-    if (hasClosed) {
-        if (failedRatio >= 0.5) failedClass = 'bad';
-        else if (failedRatio >= 0.2) failedClass = 'warn';
-    }
-    const failedHtml = hasClosed
-        ? `<span class="failed-badge ${failedClass}">⚠ ${failedTotal} / ${closedTotal} failed (${(failedRatio * 100).toFixed(1)}%)</span>`
-        : `<span class="muted">No closed trades in window.</span>`;
-
-    const actorsHtml = ranked.length
-        ? ranked.map(r => {
-            const klass = _scoreClass(r.score);
-            const label = r.company
-                ? `<span class="company-tag">${_esc(r.company)}</span>${_esc(r.actor_id)}`
-                : _esc(r.actor_id);
-            return `
-                <div class="skill-actor">
-                    <div class="name">${label}</div>
-                    <div class="score ${klass}">${r.score.toFixed(3)}</div>
-                    <div class="meta">${_esc(r.actor_type || '—')} · ${r.n} trades</div>
-                </div>`;
-        }).join('')
-        : `<div class="muted">No actor skill scores yet.</div>`;
-
-    strip.innerHTML = `
-        <div class="skill-strip">
-            ${actorsHtml}
-            <div style="margin-left: auto;">${failedHtml}</div>
-        </div>`;
+/* ─── Radar / Entry watch ─── */
+function signalDistance(s){if(Number.isFinite(s._liveDist))return s._liveDist;const live=n(s.current_price||s._livePrice);const entry=n(s.entry_price||s.levels?.entry);if(!entry)return 999999;if(live)return Math.abs((live-entry)/entry*100);const d=Math.abs(n(s.distance_to_entry_pct));return d?d:999999}
+function radarCard(s,i){const id=s.signal_interpretation_id||s.id;const sym=s.symbol||s.instrument_symbol||'UNKNOWN';const dir=(s.consensus_direction||s.direction||'').toLowerCase();const entry=n(s.entry_price||s.levels?.entry), sl=n(s.stop_loss||s.levels?.stop_loss), tp=n(s.take_profit_1||s.levels?.take_profit_1);const dist=signalDistance(s);const ageDays=(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000;const trader=traderName(s);const stale=ageDays>7?' stale':'';const rr=entry&&sl&&tp?Math.abs((tp-entry)/(entry-sl)):0;const live=(s.current_price||s._livePrice)?` · live ${fmt(s.current_price||s._livePrice,6)}`:'';return `<div class="radar-card${stale}" data-call="${esc(id)}" data-news="${esc(s.news_item_id||'')}" data-radar-idx="${i}"><div class="radar-top"><div>${rowMain(sym,`${trader} · ${(s.timeframe||'1m')} · ${rel(s.signal_timestamp||s.created_at)} old${live}`)}</div>${pill(dir,dir)}</div><div class="mini-tv" id="mini-radar-${i}">${(!s._candles?.length&&s.media_url)?`<img class="mini-chart-img" src="${esc(s.media_url)}">`:''}<div class="riskbox ${dir==='short'?'short':'long'}"><i class="reward"></i><i class="risk"></i><b class="entry-line"></b></div><span class="mini-loading">${s._candles?.length?'':'chart snapshot / no local candles'}</span></div><div class="radar-metrics"><div><label>to entry</label><strong>${dist===999999?'—':fmt(dist,2)+'%'}</strong></div><div><label>entry</label><strong>${fmt(entry,6)}</strong></div><div><label>SL</label><strong>${fmt(sl,6)}</strong></div><div><label>TP1</label><strong>${fmt(tp,6)}</strong></div><div><label>R:R</label><strong>${rr?fmt(rr,2):'—'}</strong></div><div><label>TF</label><strong>${esc(s.timeframe||'1m')}</strong></div><div><label>age</label><strong>${fmt(ageDays,1)}d</strong></div></div></div>`}
+async function renderRadarPage(){
+  const isFirstLoad = !$('#entry-radar').children.length || $('#entry-radar').querySelector('.empty');
+  if(isFirstLoad) {
+    $('#entry-radar').innerHTML='<div class="empty">Scanning pending calls and removing entries already triggered / stopped…</div>';
+  }
+  let payload;
+  try{ payload=await api('/api/entry-radar?limit=120'); }
+  catch(e){
+    console.error('entry radar API failed',e);
+    if(isFirstLoad) $('#entry-radar').innerHTML='<div class="empty">Entry radar unavailable</div>';
+    return;
+  }
+  let rows=payload.rows||[];
+  rows=filterRows(rows,$('#radar-filter')?.value,['instrument_symbol','symbol','handle_raw','handle_normalized','display_name','actor_id','news_content','news_headline']);
+  const maxAge=n($('#radar-age')?.value);
+  if(maxAge)rows=rows.filter(s=>(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000<=maxAge);
+  rows.sort((a,b)=>signalDistance(a)-signalDistance(b));
+  $('#entry-radar').innerHTML=rows.map(radarCard).join('')||`<div class="empty">No actionable waiting entries. Filtered out ${payload.excluded_count||0} calls that already hit entry / SL / TP.</div>`;
+  const info=document.createElement('div'); info.className='radar-summary'; info.textContent=`${rows.length} actionable · ${payload.excluded_count||0} already triggered/expired removed`;
+  $('#entry-radar').prepend(info);
+  wireRows(); rows.forEach((s,i)=>drawMiniRadar(`mini-radar-${i}`,s.mini_candles||s._candles||[],s));
 }
+function drawMiniRadar(id,candles,s){const el=document.getElementById(id);if(!el||!candles.length||!window.echarts)return;const loading=el.querySelector('.mini-loading'); if(loading)loading.remove();const c=echarts.init(el);const labels=candles.map(x=>String(x.timestamp).slice(11,16));const data=candles.map(x=>[n(x.open),n(x.close),n(x.low),n(x.high)]);const levels=s.levels||{};const entry=n(s.entry_price||levels.entry), sl=n(s.stop_loss||levels.stop_loss), tp=n(s.take_profit_1||levels.take_profit_1);const lines=[];if(entry)lines.push({yAxis:entry,name:'E',lineStyle:{color:'#fc72ff',width:1}});if(sl)lines.push({yAxis:sl,name:'SL',lineStyle:{color:'#ff5f72',width:1,type:'dashed'}});if(tp)lines.push({yAxis:tp,name:'TP',lineStyle:{color:'#35d07f',width:1,type:'dashed'}});c.setOption({animation:false,grid:{left:0,right:0,top:4,bottom:0},xAxis:{type:'category',data:labels,show:false},yAxis:{scale:true,show:false},series:[{type:'candlestick',data,itemStyle:{color:'#35d07f',color0:'#ff5f72',borderColor:'#35d07f',borderColor0:'#ff5f72'},markLine:{symbol:'none',label:{show:false},data:lines}}]})}
 
-function renderMemoryFeed(rows) {
-    const tbody = document.querySelector('#learning-feed-table tbody');
-    if (!tbody) return;
-    if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="5" class="muted">No feed entries.</td></tr>`;
-        return;
-    }
-    tbody.innerHTML = rows.map(r => {
-        const ts = r.ts ? new Date(r.ts).toLocaleString() : '—';
-        const kind = r.kind || r.event_kind || '—';
-        const dim = r.dimension || r.dim || '—';
-        const outcome = r.outcome || r.result || '—';
-        const source = r.source_id || r.actor_id || r.source || '—';
-        const company = r._company || r.company || '';
-        const headline = r.headline || r.summary || r.content || '';
-        const dirClass = _outcomePill(outcome);
-        return `
-        <tr class="feed-row">
-            <td class="muted" style="white-space: nowrap;">${_esc(ts)}</td>
-            <td><span class="pill">${_esc(kind)}</span></td>
-            <td>${_esc(dim)}</td>
-            <td><span class="pill ${dirClass}">${_esc(outcome)}</span></td>
-            <td>
-                ${company ? `<span class="company-tag">${_esc(company)}</span>` : ''}
-                <span class="feed-meta">${_esc(source)}</span>
-                ${headline ? `<div class="feed-content">${_esc(headline)}</div>` : ''}
-            </td>
-        </tr>`;
-    }).join('');
+/* ─── Signal intelligence drawer (standalone call) ─── */
+function levelCards(levels){
+  return ['entry','stop_loss','take_profit_1','take_profit_2','take_profit_3','take_profit_4','take_profit_5','take_profit_6']
+    .map(k=>`<div class="level"><label>${k.replaceAll('_',' ')}</label><strong>${fmt(levels?.[k],6)}</strong></div>`).join('')
 }
-
-function renderAgentBrainCards(rows) {
-    const container = document.getElementById('learning-brain-cards');
-    if (!container) return;
-    if (!rows.length) {
-        container.innerHTML = `<div class="muted">No closed trades in this window.</div>`;
-        return;
-    }
-    container.innerHTML = rows.map(r => {
-        const wins = Number(r.wins || 0);
-        const breakeven = Number(r.breakeven || r.be || 0);
-        const losses = Number(r.losses || 0);
-        const total = wins + breakeven + losses;
-        const winPct = total ? (wins / total) * 100 : 0;
-        const bePct = total ? (breakeven / total) * 100 : 0;
-        const lossPct = total ? (losses / total) * 100 : 0;
-        const actor = r.actor_id || r.actor || '—';
-        const actorType = r.actor_type || '';
-        const company = r._company || r.company || '';
-        const label = company
-            ? `<span class="company-tag">${_esc(company)}</span>${_esc(actor)}`
-            : _esc(actor);
-        return `
-        <div class="brain-card">
-            <div class="head">
-                <span class="actor-id">${label}</span>
-                <span class="totals">${total} trades · ${actorType ? _esc(actorType) : ''}</span>
-            </div>
-            <div class="brain-bar" title="${wins}W / ${breakeven}BE / ${losses}L">
-                <span class="seg-win" style="width: ${winPct.toFixed(2)}%;"></span>
-                <span class="seg-be"  style="width: ${bePct.toFixed(2)}%;"></span>
-                <span class="seg-loss" style="width: ${lossPct.toFixed(2)}%;"></span>
-            </div>
-            <div class="totals" style="margin-top: 4px;">
-                <span style="color: var(--accent);">${wins}W</span> ·
-                <span>${breakeven}BE</span> ·
-                <span style="color: var(--bad);">${losses}L</span>
-            </div>
-        </div>`;
-    }).join('');
+async function openCall(id,news){
+  if(!id&&!news)return;
+  openDrawer('Signal intelligence','CALL DETAIL','<div class="empty">Loading chart, candles, levels and memory…</div>');
+  try{
+    let replay=null;
+    if(id){replay=await api(`/api/signal-replay?id=${encodeURIComponent(id)}`);drawReplay(replay);return}
+    const p=new URLSearchParams();p.set('news_item_id',news);
+    const res=await api(`/api/interpretations/drawer?${p}`);
+    const first=(res.rows||[])[0];
+    if(first?.id){replay=await api(`/api/signal-replay?id=${encodeURIComponent(first.id)}`);drawReplay(replay)}
+    else{drawCallFallback(res,id)}
+  }catch(e){console.error('openCall failed',e);$('#drawer-body').innerHTML='<div class="empty">Could not load chart/replay intelligence</div>'}
 }
-
-// ---------------------------------------------------------------------------
-// Phase X.4 — News Feed tab
-// ---------------------------------------------------------------------------
-
-// UI label → query value. Mirrors shared/dashboard/news_routes.py
-// _WINDOW_LABEL_TO_DAYS so the JS and the server agree on labels.
-const NEWS_WINDOW_LABELS = ['24h', '7d', '30d'];
-const NEWS_DEFAULT_LIMIT = 100;       // mirrors news_provider.NEWS_DEFAULT_LIMIT
-const NEWS_TABLE_COLSPAN = 6;         // matches index.html news-feed-table cols
-
-function _highlightNewsWindow() {
-    document.querySelectorAll('#news-window-tabs .window-tab').forEach(el => {
-        el.classList.toggle('active', el.dataset.window === state.newsWindow);
-    });
+function drawReplay(r){
+  if(!r||!r.ok){$('#drawer-body').innerHTML='<div class="empty">No replay data available</div>';return}
+  const sig=r.signal||{}, pos=r.position||{}, levels=sig.levels||{}, trader=r.trader||{}, news=r.news||{};
+  $('#drawer-title').textContent=`${r.symbol} ${sig.direction||''}`;
+  $('#drawer-kicker').textContent=`CALL DETAIL | Interp ID: ${r.id}${pos.id ? ` · Pos ID: ${pos.id}` : ''}`;
+  const traderName=trader.handle_raw||trader.display_name||trader.handle_normalized||news.author||'trader';
+  const outcome=pos.outcome||pos.status||'tracking';
+  const pnl=n(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
+  const media=r.media_url||r.annotated_chart_url;
+  $('#drawer-body').innerHTML=`
+    <div class="replay-layout">
+      <section class="drawer-panel chart-panel">
+        <div class="chart-toolbar"><div><h3>Trader chart / reconstructed replay</h3><p>${esc(r.symbol)} · ${esc(r.exchange)} · ${esc(r.timeframe)} · ${r.coverage?.candle_count||0} candles</p></div><div class="replay-actions"><button class="mini" id="replay-play">Replay</button><button class="mini" id="replay-reset">Reset</button></div></div>
+        <div class="chart-split">
+          <div class="posted-chart">${media?`<img class="chart-img xl" src="${esc(media)}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='${esc(r.annotated_chart_url||'')}'">`:'<div class="empty">No downloaded/remote chart found</div>'}</div>
+          <div id="replay-chart" class="replay-chart"></div>
+        </div>
+      </section>
+      <section class="drawer-panel levels-panel"><h3>Entry / stop / targets</h3><div class="level-grid wide">${levelCards(levels)}</div></section>
+      <div class="drawer-grid bottom-grid">
+        <section class="drawer-panel"><h3>Discord call</h3><div class="discord-msg large"><div class="discord-avatar">${initials(traderName)}</div><div><div class="discord-head"><span class="discord-user">${esc(traderName)}</span><span class="discord-time">${rel(news.published_at||sig.created_at||r.call_ts)}</span></div><div class="discord-text big">${esc(news.content||news.headline||'')}</div></div></div></section>
+        <section class="drawer-panel"><h3>Trade state</h3><div class="state-grid"><div><label>Outcome</label><strong>${esc(outcome)}</strong></div><div><label>P&L</label><strong class="${pnl>=0?'success':'danger'}">${usd(pnl)}</strong></div><div><label>Max profit</label><strong>${fmt(pos.max_profit_pct,2)}%</strong></div><div><label>Max drawdown</label><strong>${fmt(pos.max_drawdown_pct,2)}%</strong></div><div><label>Distance entry</label><strong>${fmt(pos.distance_to_entry_pct,2)}%</strong></div><div><label>Distance TP1</label><strong>${fmt(pos.distance_to_tp1_pct,2)}%</strong></div></div></section>
+        <section class="drawer-panel"><h3>Reasoning / intelligence</h3><p class="call-text big"><b>Trader thesis:</b> ${esc(sig.trader_stated_thesis||'—')}</p><p class="call-text big"><b>AI thesis:</b> ${esc(sig.llm_inferred_thesis||'—')}</p><p class="call-text big"><b>LLM reasoning:</b> ${esc(sig.llm_reasoning||'—')}</p><p class="call-text big"><b>ChartHacker:</b> ${esc(sig.ai_comment||'—')}</p></section>
+        <section class="drawer-panel"><h3>Memory / tags</h3><div class="tag-row">${Object.entries(sig.tags||{}).flatMap(([k,v])=>Array.isArray(v)?v.map(x=>pill(`${k}:${x}`)):[]).join('')||'<span class="secondary">No tags captured</span>'}</div><p class="secondary">Agreement: reason ${fmt(sig.reason_agreement_score,3)} · AI ${fmt(sig.ai_agreement_score,2)}</p></section>
+      </div>
+    </div>`;
+  renderReplayChart(r);
+  $('#replay-play')?.addEventListener('click',()=>animateReplay(r));
+  $('#replay-reset')?.addEventListener('click',()=>renderReplayChart(r));
 }
-
-function _newsSourcePill(source) {
-    // Map source label to a pill class for visual differentiation.
-    const s = (source || '').toLowerCase();
-    if (s === 'discord' || s === 'telegram') return 'ok';
-    if (s === 'twitter' || s === 'rss') return 'warn';
-    if (s === 'manual') return 'bad';
-    return '';
+function candleSeries(candles){return (candles||[]).map(c=>[c.timestamp,n(c.open),n(c.close),n(c.low),n(c.high)])}
+function markLines(levels){
+  const data=[]; const add=(name,val,color)=>{if(n(val))data.push({yAxis:n(val),name,lineStyle:{color,type:'dashed',width:1.4},label:{formatter:name,color}})};
+  add('ENTRY',levels?.entry,'#fc72ff'); add('SL',levels?.stop_loss,'#ff5f72');
+  ['take_profit_1','take_profit_2','take_profit_3','take_profit_4','take_profit_5','take_profit_6'].forEach((k,i)=>add(`TP${i+1}`,levels?.[k],'#35d07f'));
+  return data;
 }
-
-function _sentimentClass(sentiment) {
-    // Optional sentiment scoring → pill colour. Provider returns either a
-    // numeric score or a string label (positive/negative/neutral) — handle both.
-    if (sentiment === null || sentiment === undefined || sentiment === '') return '';
-    const n = Number(sentiment);
-    if (isFinite(n)) {
-        if (n > 0.15) return 'ok';
-        if (n < -0.15) return 'bad';
-        return 'warn';
-    }
-    const s = String(sentiment).toLowerCase();
-    if (s === 'positive' || s === 'bullish') return 'ok';
-    if (s === 'negative' || s === 'bearish') return 'bad';
-    return 'warn';
+function renderReplayChart(r,chartId='replay-chart',upto=null){
+  const c=chart(chartId); if(!c)return;
+  const candles=upto?(r.candles||[]).slice(0,upto):(r.candles||[]);
+  const series=candleSeries(candles); const labels=candles.map(x=>String(x.timestamp).slice(5,16).replace('T',' '));
+  c.setOption({backgroundColor:'transparent',animation:false,grid:{left:58,right:28,top:22,bottom:36},tooltip:{trigger:'axis',axisPointer:{type:'cross'},backgroundColor:'#111',borderColor:'#333',textStyle:{color:'#fff'}},xAxis:{type:'category',data:labels,axisLabel:{color:'#8f8f9b',fontSize:10},axisLine:{lineStyle:{color:'#2b2b34'}}},yAxis:{scale:true,axisLabel:{color:'#8f8f9b'},splitLine:{lineStyle:{color:'#2b2b34'}}},dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:6,borderColor:'#2b2b34',textStyle:{color:'#8f8f9b'}}],series:[{type:'candlestick',data:series.map(x=>[x[1],x[2],x[3],x[4]]),itemStyle:{color:'#35d07f',color0:'#ff5f72',borderColor:'#35d07f',borderColor0:'#ff5f72'},markLine:{symbol:'none',data:markLines(r.signal?.levels)}}]});
 }
-
-function _fmtSentiment(sentiment) {
-    if (sentiment === null || sentiment === undefined || sentiment === '') return '—';
-    const n = Number(sentiment);
-    if (isFinite(n)) {
-        const sign = n > 0 ? '+' : '';
-        return `${sign}${n.toFixed(2)}`;
-    }
-    return String(sentiment);
+function animateReplay(r,chartId='replay-chart'){
+  const total=(r.candles||[]).length; if(!total)return;
+  let i=Math.max(10,Math.floor(total*.08));
+  const step=Math.max(1,Math.floor(total/90));
+  const timer=setInterval(()=>{i+=step;renderReplayChart(r,chartId,Math.min(i,total));if(i>=total)clearInterval(timer)},90);
 }
+function drawCallFallback(res,id){const rows=res.rows||[];if(!rows.length){$('#drawer-body').innerHTML='<div class="empty">No interpretation available yet</div>';return}const r=rows[0];const levels=r.levels||r.llm?.levels||{};const chartUrl=r.media?.url||`api/charts/${r.id}`;$('#drawer-title').textContent=`${r.instrument?.symbol||'Signal'} ${r.consensus_direction||''}`;$('#drawer-kicker').textContent=`CALL DETAIL | Interp ID: ${r.id}`;$('#drawer-body').innerHTML=`<div class="drawer-panel chart-panel"><img class="chart-img xl" src="${chartUrl}" loading="lazy" decoding="async"><div class="level-grid wide">${levelCards(levels)}</div></div>`}
+function openTrader(actor){const sigs=(state.snap?.signals||[]).filter(s=>[s.actor_id,s.trader_handle_normalized,s.trader_display_name].includes(actor)||JSON.stringify(s).includes(actor));const lessons=(state.learning?.feed?.rows||[]).filter(l=>String(l.actor||'').includes(actor));openDrawer(actor,'TRADER INTEL',`<div class="drawer-panel"><h3>Recent calls</h3><div class="table-wrap"><table class="data-table"><tbody>${sigRows(sigs,12)}</tbody></table></div></div><div class="drawer-panel"><h3>What AI learned about them</h3>${lessons.slice(0,8).map(r=>`<div class="lesson"><div class="lesson-body">${esc(r.body)}</div><div class="lesson-foot">${rel(r.ts)}</div></div>`).join('')||'<div class="secondary">No targeted lessons in current window.</div>'}</div>`);wireRows()}
 
-function _newsHeadlineCell(row) {
-    // Combine headline + truncated content snippet into one cell. The
-    // provider already truncates content server-side; we just escape and wrap.
-    const headline = _esc(row.headline || '—');
-    const snippet = row.content ? _esc(row.content) : '';
-    const channel = row.channel_name ? `<span class="muted">${_esc(row.channel_name)}</span>` : '';
-    const author = row.author ? `<span class="muted">${_esc(row.author)}</span>` : '';
-    const meta = [channel, author].filter(Boolean).join(' · ');
-    return `
-        <div class="feed-headline">${headline}</div>
-        ${snippet ? `<div class="feed-content">${snippet}</div>` : ''}
-        ${meta ? `<div class="feed-meta">${meta}</div>` : ''}`;
+/* ─── shared ui ─── */
+function table(id,cols,rows,onSort){const head=cols.map(c=>`<th class="${c.num?'num ':''}${c.sort?'sortable':''}" data-key="${c.key||''}">${esc(c.label)}</th>`).join('');const body=rows.join('')||`<tr><td colspan="${cols.length}" class="empty">No data</td></tr>`;$(id).innerHTML=`<table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;if(onSort)$$(id+' th[data-key]').forEach(th=>th.onclick=()=>onSort(th.dataset.key))}
+function filterRows(rows,q,fields){q=(q||'').toLowerCase();if(!q)return rows;return rows.filter(r=>fields.map(f=>String(r[f]??'')).join(' ').toLowerCase().includes(q)||JSON.stringify(r).toLowerCase().includes(q))}
+function openDrawer(title,kicker,html){$('#drawer-title').textContent=title;$('#drawer-kicker').textContent=kicker;$('#drawer-body').innerHTML=html;$('#drawer').classList.remove('hidden');$('#drawer-backdrop').classList.remove('hidden')}
+function closeDrawer(){$('#drawer').classList.add('hidden');$('#drawer-backdrop').classList.add('hidden')}
+/* 2026-05-22 — drawer width persistence + resize-by-drag.
+   Stored in localStorage as a px string under 'tickles.drawer.width'.
+   Drag the 8px handle on the drawer's left edge LEFT to widen, RIGHT to shrink.
+   Clamped to [380px, 95vw]. Touch + mouse supported. */
+const DRAWER_LS_KEY='tickles.drawer.width';
+function clampDrawerW(px){const max=Math.floor(window.innerWidth*0.95);return Math.max(380,Math.min(max,px))}
+function applyDrawerW(px){document.documentElement.style.setProperty('--drawer-w',clampDrawerW(px)+'px')}
+function loadDrawerWidth(){
+  try{const v=localStorage.getItem(DRAWER_LS_KEY);if(!v)return;const px=parseInt(v,10);if(Number.isFinite(px)&&px>0)applyDrawerW(px)}catch(e){}
 }
-
-function renderNewsRows(rows) {
-    // Populate the news-feed table body and the row-count badge.
-    const tbody = document.querySelector('#news-feed-table tbody');
-    const countEl = document.getElementById('news-row-count');
-    if (!tbody) return;
-    if (!Array.isArray(rows) || !rows.length) {
-        tbody.innerHTML = `<tr><td colspan="${NEWS_TABLE_COLSPAN}" class="muted">No news in this window.</td></tr>`;
-        if (countEl) countEl.textContent = '0 items';
-        return;
-    }
-    tbody.innerHTML = rows.map(r => {
-        const ts = r.collected_at ? new Date(r.collected_at).toLocaleString() : '—';
-        const source = r.source || '—';
-        const srcCls = _newsSourcePill(source);
-        const instruments = Array.isArray(r.instruments) && r.instruments.length
-            ? r.instruments.slice(0, 6).map(s => `<span class="pill">${_esc(s)}</span>`).join(' ')
-            : '<span class="muted">—</span>';
-        const sentCls = _sentimentClass(r.sentiment);
-        const sentTxt = _fmtSentiment(r.sentiment);
-        const mediaCount = Number(r.media_count || 0);
-        const mediaTxt = r.has_media
-            ? `<span class="pill ok">${mediaCount || 1}</span>`
-            : '<span class="muted">—</span>';
-        return `
-        <tr class="feed-row" data-news-item-id="${_esc(r.id)}">
-            <td class="muted" style="white-space: nowrap;">${_esc(ts)}</td>
-            <td><span class="pill ${srcCls}">${_esc(source)}</span></td>
-            <td>${_newsHeadlineCell(r)}</td>
-            <td>${instruments}</td>
-            <td><span class="pill ${sentCls}">${_esc(sentTxt)}</span></td>
-            <td>${mediaTxt}</td>
-        </tr>`;
-    }).join('');
-    if (countEl) countEl.textContent = `${rows.length} items`;
+function saveDrawerWidth(px){try{localStorage.setItem(DRAWER_LS_KEY,clampDrawerW(px)+'px')}catch(e){}}
+function attachDrawerResizer(){
+  const handle=$('#drawer-resizer'),drawer=$('#drawer');
+  if(!handle||!drawer)return;
+  let startX=0,startW=0,dragging=false;
+  const px=e=>e.touches?e.touches[0].clientX:e.clientX;
+  const cleanup=()=>{dragging=false;document.body.classList.remove('drawer-resizing');handle.classList.remove('dragging');window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);window.removeEventListener('touchmove',onMove);window.removeEventListener('touchend',onUp);window.removeEventListener('blur',cleanup);window.removeEventListener('mouseleave',cleanup)};
+  const onDown=e=>{e.preventDefault();dragging=true;startX=px(e);startW=drawer.getBoundingClientRect().width;document.body.classList.add('drawer-resizing');handle.classList.add('dragging');window.addEventListener('mousemove',onMove);window.addEventListener('mouseup',onUp);window.addEventListener('touchmove',onMove,{passive:false});window.addEventListener('touchend',onUp);window.addEventListener('blur',cleanup);window.addEventListener('mouseleave',cleanup)};
+  const onMove=e=>{if(!dragging)return;e.preventDefault();const dx=startX-px(e);applyDrawerW(startW+dx)};
+  const onUp=()=>{if(!dragging)return;const finalW=drawer.getBoundingClientRect().width;cleanup();saveDrawerWidth(finalW)};
+  handle.addEventListener('mousedown',onDown);
+  handle.addEventListener('touchstart',onDown,{passive:false});
+  // Double-click on the handle resets to the default (clears the saved width).
+  handle.addEventListener('dblclick',()=>{try{localStorage.removeItem(DRAWER_LS_KEY)}catch(e){}document.documentElement.style.removeProperty('--drawer-w')});
+  // Re-clamp when the window resizes so the drawer never overflows.
+  window.addEventListener('resize',()=>{const cur=drawer.getBoundingClientRect().width;if(cur>window.innerWidth*0.95)applyDrawerW(cur)});
+  // Hard safety net — if any page-lifecycle event hints we missed an
+  // mouseup (visibility change, escape key), clear the resizing flag.
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)cleanup()});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.body.classList.contains('drawer-resizing'))cleanup()});
 }
-
-async function renderNews() {
-    _highlightNewsWindow();
-    const tbody = document.querySelector('#news-feed-table tbody');
-    // Always replace the body with "Loading…" before fetching — the default
-    // markup ships one placeholder row, so a `children.length` check would
-    // never fire on subsequent refreshes and stale rows would linger.
-    if (tbody) {
-        tbody.innerHTML = `<tr><td colspan="${NEWS_TABLE_COLSPAN}" class="muted">Loading…</td></tr>`;
-    }
-    const params = new URLSearchParams();
-    params.set('window', state.newsWindow);
-    if (state.newsSource) params.set('source', state.newsSource);
-    if (state.newsHasMedia !== '') params.set('has_media', state.newsHasMedia);
-    params.set('limit', String(NEWS_DEFAULT_LIMIT));
-    let res;
-    try {
-        res = await api(`/api/news/feed?${params.toString()}`);
-    } catch (e) {
-        console.error('News feed fetch failed', e);
-        if (tbody) {
-            tbody.innerHTML = `<tr><td colspan="${NEWS_TABLE_COLSPAN}" class="muted">Unable to load news.</td></tr>`;
-        }
-        const countEl = document.getElementById('news-row-count');
-        if (countEl) countEl.textContent = '—';
-        return;
-    }
-    renderNewsRows((res && res.rows) || []);
+function perfMap(){const m={};(state.agentPerf?.agent_performance||[]).forEach(p=>m[p.actor_id]=p);return m}
+function safeJson(s){try{return typeof s==='string'?JSON.parse(s):s}catch{return{}}}
+function chart(id){const el=document.getElementById(id);if(!el||!window.echarts)return null;if(state.charts[id])state.charts[id].dispose();const c=echarts.init(el);state.charts[id]=c;setTimeout(()=>c.resize(),50);return c}
+function wireRows(){$$('[data-call]').forEach(tr=>{if(tr._wired)return;tr._wired=true;tr.onclick=()=>openCall(tr.dataset.call,tr.dataset.news)})}
+function wire(){
+  $$('.nav-link').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+  $$('[data-open]').forEach(b=>b.onclick=()=>switchTab(b.dataset.open));
+  $('#company-filter').onchange=e=>{state.company=e.target.value;load()};
+  $('#refresh-btn').onclick=()=>load();
+  $('#drawer-close').onclick=closeDrawer; $('#drawer-backdrop').onclick=closeDrawer;
+  ['floor-signal-filter','floor-position-filter','radar-filter','radar-age'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=()=>renderFloor()});
+  ['signals-filter','signals-status'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderSignalsPage()});
+  ['positions-filter','positions-status'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderPositionsPage()});
+  ['traders-filter','traders-sort'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderTradersPage()});
+  ['news-filter','news-media'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderNewsPage()});
 }
-
-// ---------------------------------------------------------------------------
-// Phase X.6 — Config tab
-// ---------------------------------------------------------------------------
-//
-// Read-only view of:
-//   * shared:    tickles_shared.public.system_config (grouped by namespace)
-//   * companies: tickles_<short_name>.public.company_config
-//
-// Backed by GET /api/config/snapshot. Secrets are redacted server-side
-// (the route never sees the raw value), so this code can render every
-// row without conditional masking.
-
-const CONFIG_SECRET_REDACTION = '***';   // mirrors config_provider.SECRET_REDACTION
-
-function _configRowMatchesSearch(row, namespace, q) {
-    if (!q) return true;
-    const hay = [
-        row.key || '',
-        row.value === null || row.value === undefined ? '' : String(row.value),
-        namespace || ''
-    ].join(' ').toLowerCase();
-    return hay.indexOf(q) !== -1;
-}
-
-function _configValueCell(value, isSecret) {
-    if (value === null || value === undefined) return '<span class="muted">—</span>';
-    if (isSecret) return `<span class="pill warn" title="Redacted server-side">${_esc(value)}</span>`;
-    // Long values can blow up the layout; clamp visually with title-attr fallback.
-    const s = String(value);
-    if (s.length > 120) {
-        return `<code title="${_esc(s)}">${_esc(s.slice(0, 117))}…</code>`;
-    }
-    return `<code>${_esc(s)}</code>`;
-}
-
-function _configFmtTimestamp(ts) {
-    // Returns RAW text — callers are responsible for HTML-escaping
-    // exactly once. Returning _esc(...) here would double-escape at
-    // the call sites (which all wrap this in _esc(...) themselves).
-    if (!ts) return '—';
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return String(ts);
-    return d.toLocaleString();
-}
-
-function _renderSharedConfig(shared, q) {
-    // shared = { namespace: [ {key, value, is_secret, updated_at}, ... ] }
-    const container = document.getElementById('config-shared-body');
-    if (!container) return 0;
-    const namespaces = Object.keys(shared || {}).sort();
-    if (!namespaces.length) {
-        container.innerHTML = '<div class="muted" style="padding: 12px;">No shared config.</div>';
-        return 0;
-    }
-    let total = 0;
-    const sections = namespaces.map(ns => {
-        const rows = (shared[ns] || []).filter(r => _configRowMatchesSearch(r, ns, q));
-        if (!rows.length) return '';
-        total += rows.length;
-        const body = rows.map(r => `
-            <tr>
-                <td><code>${_esc(r.key || '—')}</code></td>
-                <td>${_configValueCell(r.value, !!r.is_secret)}</td>
-                <td>${r.is_secret ? '<span class="pill warn">secret</span>' : ''}</td>
-                <td class="muted" style="white-space: nowrap;">${_esc(_configFmtTimestamp(r.updated_at))}</td>
-            </tr>`).join('');
-        return `
-            <div class="card" style="margin: 8px 0; padding: 8px 12px;">
-                <h4 style="margin: 4px 0 8px 0;"><span class="pill">${_esc(ns || '(global)')}</span>
-                    <span class="muted" style="font-size: 11px; margin-left: 8px;">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
-                </h4>
-                <table>
-                    <thead><tr><th>Key</th><th>Value</th><th></th><th>Updated</th></tr></thead>
-                    <tbody>${body}</tbody>
-                </table>
-            </div>`;
-    }).filter(Boolean).join('');
-    container.innerHTML = sections || '<div class="muted" style="padding: 12px;">No matches.</div>';
-    return total;
-}
-
-function _renderCompanyConfig(companies, q) {
-    // companies = { short_name: [ {key, value, updated_at}, ... ] }
-    const container = document.getElementById('config-companies-body');
-    if (!container) return 0;
-    const names = Object.keys(companies || {}).sort();
-    if (!names.length) {
-        container.innerHTML = '<div class="muted" style="padding: 12px;">No active companies.</div>';
-        return 0;
-    }
-    let total = 0;
-    const sections = names.map(name => {
-        const rows = (companies[name] || []).filter(r => _configRowMatchesSearch(r, name, q));
-        if (!rows.length && q) return '';        // hide empty matches when searching
-        total += rows.length;
-        const body = rows.length ? rows.map(r => `
-            <tr>
-                <td><code>${_esc(r.key || '—')}</code></td>
-                <td>${_configValueCell(r.value, false)}</td>
-                <td class="muted" style="white-space: nowrap;">${_esc(_configFmtTimestamp(r.updated_at))}</td>
-            </tr>`).join('') : `<tr><td colspan="3" class="muted">No company-scoped config.</td></tr>`;
-        return `
-            <div class="card" style="margin: 8px 0; padding: 8px 12px;">
-                <h4 style="margin: 4px 0 8px 0;"><span class="company-tag">${_esc(name)}</span>
-                    <span class="muted" style="font-size: 11px; margin-left: 8px;">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
-                </h4>
-                <table>
-                    <thead><tr><th>Key</th><th>Value</th><th>Updated</th></tr></thead>
-                    <tbody>${body}</tbody>
-                </table>
-            </div>`;
-    }).filter(Boolean).join('');
-    container.innerHTML = sections || '<div class="muted" style="padding: 12px;">No matches.</div>';
-    return total;
-}
-
-function _renderConfigFromState() {
-    // Re-render from the cached snapshot — used by the search input
-    // so we don't refetch every keystroke.
-    const snap = state.configSnapshot || { shared: {}, companies: {} };
-    const q = (state.configSearch || '').trim().toLowerCase();
-    const sharedCount = _renderSharedConfig(snap.shared || {}, q);
-    const companyCount = _renderCompanyConfig(snap.companies || {}, q);
-    const countEl = document.getElementById('config-row-count');
-    if (countEl) {
-        const total = sharedCount + companyCount;
-        countEl.textContent = q ? `${total} match${total === 1 ? '' : 'es'}` : `${total} rows`;
-    }
-}
-
-let _configSearchWired = false;
-
-function _wireConfigSearch() {
-    if (_configSearchWired) return;
-    const input = document.getElementById('config-search');
-    if (!input) return;
-    input.addEventListener('input', e => {
-        state.configSearch = e.target.value || '';
-        _renderConfigFromState();
-    });
-    _configSearchWired = true;
-}
-
-async function renderConfig() {
-    _wireConfigSearch();
-    const sharedBody = document.getElementById('config-shared-body');
-    const companyBody = document.getElementById('config-companies-body');
-    if (sharedBody) sharedBody.innerHTML = '<div class="muted" style="padding: 12px;">Loading…</div>';
-    if (companyBody) companyBody.innerHTML = '<div class="muted" style="padding: 12px;">Loading…</div>';
-    let res;
-    try {
-        res = await api('/api/config/snapshot');
-    } catch (e) {
-        console.error('Config snapshot fetch failed', e);
-        if (sharedBody) sharedBody.innerHTML = '<div class="muted" style="padding: 12px;">Unable to load shared config.</div>';
-        if (companyBody) companyBody.innerHTML = '<div class="muted" style="padding: 12px;">Unable to load company config.</div>';
-        const countEl = document.getElementById('config-row-count');
-        if (countEl) countEl.textContent = '—';
-        return;
-    }
-    state.configSnapshot = {
-        shared: (res && res.shared) || {},
-        companies: (res && res.companies) || {}
-    };
-    _renderConfigFromState();
-}
-
-function renderOverview(snap) {
-    const svcList = document.getElementById('svc-list');
-    svcList.innerHTML = (snap.services || []).map(s => {
-        const kindClass = `svc-${s.kind || 'daemon'}`;
-        const hb = s.heartbeat;
-        let hbDisplay = '<span class="muted">—</span>';
-        if (hb) {
-            const statusClass = hb.is_stale ? 'bad' : 'ok';
-            const timeStr = hb.last_seen_seconds < 60
-                ? `${hb.last_seen_seconds}s`
-                : `${Math.floor(hb.last_seen_seconds / 60)}m`;
-            hbDisplay = `<span class="pill ${statusClass}">${timeStr}</span>`;
-        }
-        const phase = s.tags?.phase || s.phase || '—';
-        return `<tr>
-            <td>${s.name}</td>
-            <td><span class="pill ${kindClass}">${s.kind || 'daemon'}</span></td>
-            <td>${phase}</td>
-            <td>${s.enabled_on_vps ? '✅' : '❌'}</td>
-            <td>${hbDisplay}</td>
-        </tr>`;
-    }).join('');
-}
-
-function renderLeaderboard(data) {
-    const tbody = document.querySelector('#tab-leaderboard tbody');
-    tbody.innerHTML = (data || []).map(r => {
-        const actorDisplay = r.actor_type === 'trader'
-            ? `<a href="#" onclick="switchTab('trader-drill', {traderId: ${r.trader_profile_id}}); return false;">${r.actor_id}</a>`
-            : r.actor_id;
-        return `
-        <tr>
-            <td>${r.rank}</td>
-            <td><span class="company-tag">${r._company}</span>${actorDisplay}</td>
-            <td>${r.actor_type}</td>
-            <td>${(r.edge_score || 0).toFixed(4)}</td>
-            <td>${r.closed_position_count}</td>
-        </tr>
-    `}).join('');
-}
-
-function _fmtNum(v, digits = 2) {
-    if (v === null || v === undefined || v === '') return '—';
-    const n = Number(v);
-    if (!isFinite(n)) return '—';
-    return n.toFixed(digits);
-}
-
-function _esc(s) {
-    if (s === null || s === undefined) return '';
-    return String(s)
-        .replace(/&/g, '\u0026amp;')
-        .replace(/</g, '\u0026lt;')
-        .replace(/>/g, '\u0026gt;')
-        .replace(/"/g, '\u0026quot;')
-        .replace(/'/g, '\u0026#39;');
-}
-
-function _dirPill(dir) {
-    const d = (dir || '').toLowerCase();
-    if (d === 'long' || d === 'buy') return 'ok';
-    if (d === 'short' || d === 'sell') return 'bad';
-    return '';
-}
-
-function _sourceUrlFromMeta(meta) {
-    if (!meta) return null;
-    let m = meta;
-    if (typeof m === 'string') {
-        try { m = JSON.parse(m); } catch { return null; }
-    }
-    return m.discord_url || m.url || m.source_url || null;
-}
-
-function renderSignals(data) {
-    const container = document.querySelector('#tab-signals .grid');
-    container.innerHTML = (data || []).map(s => {
-        const company = s._company || 'shared';
-        const direction = s.consensus_direction || s.llm_direction || '—';
-        const symbol = s.instrument_symbol || '—';
-        const created = s.created_at ? new Date(s.created_at).toLocaleString() : '—';
-        const tags = s.pattern_tags || s.setup_tags || [];
-        const headline = s.news_headline || '';
-        const srcUrl = _sourceUrlFromMeta(s.news_metadata);
-        const srcLink = srcUrl
-            ? `<a href="${_esc(srcUrl)}" target="_blank" class="btn secondary" style="font-size: 11px; padding: 4px 8px;">View Source</a>`
-            : '';
-        const niid = s.news_item_id !== null && s.news_item_id !== undefined ? ` data-news-item-id="${_esc(s.news_item_id)}"` : '';
-        return `
-        <div class="card" id="sig-${s.id}" data-interp-id="${_esc(s.id)}"${niid}>
-            <h2>
-                <span><span class="company-tag">${_esc(company)}</span>Signal #${s.id}</span>
-                <a href="#sig-${s.id}" class="anchor">⚓</a>
-            </h2>
-            <div class="row">
-                <span class="pill ${_dirPill(direction)}">${_esc(direction)}</span>
-                <strong>${_esc(symbol)}</strong>
-                <span class="muted">${_esc(created)}</span>
-            </div>
-            ${headline ? `<div style="font-size: 12px; margin-top: 6px;">${_esc(headline)}</div>` : ''}
-            <div class="json-block">${_esc(JSON.stringify(tags))}</div>
-            ${srcLink ? `<div style="margin-top: 8px;">${srcLink}</div>` : ''}
-        </div>`;
-    }).join('');
-}
-
-function renderPositions(data) {
-    const container = document.querySelector('#tab-positions .grid');
-    container.innerHTML = (data || []).map(p => {
-        const company = p._company || p.company_id || 'shared';
-        const symbol = p.instrument_symbol || '—';
-        const direction = p.direction || '—';
-        const pnlRaw = p.unrealized_pnl_usd;
-        const pnlNum = pnlRaw === null || pnlRaw === undefined ? null : Number(pnlRaw);
-        const pnlClass = pnlNum === null ? '' : (pnlNum >= 0 ? 'pos' : 'neg');
-        const pnlText = pnlNum === null ? '—' : `$${pnlNum.toFixed(2)}`;
-        const actorId = p.actor_id || '—';
-        const actorType = p.actor_type || '—';
-        const entry = p.entry_price !== null && p.entry_price !== undefined ? _fmtNum(p.entry_price, 4) : '—';
-        const sl = p.stop_loss !== null && p.stop_loss !== undefined ? _fmtNum(p.stop_loss, 4) : '—';
-        const tp1 = p.take_profit_1 !== null && p.take_profit_1 !== undefined ? _fmtNum(p.take_profit_1, 4) : '—';
-        const status = p.status || '—';
-        const pInterp = p.signal_interpretation_id;
-        const pNews = p.news_item_id;
-        const interpAttr = pInterp !== null && pInterp !== undefined ? ` data-interp-id="${_esc(pInterp)}"` : '';
-        const niidAttr = pNews !== null && pNews !== undefined ? ` data-news-item-id="${_esc(pNews)}"` : '';
-        return `
-        <div class="card" id="pos-${p.id}"${interpAttr}${niidAttr}>
-            <h2>
-                <span><span class="company-tag">${_esc(company)}</span>Pos #${p.id}</span>
-                <a href="#pos-${p.id}" class="anchor">⚓</a>
-            </h2>
-            <div class="row">
-                <strong>${_esc(symbol)}</strong>
-                <span class="pill ${_dirPill(direction)}">${_esc(direction)}</span>
-                <span class="pill">${_esc(status)}</span>
-                <span class="pnl ${pnlClass}">${pnlText}</span>
-            </div>
-            <div style="font-size: 12px; margin-top: 8px;">
-                <div><strong>Entry:</strong> ${entry} &nbsp; <strong>SL:</strong> ${sl} &nbsp; <strong>TP1:</strong> ${tp1}</div>
-                <div><strong>Entry Reason:</strong> ${_esc(p.entry_reason_trader || p.entry_reason_llm || p.entry_reason_agent || '—')}</div>
-                <div class="muted">Actor: ${_esc(actorId)} (${_esc(actorType)})</div>
-            </div>
-        </div>`;
-    }).join('');
-}
-
-function renderInterpretations(data) {
-    const container = document.querySelector('#tab-interpretations .grid');
-    container.innerHTML = (data || []).map(i => {
-        const company = i._company || 'shared';
-        const symbol = i.instrument_symbol || '—';
-        const direction = i.consensus_direction || i.llm_direction || '—';
-        const version = i.prompt_version || '0';
-        const tags = i.pattern_tags || i.setup_tags || [];
-        const mediaUrl = i.media_url || '';
-        const headline = i.news_headline || '';
-        const chartUrl = `api/charts/${i.id}${company && company !== 'shared' ? `?company=${encodeURIComponent(company)}` : ''}`;
-        const fallbackImg = mediaUrl
-            ? `<img src="${_esc(mediaUrl)}" alt="Original Chart" style="width: 100%;">`
-            : `<div class="muted" style="padding: 20px; text-align: center;">No image available</div>`;
-        const iNews = i.news_item_id !== null && i.news_item_id !== undefined ? ` data-news-item-id="${_esc(i.news_item_id)}"` : '';
-        return `
-        <div class="card" id="interp-${i.id}" data-interp-id="${_esc(i.id)}"${iNews}>
-            <h2>
-                <span><span class="company-tag">${_esc(company)}</span>Interp #${i.id}</span>
-                <a href="#interp-${i.id}" class="anchor">⚓</a>
-            </h2>
-            <div class="row">
-                <strong>${_esc(symbol)}</strong>
-                <span class="pill ${_dirPill(direction)}">${_esc(direction)}</span>
-                <span class="muted">v${_esc(version)}</span>
-            </div>
-            ${headline ? `<div style="font-size: 12px; margin: 6px 0;">${_esc(headline)}</div>` : ''}
-            <div class="chart-container">
-                <object data="${_esc(chartUrl)}" type="image/svg+xml" style="width: 100%; height: auto; min-height: 200px;">
-                    ${fallbackImg}
-                </object>
-            </div>
-            <div class="json-block">${_esc(JSON.stringify(tags, null, 2))}</div>
-        </div>`;
-    }).join('');
-}
-
-async function renderTraderDrill() {
-    if (!state.selectedTraderId) return;
-    try {
-        const data = await api(`/api/trader-drill?trader_id=${state.selectedTraderId}`);
-        if (!data.ok) return console.error(data.error);
-
-        const p = data.profile;
-        document.getElementById('drill-name').textContent = p.display_name || p.handle_raw;
-        document.getElementById('drill-platform').textContent = p.platform;
-        document.getElementById('drill-handle').textContent = p.handle_raw;
-
-        const perfBody = document.querySelector('#drill-perf-table tbody');
-        perfBody.innerHTML = (data.performance || []).map(r => `
-            <tr>
-                <td>${r.period}</td>
-                <td>${(r.accuracy * 100).toFixed(1)}%</td>
-                <td>${(r.sharpe || 0).toFixed(2)}</td>
-                <td>${r.trade_count}</td>
-            </tr>
-        `).join('');
-
-        const tradesBody = document.querySelector('#drill-trades-table tbody');
-        tradesBody.innerHTML = (data.trades || []).map(t => `
-            <tr>
-                <td>${t.symbol}</td>
-                <td><span class="pill">${t.direction}</span></td>
-                <td class="${t.realized_pnl >= 0 ? 'pos' : 'neg'}">$${(t.realized_pnl || 0).toFixed(2)}</td>
-                <td class="muted">${new Date(t.signal_timestamp).toLocaleDateString()}</td>
-            </tr>
-        `).join('');
-
-        const sigGrid = document.getElementById('drill-signals-grid');
-        sigGrid.innerHTML = (data.signals || []).map(s => `
-            <div class="card">
-                <div class="row">
-                    <strong>${s.instrument_symbol}</strong>
-                    <span class="pill">${s.consensus_direction}</span>
-                </div>
-                <div class="muted" style="font-size: 11px;">${new Date(s.created_at).toLocaleString()}</div>
-            </div>
-        `).join('');
-
-    } catch (e) {
-        console.error("Trader drill failed", e);
-    }
-}
-
-function connectQueueWS() {
-    if (state.queueWS || !state.token) return;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Use relative path to handle potential reverse proxy prefixes (e.g. /dashboard/)
-    const pathPrefix = window.location.pathname.endsWith('/') ? window.location.pathname.slice(0, -1) : window.location.pathname;
-    const wsUrl = `${protocol}//${window.location.host}${pathPrefix}/ws/queue?token=${state.token}`;
-    
-    state.queueWS = new WebSocket(wsUrl);
-    
-    state.queueWS.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'queue_update') {
-            renderQueue(msg.data);
-        }
-    };
-    
-    state.queueWS.onclose = () => {
-        state.queueWS = null;
-        if (state.currentTab === 'queue') {
-            setTimeout(connectQueueWS, 5000);
-        }
-    };
-    
-    state.queueWS.onerror = (err) => {
-        console.error("WS Error", err);
-        state.queueWS.close();
-    };
-}
-
-function renderQueue(data) {
-    const newsBody = document.querySelector('#queue-news-table tbody');
-    newsBody.innerHTML = (data.news_pending || []).map(n => `
-        <tr>
-            <td>${n.source}</td>
-            <td>${n.headline || '—'}</td>
-            <td><span class="pill">Pending</span></td>
-            <td class="muted">${new Date(n.collected_at).toLocaleTimeString()}</td>
-        </tr>
-    `).join('');
-
-    const mediaBody = document.querySelector('#queue-media-table tbody');
-    mediaBody.innerHTML = (data.media_pending || []).map(m => `
-        <tr>
-            <td>${m.media_type}</td>
-            <td><span class="pill">${m.processing_status}</span></td>
-            <td class="muted">${new Date(m.created_at).toLocaleTimeString()}</td>
-        </tr>
-    `).join('');
-
-    const posBody = document.querySelector('#queue-pos-table tbody');
-    posBody.innerHTML = (data.positions_active || []).map(p => `
-        <tr>
-            <td><strong>${p.instrument_symbol}</strong></td>
-            <td><span class="pill">${p.direction}</span></td>
-            <td>${p.actor_type}</td>
-            <td><span class="company-tag">${p.company_id}</span></td>
-            <td class="muted">${new Date(p.signal_timestamp).toLocaleString()}</td>
-        </tr>
-    `).join('');
-}
-
-function handleAnchors() {
-    // Hash-anchor highlight helper. Hashes that aren't simple id refs
-    // (e.g. Phase Y's `#window=14d` state token) are intentionally skipped —
-    // they're consumed by tab-specific renderers, not by this scroll-to logic.
-    const hash = window.location.hash;
-    if (!hash) return;
-    if (!/^#[A-Za-z][\w:.-]*$/.test(hash)) return;
-    let target = null;
-    try {
-        target = document.getElementById(hash.slice(1));
-    } catch (err) {
-        console.warn("handleAnchors: lookup failed for", hash, err);
-        return;
-    }
-    if (target && !target.dataset.highlighted) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        target.classList.add('highlight');
-        target.dataset.highlighted = "true";
-        setTimeout(() => {
-            target.classList.remove('highlight');
-            delete target.dataset.highlighted;
-        }, 3000);
-    }
-}
-
-/* ============================================================
- * Phase X.5 — Cross-tab Interpretation Drawer
- * ------------------------------------------------------------
- * Opens a side panel with the LLM/quant/ChartHacker interpretation
- * timeline for a given news_item_id (or single interp id). Wired into
- * the News, Signals, Positions, and Interpretations tabs via click
- * delegation on rows that carry data-news-item-id / data-interp-id.
- * ============================================================ */
-
-const DRAWER_FETCH_LIMIT = 10;
-let _drawerLastFocus = null;
-
-function _drawerEl() {
-    return document.getElementById('interp-drawer');
-}
-
-function _drawerBackdropEl() {
-    return document.getElementById('interp-drawer-backdrop');
-}
-
-function _drawerBodyEl() {
-    return document.getElementById('interp-drawer-body');
-}
-
-function _drawerSetLoading() {
-    const body = _drawerBodyEl();
-    if (body) {
-        body.innerHTML = '<div class="muted" style="padding: 20px; text-align: center;">Loading…</div>';
-    }
-}
-
-function _drawerSetError(msg) {
-    const body = _drawerBodyEl();
-    if (body) {
-        body.innerHTML = `<div class="muted" style="padding: 20px; text-align: center;">${_esc(msg)}</div>`;
-    }
-}
-
-function _clearDrawerOpenAccent() {
-    document.querySelectorAll('.drawer-open').forEach(el => el.classList.remove('drawer-open'));
-}
-
-async function openInterpretationDrawer({ newsItemId = null, interpId = null, sourceEl = null } = {}) {
-    if (newsItemId === null && interpId === null) return;
-    const drawer = _drawerEl();
-    const backdrop = _drawerBackdropEl();
-    if (!drawer || !backdrop) return;
-
-    _drawerLastFocus = document.activeElement;
-    _clearDrawerOpenAccent();
-    if (sourceEl) sourceEl.classList.add('drawer-open');
-
-    drawer.classList.remove('hidden');
-    drawer.setAttribute('aria-hidden', 'false');
-    backdrop.classList.remove('hidden');
-    backdrop.setAttribute('aria-hidden', 'false');
-    _drawerSetLoading();
-    try { drawer.focus({ preventScroll: true }); } catch {}
-
-    const params = new URLSearchParams();
-    if (newsItemId !== null) {
-        params.set('news_item_id', String(newsItemId));
-        params.set('limit', String(DRAWER_FETCH_LIMIT));
-    } else {
-        params.set('id', String(interpId));
-    }
-
-    let res;
-    try {
-        res = await api(`/api/interpretations/drawer?${params.toString()}`);
-    } catch (e) {
-        console.error('Drawer fetch failed', e);
-        _drawerSetError('Unable to load interpretation.');
-        return;
-    }
-    const rows = (res && Array.isArray(res.rows)) ? res.rows : [];
-    renderDrawer(rows, { newsItemId, interpId });
-}
-
-function closeInterpretationDrawer() {
-    const drawer = _drawerEl();
-    const backdrop = _drawerBackdropEl();
-    if (drawer) {
-        drawer.classList.add('hidden');
-        drawer.setAttribute('aria-hidden', 'true');
-    }
-    if (backdrop) {
-        backdrop.classList.add('hidden');
-        backdrop.setAttribute('aria-hidden', 'true');
-    }
-    _clearDrawerOpenAccent();
-    if (_drawerLastFocus && typeof _drawerLastFocus.focus === 'function') {
-        try { _drawerLastFocus.focus({ preventScroll: true }); } catch {}
-    }
-    _drawerLastFocus = null;
-}
-
-function _drawerRow(label, value) {
-    if (value === null || value === undefined || value === '') return '';
-    return `<div class="drawer-row"><span class="drawer-label">${_esc(label)}</span><span class="drawer-value">${value}</span></div>`;
-}
-
-function _drawerJsonBlock(value) {
-    if (value === null || value === undefined) return '';
-    let txt;
-    try {
-        txt = JSON.stringify(value, null, 2);
-    } catch {
-        txt = String(value);
-    }
-    if (!txt || txt === '{}' || txt === '[]' || txt === 'null') return '';
-    return `<pre class="drawer-json">${_esc(txt)}</pre>`;
-}
-
-function _drawerTagsBlock(tags) {
-    if (!Array.isArray(tags) || !tags.length) return '';
-    const pills = tags
-        .filter(t => t !== null && t !== undefined && t !== '')
-        .map(t => `<span class="pill">${_esc(t)}</span>`)
-        .join(' ');
-    if (!pills) return '';
-    return `<div class="drawer-tags">${pills}</div>`;
-}
-
-function _drawerSection(title, innerHtml) {
-    if (!innerHtml) return '';
-    return `<div class="drawer-section"><h3>${_esc(title)}</h3>${innerHtml}</div>`;
-}
-
-function _drawerFmtConfidence(v) {
-    if (v === null || v === undefined || v === '') return '';
-    const n = Number(v);
-    if (!isFinite(n)) return _esc(String(v));
-    return n.toFixed(2);
-}
-
-function _drawerFmtTs(v) {
-    if (!v) return '';
-    try { return _esc(new Date(v).toLocaleString()); }
-    catch { return _esc(String(v)); }
-}
-
-function _drawerSectionConsensus(row) {
-    const dir = row.consensus_direction || '—';
-    const dirHtml = `<span class="pill ${_dirPill(dir)}">${_esc(dir)}</span>`;
-    let inner = '';
-    inner += _drawerRow('Direction', dirHtml);
-    inner += _drawerRow('Confidence', _drawerFmtConfidence(row.consensus_confidence));
-    inner += _drawerRow('Method', _esc(row.consensus_method || ''));
-    inner += _drawerRow('Symbol', _esc(row.instrument && row.instrument.symbol));
-    inner += _drawerRow('Exchange', _esc(row.instrument && row.instrument.exchange));
-    inner += _drawerRow('Timeframe', _esc(row.instrument && row.instrument.timeframe));
-    inner += _drawerRow('Created', _drawerFmtTs(row.created_at));
-    inner += _drawerRow('Prompt v', _esc(row.prompt_version));
-    inner += _drawerRow('Model', _esc(row.model_version));
-    return _drawerSection('Consensus', inner);
-}
-
-function _drawerSectionLLM(row) {
-    const llm = row.llm || {};
-    let inner = '';
-    inner += _drawerRow('Direction', _esc(llm.direction || ''));
-    inner += _drawerRow('Confidence', _drawerFmtConfidence(llm.confidence));
-    if (llm.reasoning) inner += _drawerRow('Reasoning', _esc(llm.reasoning));
-    if (llm.cost_usd !== null && llm.cost_usd !== undefined && llm.cost_usd !== '') {
-        inner += _drawerRow('Cost (USD)', _esc(llm.cost_usd));
-    }
-    const levels = _drawerJsonBlock(llm.levels);
-    if (levels) inner += `<div class="drawer-row"><span class="drawer-label">Levels</span><span class="drawer-value">${levels}</span></div>`;
-    return _drawerSection('LLM Track', inner);
-}
-
-function _drawerSectionQuant(row) {
-    const q = row.quant || {};
-    let inner = '';
-    inner += _drawerRow('Direction', _esc(q.direction || ''));
-    inner += _drawerRow('Confidence', _drawerFmtConfidence(q.confidence));
-    if (q.cost_usd !== null && q.cost_usd !== undefined && q.cost_usd !== '') {
-        inner += _drawerRow('Cost (USD)', _esc(q.cost_usd));
-    }
-    const ind = _drawerJsonBlock(q.indicators);
-    if (ind) inner += `<div class="drawer-row"><span class="drawer-label">Indicators</span><span class="drawer-value">${ind}</span></div>`;
-    return _drawerSection('Quant Track', inner);
-}
-
-function _drawerSectionChartHacker(row) {
-    const ch = row.chart_hacker || {};
-    let inner = '';
-    if (ch.ai_agreement_score !== null && ch.ai_agreement_score !== undefined && ch.ai_agreement_score !== '') {
-        inner += _drawerRow('Agreement Score', _esc(ch.ai_agreement_score));
-    }
-    if (ch.ai_comment) inner += _drawerRow('Comment', _esc(ch.ai_comment));
-    const chart = _drawerJsonBlock(ch.chart_analysis);
-    if (chart) inner += `<div class="drawer-row"><span class="drawer-label">Chart</span><span class="drawer-value">${chart}</span></div>`;
-    const tt = _drawerJsonBlock(ch.trader_trades);
-    if (tt) inner += `<div class="drawer-row"><span class="drawer-label">Trader Trades</span><span class="drawer-value">${tt}</span></div>`;
-    const cht = _drawerJsonBlock(ch.chart_hacker_trades);
-    if (cht) inner += `<div class="drawer-row"><span class="drawer-label">CH Trades</span><span class="drawer-value">${cht}</span></div>`;
-    return _drawerSection('ChartHacker', inner);
-}
-
-function _drawerSectionTags(row) {
-    const t = row.tags || {};
-    const blocks = [
-        ['Pattern', _drawerTagsBlock(t.pattern)],
-        ['Setup', _drawerTagsBlock(t.setup)],
-        ['Regime', _drawerTagsBlock(t.regime)],
-        ['Session', _drawerTagsBlock(t.session)],
-    ];
-    const inner = blocks
-        .filter(([, html]) => html)
-        .map(([label, html]) => `<div class="drawer-row"><span class="drawer-label">${_esc(label)}</span><span class="drawer-value">${html}</span></div>`)
-        .join('');
-    return _drawerSection('Tags', inner);
-}
-
-function _drawerSectionThesis(row) {
-    const th = row.thesis || {};
-    let inner = '';
-    if (th.trader_stated) inner += _drawerRow('Trader', _esc(th.trader_stated));
-    if (th.llm_inferred) inner += _drawerRow('LLM', _esc(th.llm_inferred));
-    if (th.reason_agreement_score !== null && th.reason_agreement_score !== undefined && th.reason_agreement_score !== '') {
-        inner += _drawerRow('Reason Score', _esc(th.reason_agreement_score));
-    }
-    return _drawerSection('Thesis', inner);
-}
-
-function _drawerSectionNews(row) {
-    const n = row.news || {};
-    let inner = '';
-    if (n.headline) inner += _drawerRow('Headline', _esc(n.headline));
-    if (n.source) inner += _drawerRow('Source', _esc(n.source));
-    if (n.channel_name) inner += _drawerRow('Channel', _esc(n.channel_name));
-    if (n.author) inner += _drawerRow('Author', _esc(n.author));
-    if (n.collected_at) inner += _drawerRow('Collected', _drawerFmtTs(n.collected_at));
-    if (n.published_at) inner += _drawerRow('Published', _drawerFmtTs(n.published_at));
-    return _drawerSection('News', inner);
-}
-
-function _drawerSectionMedia(row) {
-    const m = row.media || {};
-    let inner = '';
-    if (m.media_type) inner += _drawerRow('Type', _esc(m.media_type));
-    if (m.source_url) inner += _drawerRow('Source URL', `<a href="${_esc(m.source_url)}" target="_blank" rel="noreferrer">link</a>`);
-    if (row.media_item_id) {
-        // URL context: use encodeURIComponent on the path segment, not _esc
-        // (which is for HTML attribute escaping). Numeric IDs are safe either
-        // way today, but this matches the codebase's other URL builders.
-        const mediaUrl = `api/media/${encodeURIComponent(String(row.media_item_id))}`;
-        inner += _drawerRow('Preview', `<img src="${_esc(mediaUrl)}" alt="media" style="max-width: 100%; border-radius: 4px;">`);
-    }
-    return _drawerSection('Media', inner);
-}
-
-function _drawerCard(row, idx) {
-    const heading = `Interpretation #${_esc(row.id)}`;
-    const sections = [
-        _drawerSectionConsensus(row),
-        _drawerSectionLLM(row),
-        _drawerSectionQuant(row),
-        _drawerSectionChartHacker(row),
-        _drawerSectionTags(row),
-        _drawerSectionThesis(row),
-        _drawerSectionNews(row),
-        _drawerSectionMedia(row),
-    ].join('');
-    return `<article class="drawer-card" data-idx="${idx}"><h2 class="drawer-card-title">${heading}</h2>${sections}</article>`;
-}
-
-function renderDrawer(rows, ctx = {}) {
-    const body = _drawerBodyEl();
-    if (!body) return;
-    if (!Array.isArray(rows) || !rows.length) {
-        const what = ctx.newsItemId !== null && ctx.newsItemId !== undefined
-            ? `news item #${ctx.newsItemId}`
-            : (ctx.interpId !== null && ctx.interpId !== undefined ? `interpretation #${ctx.interpId}` : 'this row');
-        body.innerHTML = `<div class="drawer-empty">No interpretations found for ${_esc(what)}.</div>`;
-        return;
-    }
-    body.innerHTML = rows.map((r, i) => _drawerCard(r, i)).join('');
-}
-
-function _drawerExtractIdsFromEvent(e) {
-    const el = e.target.closest('[data-interp-id], [data-news-item-id]');
-    if (!el) return null;
-    // Don't trigger when clicking nested links/buttons (anchors, source links).
-    if (e.target.closest('a, button')) return null;
-    const interpRaw = el.getAttribute('data-interp-id');
-    const newsRaw = el.getAttribute('data-news-item-id');
-    const interpId = interpRaw ? Number(interpRaw) : null;
-    const newsItemId = newsRaw ? Number(newsRaw) : null;
-    // Prefer news_item_id (returns the full timeline); fall back to interp id.
-    if (newsItemId && Number.isFinite(newsItemId)) {
-        return { newsItemId, interpId: null, sourceEl: el };
-    }
-    if (interpId && Number.isFinite(interpId)) {
-        return { newsItemId: null, interpId, sourceEl: el };
-    }
-    return null;
-}
-
-let _drawerWired = false;
-
-function _wireDrawerClicks() {
-    // Idempotent — DOMContentLoaded fires once today, but if any future code
-    // re-runs the bootstrap (hot-reload, soft-reinit) we must not stack
-    // duplicate document-level listeners. Per-element listeners are guarded
-    // with a dataset flag so re-rendering tab content also stays safe.
-    if (_drawerWired) return;
-    _drawerWired = true;
-
-    const containers = [
-        document.getElementById('news-feed-table'),
-        document.querySelector('#tab-signals .grid'),
-        document.querySelector('#tab-positions .grid'),
-        document.querySelector('#tab-interpretations .grid'),
-    ];
-    containers.forEach(c => {
-        if (!c || c.dataset.drawerWired === '1') return;
-        c.dataset.drawerWired = '1';
-        c.addEventListener('click', (e) => {
-            const ids = _drawerExtractIdsFromEvent(e);
-            if (!ids) return;
-            e.preventDefault();
-            openInterpretationDrawer(ids);
-        });
-    });
-
-    const closeBtn = document.getElementById('interp-drawer-close');
-    if (closeBtn && closeBtn.dataset.drawerWired !== '1') {
-        closeBtn.dataset.drawerWired = '1';
-        closeBtn.addEventListener('click', closeInterpretationDrawer);
-    }
-    const backdrop = _drawerBackdropEl();
-    if (backdrop && backdrop.dataset.drawerWired !== '1') {
-        backdrop.dataset.drawerWired = '1';
-        backdrop.addEventListener('click', closeInterpretationDrawer);
-    }
-
-    document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        const drawer = _drawerEl();
-        if (drawer && !drawer.classList.contains('hidden')) {
-            closeInterpretationDrawer();
-        }
-    });
-}
-
-// Init
-window.addEventListener('DOMContentLoaded', () => {
-    console.log("DOM Content Loaded. Initializing...");
-
-    // Auth Handlers (wrapped in null checks for robustness)
-    const btnRequest = document.getElementById('requestOtp');
-    if (btnRequest) {
-        btnRequest.addEventListener('click', async () => {
-            const chat = document.getElementById('chatId').value.trim();
-            if (!chat) return alert("Enter chat ID");
-            try {
-                await api('/api/auth/request-otp', { method: 'POST', body: JSON.stringify({ chat_id: chat }) });
-                document.getElementById('otpStage').classList.remove('hidden');
-            } catch (e) { alert(e.error || "Failed to send OTP"); }
-        });
-    }
-
-    const btnVerify = document.getElementById('verifyOtp');
-    if (btnVerify) {
-        btnVerify.addEventListener('click', async () => {
-            const chat = document.getElementById('chatId').value.trim();
-            const code = document.getElementById('otpCode').value.trim();
-            try {
-                const res = await api('/api/auth/verify-otp', { method: 'POST', body: JSON.stringify({ chat_id: chat, code }) });
-                setToken(res.token);
-                showSection('app');
-                refresh();
-            } catch (e) { alert(e.error || "Invalid code"); }
-        });
-    }
-
-    const btnLogout = document.getElementById('logout');
-    if (btnLogout) {
-        btnLogout.addEventListener('click', async () => {
-            try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
-            setToken(null);
-            showSection('login');
-        });
-    }
-
-    const btnSkip = document.getElementById('skipLogin');
-    if (btnSkip) {
-        btnSkip.addEventListener('click', () => {
-            console.log("Bypassing auth...");
-            setToken("dev_token");
-            showSection('app');
-            refresh();
-        });
-    }
-
-    document.querySelectorAll('nav a').forEach(a => {
-        a.addEventListener('click', (e) => {
-            e.preventDefault();
-            switchTab(a.dataset.tab);
-        });
-    });
-
-    // Phase Y — Learning tab controls.
-    document.querySelectorAll('#learning-window-tabs .window-tab').forEach(el => {
-        el.addEventListener('click', (e) => {
-            e.preventDefault();
-            const w = el.dataset.window;
-            if (!LEARNING_WINDOW_DAYS[w]) return;
-            state.learningWindow = w;
-            // Round-trip into the URL hash so reloads/copy-link preserve it.
-            try {
-                const newHash = `#window=${w}`;
-                if (window.location.hash !== newHash) {
-                    history.replaceState(null, '', newHash);
-                }
-            } catch {}
-            _highlightLearningWindow();
-            if (state.currentTab === 'learning') renderLearning();
-        });
-    });
-    const dimSel = document.getElementById('learning-feed-dim');
-    if (dimSel) {
-        dimSel.addEventListener('change', () => {
-            state.learningDimension = dimSel.value || '';
-            if (state.currentTab === 'learning') renderLearning();
-        });
-    }
-
-    // Phase X.4 — News tab controls.
-    document.querySelectorAll('#news-window-tabs .window-tab').forEach(el => {
-        el.addEventListener('click', (e) => {
-            e.preventDefault();
-            const w = el.dataset.window;
-            if (!NEWS_WINDOW_LABELS.includes(w)) return;
-            state.newsWindow = w;
-            _highlightNewsWindow();
-            if (state.currentTab === 'news') renderNews();
-        });
-    });
-    const newsSrcSel = document.getElementById('news-source-filter');
-    if (newsSrcSel) {
-        newsSrcSel.addEventListener('change', () => {
-            state.newsSource = newsSrcSel.value || '';
-            if (state.currentTab === 'news') renderNews();
-        });
-    }
-    const newsMediaSel = document.getElementById('news-media-filter');
-    if (newsMediaSel) {
-        newsMediaSel.addEventListener('change', () => {
-            state.newsHasMedia = newsMediaSel.value || '';
-            if (state.currentTab === 'news') renderNews();
-        });
-    }
-
-    const companyFilter = document.getElementById('company-filter');
-    if (companyFilter) {
-        companyFilter.addEventListener('change', (e) => {
-            state.company = e.target.value === 'all' ? null : e.target.value;
-            refresh();
-        });
-    }
-
-    // Phase X.5 — wire cross-tab interpretation drawer click delegation.
-    _wireDrawerClicks();
-
-    // AUTH DISABLED PER USER REQUEST
-    setToken("dev_token");
-    showSection('app');
-    refresh();
-    state.refreshInterval = setInterval(refresh, 10000);
-});
-
-window.addEventListener('hashchange', handleAnchors);
+window.addEventListener('DOMContentLoaded',()=>{loadDrawerWidth();wire();attachDrawerResizer();load();state.timer=setInterval(()=>{const ts=new Date();$('#updated-at').textContent=`${ts.toLocaleTimeString()}`; if(['floor','radar','signals','positions','competition'].includes(state.tab)) load()},30000)});
+})();

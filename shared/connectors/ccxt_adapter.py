@@ -109,7 +109,7 @@ class CCXTAdapter(BaseExchangeAdapter):
         """
         exchange = await self._get_exchange()
 
-        ccxt_timeframe = TIMEFRAME_MAP.get(timeframe)
+        ccxt_timeframe = TIMEFRAME_MAP.get(timeframe, timeframe)
         if not ccxt_timeframe:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
 

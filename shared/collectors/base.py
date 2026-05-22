@@ -310,7 +310,10 @@ class BaseCollector(ABC):
                         inserted_count += 1
 
                         # ---- Media rows (one per attachment) ----
+                        local_url = media_urls[0] if (has_local and media_urls) else None
                         for url in media_urls:
+                            if url == local_url:
+                                continue  # Avoid duplicate cdn_hosted insertion when we already have the attached local file
                             media_type = _guess_media_type(
                                 url, fallback=item.media_type or "link"
                             )
@@ -346,7 +349,7 @@ class BaseCollector(ABC):
                                 source_id,
                                 media_type,
                                 "attached",
-                                None,
+                                media_urls[0] if media_urls else None,
                                 item.media_path,
                                 None,
                                 json.dumps({"origin": "collector_batch"}),

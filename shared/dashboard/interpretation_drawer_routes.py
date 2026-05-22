@@ -28,6 +28,7 @@ PATCH / POST / DELETE handlers live here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from decimal import Decimal
@@ -171,26 +172,81 @@ async def handle_drawer(request: web.Request) -> web.Response:
         return _err(400, "supply only one of: news_item_id, id")
 
     provider = _provider(request)
-    rows = await _fetch_rows(provider, news_item_id, interp_id, limit)
+    rows, media_gallery, news_item_header = await _fetch_drawer_payload(
+        provider, news_item_id, interp_id, limit,
+    )
     if rows is None:
         return _err(500, "interpretation-drawer fetch failed")
 
-    return web.json_response({
+    payload: dict = {
         "ok": True,
         "news_item_id": news_item_id,
         "id": interp_id,
         "limit": limit if news_item_id is not None else None,
         "rows": _jsonify(rows),
-    })
+    }
+    if media_gallery is not None:
+        payload["media_gallery"] = _jsonify(media_gallery)
+    # Slice 1 §3.5 — only include the news_item header when there are no
+    # interpretation rows to render. The frontend uses this to render an
+    # informative empty state instead of "No interpretation found.".
+    if news_item_header is not None and not rows:
+        payload["news_item"] = _jsonify(news_item_header)
+
+    # Slice 2 §F — best-effort mem0 recall keyed off the first row's
+    # resolved instrument. Failures (timeout, missing dep, miss) are
+    # silently dropped so the drawer never blocks on the vector store.
+    memories = await _fetch_memories_for_rows(provider, rows)
+    if memories:
+        payload["memories"] = _jsonify(memories)
+    return web.json_response(payload)
 
 
-async def _fetch_rows(
+async def _fetch_memories_for_rows(
+    provider: InterpretationDrawerProvider,
+    rows: Any,
+) -> list:
+    """Best-effort mem0 recall using the first row's instrument symbol.
+
+    Args:
+        provider: Drawer provider instance.
+        rows: Interpretation rows already fetched (may be empty).
+
+    Returns:
+        Memory list (possibly empty). Never raises.
+    """
+    fetch_fn = getattr(provider, "fetch_memories_for_symbol", None)
+    if not callable(fetch_fn) or not rows:
+        return []
+    try:
+        first = rows[0] if isinstance(rows, list) else None
+        if not isinstance(first, dict):
+            return []
+        symbol = first.get("instrument_symbol")
+        if not symbol:
+            return []
+        result = await fetch_fn(symbol, limit=5)
+        return list(result) if isinstance(result, list) else []
+    except Exception as exc:
+        logger.debug("handle_drawer memories fetch failed: %s", exc)
+        return []
+
+
+async def _fetch_drawer_payload(
     provider: InterpretationDrawerProvider,
     news_item_id: Optional[int],
     interp_id: Optional[int],
     limit: int,
-) -> Optional[list]:
-    """Dispatch to the right provider method, swallowing exceptions.
+) -> tuple:
+    """Fetch interpretation rows, media gallery, and news_item header.
+
+    For ``news_item_id`` queries, all three are fetched concurrently so
+    the drawer can render a gallery and an informative empty state
+    even when no interpretations exist yet (Slice 1 §3.3, §3.5).
+
+    For ``id`` queries, only the single interpretation row is fetched;
+    gallery / header are returned as ``None`` since the consumer
+    already has a specific interpretation in mind.
 
     Args:
         provider: Drawer provider instance.
@@ -199,21 +255,69 @@ async def _fetch_rows(
         limit: Validated row cap.
 
     Returns:
-        List of dict rows on success; ``None`` if the provider raised
-        (the handler turns that into a 500). Note the provider is
-        already designed to swallow its own errors and return ``[]``,
-        so ``None`` here is a true exceptional case (e.g. a bug in
-        the provider).
+        Tuple of ``(rows, media_gallery, news_item_header)`` where each
+        element is either a list/dict on success or ``None`` if the
+        underlying call failed. ``rows`` being ``None`` triggers a 500
+        in the caller; the gallery / header are best-effort and a
+        ``None`` simply means they are omitted from the response.
     """
+    if news_item_id is not None:
+        return await _fetch_by_news_item_payload(provider, news_item_id, limit)
     try:
-        if news_item_id is not None:
-            return await provider.fetch_by_news_item(
-                news_item_id, limit=limit
-            )
-        return await provider.fetch_by_id(interp_id)  # type: ignore[arg-type]
+        rows = await provider.fetch_by_id(interp_id)  # type: ignore[arg-type]
+        return rows, None, None
     except Exception as exc:
-        logger.exception("handle_drawer failed: %s", exc)
-        return None
+        logger.exception("handle_drawer fetch_by_id failed: %s", exc)
+        return None, None, None
+
+
+async def _fetch_by_news_item_payload(
+    provider: InterpretationDrawerProvider,
+    news_item_id: int,
+    limit: int,
+) -> tuple:
+    """Concurrently fetch rows, media gallery, and news_item header.
+
+    The rows fetch is the only required call: if it fails, the handler
+    surfaces a 500. Gallery and header are best-effort — a failure (or
+    a provider that lacks the optional methods, e.g. legacy test
+    mocks) yields ``None`` for that field while the rows still render.
+
+    Args:
+        provider: Drawer provider instance.
+        news_item_id: Validated news_items.id.
+        limit: Validated row cap.
+
+    Returns:
+        ``(rows, media_gallery, news_item_header)``.
+    """
+    tasks: list = [provider.fetch_by_news_item(news_item_id, limit=limit)]
+    gallery_fn = getattr(provider, "fetch_media_for_news_item", None)
+    header_fn = getattr(provider, "fetch_news_item_header", None)
+    tasks.append(gallery_fn(news_item_id) if callable(gallery_fn) else _none_coro())
+    tasks.append(header_fn(news_item_id) if callable(header_fn) else _none_coro())
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as exc:
+        logger.exception("handle_drawer gather failed: %s", exc)
+        return None, None, None
+
+    if isinstance(results[0], BaseException):
+        logger.exception(
+            "handle_drawer fetch_by_news_item failed: %s", results[0],
+        )
+        rows = None
+    else:
+        rows = results[0]
+    media = results[1] if not isinstance(results[1], BaseException) else None
+    header = results[2] if not isinstance(results[2], BaseException) else None
+    return rows, media, header
+
+
+async def _none_coro() -> None:
+    """Awaitable that resolves to ``None``; used as a placeholder when
+    a provider lacks an optional method."""
+    return None
 
 
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:

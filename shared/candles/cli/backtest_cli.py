@@ -85,7 +85,7 @@ def _get_queue(enabled: bool) -> Optional[QueueProtocol]:
         from backtest.queue import BacktestQueue  # type: ignore
     except ImportError:
         try:
-            from shared.backtest.queue import BacktestQueue  # type: ignore
+            from shared.backtest._queue import BacktestQueue  # type: ignore
         except ImportError:
             LOG.warning("backtest.queue unavailable, running without queue")
             return None

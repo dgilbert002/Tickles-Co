@@ -16,16 +16,19 @@ Authentication is bearer-token in the ``Authorization`` header, a
 ``?token=`` query-string fallback, or a ``__Host-session`` cookie for
 browser clients.
 
-The server is intentionally minimal: no background tasks, no
-websockets, no write endpoints. Everything is read-only or
-auth-flow. That keeps the attack surface small and lets the
+WebSocket bridge to price feed daemon only — the server itself runs
+no background tasks, no write endpoints beyond auth/logout. Everything
+else is read-only. That keeps the attack surface small and lets the
 dashboard be trivially restartable.
 """
 from __future__ import annotations
 
+import json
 import logging
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from aiohttp import web
 
@@ -43,7 +46,7 @@ from shared.dashboard.snapshot import (
     SnapshotProviders,
     snapshot_to_dict,
 )
-from shared.utils.db import DatabasePool
+from shared.utils.db import DatabasePool, get_company_pool, get_shared_pool
 
 LOG = logging.getLogger("tickles.dashboard.server")
 
@@ -63,6 +66,67 @@ ALLOWED_PUBLIC_PREFIX: tuple[str, ...] = ("/static/", "/dashboard/static/")
 
 def _err(status: int, message: str) -> web.Response:
     return web.json_response({"ok": False, "error": message}, status=status)
+
+
+def _json_default(obj: Any) -> Any:
+    """JSON encoder fallback for types asyncpg/Decimal/datetime return.
+
+    ``Decimal`` is rendered as a *string* (not float) so we never lose
+    precision on financial values; this matches
+    :func:`shared.dashboard.config_routes._jsonify`.
+
+    Args:
+        obj: Object that the default ``json.dumps`` cannot serialise.
+
+    Returns:
+        A JSON-compatible primitive (str / list / dict).
+
+    Raises:
+        TypeError: If the object cannot be coerced to a JSON-friendly value.
+    """
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    # asyncpg.Record exposes ``keys()`` + mapping access — coerce to dict.
+    if hasattr(obj, "keys") and callable(getattr(obj, "keys", None)):
+        try:
+            return {str(k): obj[k] for k in obj.keys()}
+        except Exception:
+            pass
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception as exc:
+            raise TypeError(f"unserialisable: {type(obj).__name__}") from exc
+    raise TypeError(
+        f"Object of type {type(obj).__name__} is not JSON serializable"
+    )
+
+
+def _json_response(payload: Any, status: int = 200) -> web.Response:
+    """Return a JSON response that handles Decimal, datetime, and asyncpg rows.
+
+    aiohttp's :func:`web.json_response` uses the stdlib default encoder which
+    raises on ``decimal.Decimal`` and ``datetime``. Dashboard aggregations
+    return both heavily, so every read endpoint must serialise via this
+    helper.
+
+    Args:
+        payload: Any JSON-compatible structure (dict, list, etc.).
+        status: HTTP status code (default 200).
+
+    Returns:
+        :class:`aiohttp.web.Response` with content-type ``application/json``.
+    """
+    try:
+        text = json.dumps(payload, default=_json_default)
+    except TypeError as exc:
+        LOG.exception("Failed to serialise dashboard payload: %s", exc)
+        return web.json_response(
+            {"ok": False, "error": "internal serialisation error"}, status=500
+        )
+    return web.Response(text=text, status=status, content_type="application/json")
 
 
 def _bearer(request: web.Request) -> Optional[str]:
@@ -199,35 +263,157 @@ async def handle_snapshot(request: web.Request) -> web.Response:
     company = request.query.get("company")
     builder: SnapshotBuilder = request.app["_snapshot_builder"]
     snap = await builder.build(company_filter=company)
-    return web.json_response(snapshot_to_dict(snap))
+    return _json_response(snapshot_to_dict(snap))
 
 
 async def handle_leaderboard(request: web.Request) -> web.Response:
     company = request.query.get("company")
     from shared.dashboard.snapshot import aggregate_leaderboard
     data = await aggregate_leaderboard(company)
-    return web.json_response({"leaderboard": data})
+    return _json_response({"leaderboard": data})
 
 
 async def handle_signals(request: web.Request) -> web.Response:
     company = request.query.get("company")
     from shared.dashboard.snapshot import aggregate_signals
     data = await aggregate_signals(company)
-    return web.json_response({"signals": data})
+    return _json_response({"signals": data})
 
 
 async def handle_positions(request: web.Request) -> web.Response:
     company = request.query.get("company")
     from shared.dashboard.snapshot import aggregate_open_positions
     data = await aggregate_open_positions(company)
-    return web.json_response({"positions": data})
+    return _json_response({"positions": data})
+
+
+async def handle_delete_position(request: web.Request) -> web.Response:
+    """Soft-delete a tracked_position by setting status='deleted'.
+
+    Only allows deleting positions with status='pending' or status='expired'.
+    Returns 400 if the position is open/closed or already deleted.
+
+    Args:
+        request: aiohttp request with {id} in the URL path.
+
+    Returns:
+        JSON response with ok=True and the updated position id.
+    """
+    try:
+        position_id = int(request.match_info["id"])
+    except (ValueError, TypeError):
+        return _err(400, "Invalid position ID")
+    from shared.utils.db import get_shared_pool
+
+    pool = await get_shared_pool()
+    try:
+        row = await pool.fetch_one(
+            "SELECT id, status FROM public.tracked_positions WHERE id = $1",
+            (position_id,),
+        )
+        if row is None:
+            return _err(404, f"Position {position_id} not found")
+
+        current_status = row["status"]
+        if current_status not in ("pending", "expired"):
+            return _err(
+                400,
+                f"Cannot delete position with status='{current_status}'. "
+                "Only pending or expired positions can be deleted.",
+            )
+
+        await pool.execute(
+            """
+            UPDATE public.tracked_positions
+            SET status = 'deleted',
+                status_reason = 'manual_delete',
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            (position_id,),
+        )
+        LOG.info("Position %s soft-deleted (was %s)", position_id, current_status)
+        return _json_response({"ok": True, "id": position_id, "status": "deleted"})
+    finally:
+        await pool.close()
 
 
 async def handle_interpretations(request: web.Request) -> web.Response:
     company = request.query.get("company")
     from shared.dashboard.snapshot import aggregate_interpretations
     data = await aggregate_interpretations(company)
-    return web.json_response({"interpretations": data})
+    return _json_response({"interpretations": data})
+
+
+async def handle_agent_decisions(request: web.Request) -> web.Response:
+    company = request.query.get("company")
+    limit = int(request.query.get("limit", "50"))
+    from shared.dashboard.snapshot import aggregate_agent_decisions
+    data = await aggregate_agent_decisions(company, limit=limit)
+    return _json_response({"agent_decisions": data})
+
+
+async def handle_agent_performance(request: web.Request) -> web.Response:
+    company = request.query.get("company")
+    from shared.dashboard.snapshot import aggregate_agent_performance
+    data = await aggregate_agent_performance(company)
+    return _json_response({"agent_performance": data})
+
+
+async def handle_agent_achievements(request: web.Request) -> web.Response:
+    company = request.query.get("company")
+    from shared.dashboard.snapshot import aggregate_agent_achievements
+    data = await aggregate_agent_achievements(company)
+    return _json_response({"achievements": data})
+
+
+async def handle_competitions(request: web.Request) -> web.Response:
+    company = request.query.get("company")
+    from shared.dashboard.snapshot import aggregate_competitions
+    data = await aggregate_competitions(company)
+    return _json_response({"competitions": data})
+
+
+async def handle_wallets(request: web.Request) -> web.Response:
+    """GET /api/wallets — list paper wallets with balances."""
+    company = request.query.get("company")
+    contest = request.query.get("contest_id", "copy-trade-scenarios")
+    from shared.services.banker import list_wallets
+    wallets = await list_wallets(company_id=company, contest_id=contest)
+    return _json_response({"wallets": wallets})
+
+
+async def handle_competition_trades(request: web.Request) -> web.Response:
+    """GET /api/competition-trades?contest_id=...&agent_id=..."""
+    contest_id = request.query.get("contest_id", "copy-trade-scenarios")
+    agent_id = request.query.get("agent_id")
+    limit = min(int(request.query.get("limit", "50")), 200)
+    pool = await get_shared_pool()
+    async with pool.acquire() as conn:
+        if agent_id:
+            rows = await conn.fetch(
+                "SELECT * FROM competition_trades WHERE contest_id=$1 AND agent_id=$2 "
+                "ORDER BY exited_at DESC LIMIT $3", contest_id, agent_id, limit)
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM competition_trades WHERE contest_id=$1 "
+                "ORDER BY exited_at DESC LIMIT $2", contest_id, limit)
+    trades = []
+    for r in rows:
+        trades.append({
+            "id": r["id"], "agent_id": r["agent_id"], "symbol": r["symbol"],
+            "direction": r["direction"],
+            "entry_price": float(r["entry_price"]) if r["entry_price"] else None,
+            "exit_price": float(r["exit_price"]) if r["exit_price"] else None,
+            "sl_price": float(r["sl_price"]) if r["sl_price"] else None,
+            "tp_price": float(r["tp_price"]) if r["tp_price"] else None,
+            "pnl": float(r["pnl"]) if r["pnl"] else 0,
+            "fees": float(r["fees"]) if r["fees"] else 0,
+            "exit_reason": r["exit_reason"],
+            "entered_at": r["entered_at"].isoformat() if r["entered_at"] else None,
+            "exited_at": r["exited_at"].isoformat() if r["exited_at"] else None,
+        })
+    return _json_response({"trades": trades, "contest_id": contest_id})
 
 
 async def handle_trader_drill(request: web.Request) -> web.Response:
@@ -239,7 +425,7 @@ async def handle_trader_drill(request: web.Request) -> web.Response:
 
     from shared.dashboard.snapshot import get_trader_drill_data
     data = await get_trader_drill_data(trader_id, company)
-    return web.json_response(data)
+    return _json_response(data)
 
 
 async def handle_chart(request: web.Request) -> web.Response:
@@ -311,40 +497,69 @@ async def handle_media(request: web.Request) -> web.Response:
 
 
 async def handle_services(request: web.Request) -> web.Response:
+    """``GET /api/services`` — registry view enriched with heartbeats.
+
+    The ``public.cron_heartbeats`` table uses columns ``last_run_at`` and
+    ``last_status`` (NOT ``last_heartbeat_at`` / ``status``); a stale
+    enrichment query referencing the wrong names was returning HTTP 500
+    for the whole endpoint. We catch any DB error here so a missing /
+    renamed heartbeat table never breaks the services view.
+    """
     providers: SnapshotProviders = request.app["_providers"]
     if providers.services is None:
-        return web.json_response({"services": [], "note": "not wired"})
-    
-    services = await providers.services.list_services()
-    
-    # Phase M.5 — Enrich with heartbeat data
-    pool = await DatabasePool.get_instance()
-    heartbeats = await pool.fetch_all("SELECT agent_id, last_heartbeat_at, status, expected_interval_seconds FROM public.cron_heartbeats")
-    hb_map = {hb["agent_id"]: hb for hb in heartbeats}
-    
+        return _json_response({"services": [], "note": "not wired"})
+
+    try:
+        services = await providers.services.list_services()
+    except Exception as exc:
+        LOG.exception("handle_services: provider.list_services failed: %s", exc)
+        return _json_response(
+            {"services": [], "error": "service registry unavailable"}, status=500
+        )
+
+    hb_map: dict[str, dict] = {}
+    try:
+        pool = await DatabasePool.get_instance()
+        heartbeats = await pool.fetch_all(
+            "SELECT agent_id, last_run_at, last_status, "
+            "expected_interval_seconds FROM public.cron_heartbeats"
+        )
+        hb_map = {hb["agent_id"]: hb for hb in heartbeats}
+    except Exception as exc:
+        # Table missing or DB unavailable — degrade gracefully, do not 500.
+        LOG.warning("handle_services: heartbeat enrichment skipped: %s", exc)
+
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
-    
-    enriched = []
+
+    enriched: list[dict] = []
     for s in services:
-        s_dict = s.to_dict()
-        hb = hb_map.get(s.name)
+        # ``RegistryServicesProvider.list_services`` already returns plain
+        # dicts; do not call ``.to_dict()`` (would AttributeError).
+        s_dict = dict(s) if not isinstance(s, dict) else s
+        hb = hb_map.get(s_dict.get("name"))
         if hb:
-            last_ts = hb["last_heartbeat_at"]
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
-            
-            seconds_since = (now - last_ts).total_seconds()
-            is_stale = seconds_since > (hb["expected_interval_seconds"] * 2.5)
-            
-            s_dict["heartbeat"] = {
-                "last_seen_seconds": int(seconds_since),
-                "status": hb["status"],
-                "is_stale": is_stale
-            }
+            last_ts = hb.get("last_run_at")
+            interval = hb.get("expected_interval_seconds") or 0
+            if last_ts is not None:
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                seconds_since = (now - last_ts).total_seconds()
+                is_stale = bool(interval) and seconds_since > (interval * 2.5)
+                s_dict["heartbeat"] = {
+                    "last_seen_seconds": int(seconds_since),
+                    "status": hb.get("last_status"),
+                    "is_stale": is_stale,
+                }
+            else:
+                s_dict["heartbeat"] = {
+                    "last_seen_seconds": None,
+                    "status": hb.get("last_status"),
+                    "is_stale": True,
+                }
         enriched.append(s_dict)
-        
-    return web.json_response({"services": enriched})
+
+    return _json_response({"services": enriched})
 
 
 def _client_ip(request: web.Request) -> Optional[str]:
@@ -355,6 +570,22 @@ def _client_ip(request: web.Request) -> Optional[str]:
     return peer[0] if peer else None
 
 
+async def _prewarm_pools(app: web.Application) -> None:
+    """Prewarm shared and per-company DB pools on startup so the first request is not slow."""
+    companies = ("rubicon", "jarvais", "testcorp", "tradelab")
+    try:
+        await get_shared_pool()
+        LOG.info("prewarm: shared pool ready")
+    except Exception:
+        LOG.exception("prewarm: shared pool failed")
+    for company in companies:
+        try:
+            await get_company_pool(company)
+            LOG.info("prewarm: %s pool ready", company)
+        except Exception:
+            LOG.warning("prewarm: %s pool failed (non-fatal)", company)
+
+
 def build_app(
     auth: DashboardAuth,
     providers: SnapshotProviders,
@@ -363,6 +594,7 @@ def build_app(
 ) -> web.Application:
     """Build the dashboard application, supporting both root and /dashboard/ prefix."""
     app = web.Application(middlewares=[auth_middleware])
+    app.on_startup.append(_prewarm_pools)
     app["_auth"] = auth
     app["_providers"] = providers
     app["_snapshot_builder"] = SnapshotBuilder(providers=providers)
@@ -378,17 +610,20 @@ def build_app(
                 raise web.HTTPFound(location=request.path + "/")
             app.router.add_get(prefix, redirect_to_slash)
             
-        app.router.add_get(prefix + "/login", handle_login)
         app.router.add_get(prefix + "/healthz", handle_health)
-        app.router.add_post(prefix + "/api/auth/request-otp", handle_request_otp)
-        app.router.add_post(prefix + "/api/auth/verify-otp", handle_verify_otp)
-        app.router.add_post(prefix + "/api/auth/logout", handle_logout)
         app.router.add_get(prefix + "/api/snapshot", handle_snapshot)
         app.router.add_get(prefix + "/api/services", handle_services)
         app.router.add_get(prefix + "/api/leaderboard", handle_leaderboard)
         app.router.add_get(prefix + "/api/signals", handle_signals)
         app.router.add_get(prefix + "/api/positions", handle_positions)
+        app.router.add_delete(prefix + "/api/positions/{id}", handle_delete_position)
         app.router.add_get(prefix + "/api/interpretations", handle_interpretations)
+        app.router.add_get(prefix + "/api/agent-decisions", handle_agent_decisions)
+        app.router.add_get(prefix + "/api/agent-performance", handle_agent_performance)
+        app.router.add_get(prefix + "/api/competitions", handle_competitions)
+        app.router.add_get(prefix + "/api/competition-trades", handle_competition_trades)
+        app.router.add_get(prefix + "/api/wallets", handle_wallets)
+        app.router.add_get(prefix + "/api/agent-achievements", handle_agent_achievements)
         app.router.add_get(prefix + "/api/trader-drill", handle_trader_drill)
         app.router.add_get(prefix + "/api/charts/{interp_id}", handle_chart)
         app.router.add_get(prefix + "/api/media/{media_id}", handle_media)
@@ -396,6 +631,10 @@ def build_app(
         # WebSocket
         from shared.dashboard.ws import handle_queue_ws
         app.router.add_get(prefix + "/ws/queue", handle_queue_ws)
+
+        # WebSocket price bridge to price feed daemon
+        from shared.dashboard.ws_bridge import handle_price_ws
+        app.router.add_get(prefix + "/api/ws/prices", handle_price_ws)
 
         # Static assets
         app.router.add_static(prefix + "/static/", Path(__file__).parent / "static")
@@ -423,6 +662,24 @@ def build_app(
             attach_routes as attach_config_routes,
         )
         attach_config_routes(app, prefix=prefix)
+
+        # Slice 1 — mount image proxy for external media (TradingView, Discord, etc.)
+        from shared.dashboard.media_proxy import (
+            attach_routes as attach_media_proxy_routes,
+        )
+        attach_media_proxy_routes(app, prefix=prefix)
+
+        # Slice 2 — mount live-price endpoint for the drawer's market panel.
+        from shared.dashboard.price_routes import (
+            attach_routes as attach_price_routes,
+        )
+        attach_price_routes(app, prefix=prefix)
+
+        # V4 enrichment — browser-facing candle/replay data from Postgres.
+        from shared.dashboard.market_routes import (
+            attach_routes as attach_market_routes,
+        )
+        attach_market_routes(app, prefix=prefix)
 
     # Phase 5 — mount /manage/* panel routes
     from shared.intelligence.manage_panel.server_routes import attach_routes

@@ -26,6 +26,48 @@ from typing import List
 sys.path.append("/opt/tickles")
 from shared.utils.freshness import validate_freshness, StaleDataError
 
+# D1 — push scan snapshot into mem0
+def _push_scan_to_mem0(company: str, data: list[dict], ts: str) -> None:
+    """Push a concise market scan summary into mem0 for surgeon recall.
+
+    Best-effort: failures are logged and swallowed. The JSON files on disk
+    are the source of truth; mem0 is the recall surface.
+    """
+    try:
+        from shared.utils.mem0_config import ScopedMemory
+    except Exception as exc:
+        LOG.debug("scanner→mem0: import failed: %s", exc)
+        return
+
+    if not data:
+        return
+
+    lines = []
+    for d in data:
+        sym = d["symbol"]
+        price = d["price"]
+        change = d["change24hPct"]
+        funding = d["fundingRate"]
+        rsi_val = d["indicators"]["rsi14"]
+        lines.append(
+            f"{sym} @ {price:.2f} (24h: {change:+.2f}%, "
+            f"funding: {funding:.6f}, RSI14: {rsi_val:.1f})"
+        )
+
+    text = f"Market scan {ts}: " + " | ".join(lines)
+    metadata = {
+        "type": "market_scan",
+        "timestamp": ts,
+        "assets": [d["symbol"] for d in data],
+    }
+
+    try:
+        memory = ScopedMemory()
+        memory.add(text, user_id=company, agent_id=f"{company}_scanner", metadata=metadata)
+        LOG.info("scanner→mem0: pushed scan for %d assets", len(data))
+    except Exception as exc:
+        LOG.warning("scanner→mem0: add failed: %s", exc)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOG = logging.getLogger("surgeon.scanner")
 
@@ -163,8 +205,9 @@ def write_outputs(out_dir: str, data: List[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", default="/root/.openclaw/workspace/rubicon_surgeon")
+    parser.add_argument("--output", default="/var/lib/tickles/surgeon_workspace")
     parser.add_argument("--interval", type=int, default=900, help="seconds between scans (default 15 min)")
+    parser.add_argument("--company", default=os.environ.get("COMPANY_ID", "rubicon"), help="company slug for mem0 namespace")
     args = parser.parse_args()
 
     stop = {"flag": False}
@@ -187,6 +230,11 @@ def main() -> None:
                 LOG.info("wrote MARKET_STATE + MARKET_INDICATORS for %d assets", len(data))
             except Exception as exc:
                 LOG.warning("write failed: %s", exc)
+            # D1 — push scan summary into mem0
+            try:
+                _push_scan_to_mem0(args.company, data, datetime.now(timezone.utc).isoformat())
+            except Exception as exc:
+                LOG.debug("scanner→mem0: push skipped or failed: %s", exc)
         for _ in range(args.interval):
             if stop["flag"]:
                 break

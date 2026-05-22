@@ -4,6 +4,10 @@ M1 (2026-04-21): Wired md.quote and md.candles to Postgres candles table.
 Added candles.coverage, candles.backfill, and candles.backfill_status tools.
 Read-only tools use db_helper (psycopg2); backfill uses async DatabasePool.
 
+2026-05-22: Added ``instruments.refresh`` so an operator (or a chat command)
+can re-sync the catalog from the configured exchanges and re-project
+into ``public.instruments`` on demand.
+
 Tools registered:
     catalog.list
     catalog.get
@@ -13,6 +17,10 @@ Tools registered:
     candles.backfill
     candles.backfill_status
     altdata.search
+    instruments.refresh
+    positions.cleanup_retros
+    positions.close_wicked
+    positions.recheck
 """
 
 from __future__ import annotations
@@ -666,6 +674,205 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
             return {"status": "error", "message": f"Backfill job not found: {job_id}"}
         return {"status": "ok", "job": job}
 
+    # -- instruments.refresh ------------------------------------------------
+    # 2026-05-22 — Operator/agent tool that syncs market metadata from every
+    # configured exchange and re-projects it into public.instruments so the
+    # dashboard snapshot can resolve newly-listed symbols. Idempotent.
+    t_instruments_refresh = McpTool(
+        name="instruments.refresh",
+        description=(
+            "Refresh the instrument catalog. Runs the unified_instruments "
+            "sync (Bybit, BloFin, Bitget, Capital.com) and then projects the "
+            "result into public.instruments so the dashboard / candle daemon "
+            "see new symbols. Idempotent — safe to call repeatedly. Use "
+            "skipSync=true to project only (no exchange calls)."
+        ),
+        version="1",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "skipSync": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "If true, skip the network sync and only re-project "
+                        "the existing unified_instruments rows into instruments."
+                    ),
+                },
+                "dryRun": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, compute the plan but write nothing.",
+                },
+            },
+        },
+        read_only=False,
+        tags={"phase": "5", "group": "data", "status": "live"},
+    )
+
+    async def _instruments_refresh(p: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the catalog refresh + projection.
+
+        Step 1 (optional): ``shared.market_data.instrument_sync.sync_instruments``
+                           — populates public.unified_instruments via CCXT.
+        Step 2:           ``shared.jobs.project_unified_to_instruments.project_unified_to_instruments``
+                           — projects into public.instruments using the
+                           preference chain and 90-day feed activation.
+        """
+        skip_sync = bool(p.get("skipSync", False))
+        dry_run = bool(p.get("dryRun", False))
+        result: Dict[str, Any] = {"status": "ok"}
+
+        try:
+            if not skip_sync:
+                from shared.market_data.instrument_sync import sync_instruments
+                # sync_instruments writes to unified_instruments; it is
+                # safe to run alongside other writers (uses UPSERT).
+                sync_counts = await sync_instruments()
+                result["unified_sync"] = sync_counts
+            else:
+                result["unified_sync"] = "skipped"
+
+            from shared.jobs.project_unified_to_instruments import (
+                project_unified_to_instruments,
+            )
+            proj_counts = await project_unified_to_instruments(dry_run=dry_run)
+            result["projection"] = proj_counts
+            result["dry_run"] = dry_run
+        except Exception as exc:
+            logger.exception("instruments.refresh failed")
+            return {"status": "error", "message": str(exc)}
+
+        return result
+
+    # -- positions.cleanup_retros -------------------------------------------
+    # 2026-05-22 — Detects and expires tracked_positions that were
+    # retro-activated by the old position_monitor bug (single-close
+    # comparison instead of candle [low,high] range check). Idempotent.
+    t_positions_cleanup_retros = McpTool(
+        name="positions.cleanup_retros",
+        description=(
+            "Sweep stale rows out of the live trading set. Two passes: "
+            "(1) expire tracked_positions currently status='open' whose "
+            "entry was never actually touched by a 1m candle between "
+            "created_at and updated_at (and delete any still-open "
+            "competition_trades pointing at them); (2) delete still-open "
+            "competition_trades whose tracked_position_id is NULL (orphan "
+            "shadow trades from an earlier copy_trade_monitor version). "
+            "Both passes are idempotent. Use dryRun=true for a no-write "
+            "preview, includeOrphans=false to skip pass (2)."
+        ),
+        version="2",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "lookbackHours": {
+                    "type": "integer", "minimum": 1, "maximum": 720, "default": 48,
+                    "description": "Only inspect positions created in the last N hours.",
+                },
+                "dryRun": {
+                    "type": "boolean", "default": False,
+                    "description": "If true, report what would be cleaned without writing.",
+                },
+                "includeOrphans": {
+                    "type": "boolean", "default": True,
+                    "description": (
+                        "If true (default), also delete any still-open "
+                        "competition_trades whose tracked_position_id is "
+                        "NULL. Set false to run only the retro-activation "
+                        "sweep."
+                    ),
+                },
+            },
+        },
+        read_only=False,
+        tags={"phase": "5", "group": "data", "status": "live"},
+    )
+
+    async def _positions_cleanup_retros(p: Dict[str, Any]) -> Dict[str, Any]:
+        from shared.intelligence.position_housekeeping import cleanup_retro_activations
+        try:
+            return {
+                "status": "ok",
+                **await cleanup_retro_activations(
+                    lookback_hours=int(p.get("lookbackHours", 48)),
+                    dry_run=bool(p.get("dryRun", False)),
+                    include_orphan_competition_trades=bool(p.get("includeOrphans", True)),
+                ),
+            }
+        except Exception as exc:
+            logger.exception("positions.cleanup_retros failed")
+            return {"status": "error", "message": str(exc)}
+
+    # -- positions.close_wicked ---------------------------------------------
+    # 2026-05-22 — Catches positions whose SL or TP was already wicked
+    # through by a 1m candle. The live position_monitor catches new wicks
+    # in real time after the 2026-05-22 fix; this tool exists for backfill
+    # of historical leftovers AND as an on-demand safety-net for agents.
+    t_positions_close_wicked = McpTool(
+        name="positions.close_wicked",
+        description=(
+            "Close any currently-open tracked_positions whose SL or TP "
+            "was wicked through by a 1m candle since activation. Uses the "
+            "same predicate the live monitor uses; closes route through "
+            "the same _settle_close path so backfilled closes are "
+            "indistinguishable from live closes. SL is preferred over TP "
+            "on same-candle ambiguity (conservative trader convention). "
+            "Idempotent — safe to call repeatedly. Use dryRun=true for a "
+            "no-write preview."
+        ),
+        version="1",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "dryRun": {
+                    "type": "boolean", "default": False,
+                    "description": "If true, report what would be closed without writing.",
+                },
+            },
+        },
+        read_only=False,
+        tags={"phase": "5", "group": "data", "status": "live"},
+    )
+
+    async def _positions_close_wicked(p: Dict[str, Any]) -> Dict[str, Any]:
+        from shared.intelligence.position_housekeeping import close_wicked_positions
+        try:
+            return {
+                "status": "ok",
+                **await close_wicked_positions(dry_run=bool(p.get("dryRun", False))),
+            }
+        except Exception as exc:
+            logger.exception("positions.close_wicked failed")
+            return {"status": "error", "message": str(exc)}
+
+    # -- positions.recheck --------------------------------------------------
+    # 2026-05-22 — Trigger one immediate pending-activation cycle so an
+    # agent doesn't need to wait for the 60s daemon poll. Honours the same
+    # recency bound the daemon uses; safe to call repeatedly.
+    t_positions_recheck = McpTool(
+        name="positions.recheck",
+        description=(
+            "Run one pending-activation cycle now (out-of-band). Honours "
+            "the same recency bound the position_monitor daemon enforces, "
+            "so repeated calls cannot retro-activate stale touches. "
+            "Returns the per-cycle counts (activated / expired / no_price / "
+            "error). Safe and idempotent."
+        ),
+        version="1",
+        input_schema={"type": "object", "properties": {}},
+        read_only=False,
+        tags={"phase": "5", "group": "data", "status": "live"},
+    )
+
+    async def _positions_recheck(_p: Dict[str, Any]) -> Dict[str, Any]:
+        from shared.intelligence.position_housekeeping import recheck_pending_activations
+        try:
+            return await recheck_pending_activations()
+        except Exception as exc:
+            logger.exception("positions.recheck failed")
+            return {"status": "error", "message": str(exc)}
+
     # -- altdata.search (stub) ----------------------------------------------
     t_alt_search = McpTool(
         name="altdata.search",
@@ -703,6 +910,10 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
         (t_candles_coverage, _candles_coverage),
         (t_candles_backfill, _candles_backfill),
         (t_candles_backfill_status, _candles_backfill_status),
+        (t_instruments_refresh, _instruments_refresh),
+        (t_positions_cleanup_retros, _positions_cleanup_retros),
+        (t_positions_close_wicked, _positions_close_wicked),
+        (t_positions_recheck, _positions_recheck),
         (t_alt_search, _alt_search),
     ]
 

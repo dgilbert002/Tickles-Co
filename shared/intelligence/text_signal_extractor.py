@@ -33,11 +33,22 @@ logger = logging.getLogger("tickles.intelligence.text_signal_extractor")
 # ---------------------------------------------------------------------------
 
 # Symbol detection: BTCUSDT, BTC/USDT, BTC-USDT, XAUUSD, EURUSD, etc.
+# Hardened to require uppercase for standalone short tickers, or standard suffixes/formats
 _SYMBOL_RE = re.compile(
-    r"\b([A-Z]{3,8}(?:USDT|USD|BTC|ETH|PERP)?|[A-Z]{3}/[A-Z]{3}|"
-    r"[A-Z]{3}-[A-Z]{3}|XAUUSD|XAGUSD|US30|US100|NAS100|GER40|UK100)\b",
-    re.IGNORECASE,
+    r"\b("
+    r"[A-Z]{3,8}"  # Standalone uppercase tickers (e.g. BTC, SOL, ONDO)
+    r"|[a-zA-Z]{3,8}(?:USDT|usdt|USD|usd|PERP|perp|BTC|btc|ETH|eth)"  # Suffixes
+    r"|[a-zA-Z]{3,8}/[a-zA-Z]{3,8}"  # Slash pairs (e.g. BTC/USDT)
+    r"|[a-zA-Z]{3,8}-[a-zA-Z]{3,8}"  # Hyphen pairs (e.g. BTC-USDT)
+    r"|XAUUSD|xauusd|XAGUSD|xagusd|US30|us30|US100|us100|NAS100|nas100|GER40|ger40|UK100|uk100"  # Specific indices
+    r")\b"
 )
+
+_BLACKLIST_WORDS = {
+    "LONG", "SHORT", "BUY", "SELL", "ENTRY", "EXIT", "STOP", "LOSS", "TAKE", "PROFIT",
+    "REPLY", "IMAGE", "GIF", "VIDEO", "CHART", "INFO", "SETUP", "HIGH", "LOW", "ZONE",
+    "TRADE", "CALL", "WEEK", "POOL", "KIDS", "MILF", "LMAO", "HAHA", "MEME", "JOKE"
+}
 
 # Entry price: "entry 65000", "@ 65000", "buy at 65000", "long 65000"
 _ENTRY_RE = re.compile(
@@ -160,6 +171,10 @@ def _extract_with_regex(text: str) -> Optional[Dict[str, Any]]:
     # Extract symbol
     symbol_match = _SYMBOL_RE.search(text)
     symbol = symbol_match.group(1).upper() if symbol_match else None
+
+    # Blacklist check
+    if symbol and symbol in _BLACKLIST_WORDS:
+        symbol = None
 
     # Extract direction
     direction_match = _DIRECTION_RE.search(text)
@@ -327,6 +342,10 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
         if not symbol or not direction or not entry:
             return None
 
+        symbol = symbol.upper()
+        if symbol in _BLACKLIST_WORDS:
+            return None
+
         # Normalize direction
         direction = direction.lower()
         if direction not in ("long", "short"):
@@ -366,6 +385,24 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
 # Public API
 # ---------------------------------------------------------------------------
 
+def strip_reply_prefix(text: str) -> str:
+    """Strips the Discord reply formatting quote from the text.
+
+    Format:
+        [Reply to @username]: quoted_text...
+        actual_message_text...
+    """
+    if not text:
+        return ""
+    if text.startswith("[Reply to @"):
+        parts = text.split("\n", 1)
+        if len(parts) > 1:
+            return parts[1]
+        else:
+            return ""  # Quoted text but no actual message
+    return text
+
+
 async def extract_signal_from_text(
     text: str,
     author: str = "",
@@ -386,18 +423,19 @@ async def extract_signal_from_text(
         Signal dict with keys: symbol, direction, entry, stop_loss, take_profits,
         leverage, source, confidence, raw_text. None if no signal detected.
     """
-    if not text or len(text.strip()) < 5:
+    clean_text = strip_reply_prefix(text)
+    if not clean_text or len(clean_text.strip()) < 5:
         return None
 
     # Stage 1: Regex
-    signal = _extract_with_regex(text)
+    signal = _extract_with_regex(clean_text)
     if signal:
         return signal
 
     # Stage 2: LLM fallback
     if use_llm_fallback:
         try:
-            signal = await _extract_with_llm(text, author)
+            signal = await _extract_with_llm(clean_text, author)
             if signal:
                 return signal
         except Exception as e:
@@ -415,10 +453,11 @@ def classify_message_type(text: str) -> str:
     Returns:
         One of: 'trade_setup', 'commentary', 'meme', 'unknown'.
     """
-    if not text:
+    clean_text = strip_reply_prefix(text)
+    if not clean_text:
         return "unknown"
 
-    text_lower = text.lower()
+    text_lower = clean_text.lower()
 
     # Meme detection
     meme_indicators = ["lol", "lmao", "haha", "meme", "joke", "funny", "😂", "🤣", "💀", "🚀", "lambo", "moon", "diamond hands"]

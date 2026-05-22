@@ -468,8 +468,8 @@ CREATE TABLE IF NOT EXISTS public.tracked_positions (
     signal_timestamp    TIMESTAMPTZ(3)  NOT NULL,
 
     -- Status lifecycle
-    status              VARCHAR(16)     NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open','partial_exit','closed','expired','invalidated','cancelled')),
+    status              VARCHAR(16)     NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','open','partial_exit','closed','expired','invalidated','cancelled','deleted')),
     status_reason       VARCHAR(100),
 
     -- Current market state

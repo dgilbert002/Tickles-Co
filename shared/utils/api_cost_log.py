@@ -48,6 +48,61 @@ _DEFAULT_PRICING: Dict[str, tuple[float, float]] = {
     "openai/gpt-4o-mini": (0.15, 0.60),
 }
 
+# ---------------------------------------------------------------------------
+# Budget circuit-breaker — pre-call gate (Phase BP)
+# ---------------------------------------------------------------------------
+_DEFAULT_BUDGETS: Dict[str, float] = {
+    "vision": float(os.environ.get("LLM_BUDGET_VISION", "20.0")),
+    "text": float(os.environ.get("LLM_BUDGET_TEXT", "10.0")),
+    "embedding": float(os.environ.get("LLM_BUDGET_EMBEDDING", "2.0")),
+    "default": float(os.environ.get("LLM_BUDGET_DEFAULT", "50.0")),
+}
+_GLOBAL_DAILY_BUDGET = float(os.environ.get("LLM_BUDGET_GLOBAL_DAILY", "100.0"))
+
+
+class BudgetExceededError(Exception):
+    """Raised when a role or global budget is exceeded for the day."""
+    pass
+
+
+async def check_budget(
+    role: str = "default",
+    company_id: str = "",
+    estimated_cost_usd: float = 0.0,
+) -> None:
+    """Pre-call budget gate — raises BudgetExceededError if over limit.
+
+    Checks role-specific and global daily budgets. Fails open on DB errors
+    (never blocks a call due to a budget-check infrastructure failure).
+    """
+    budget_role = "default"
+    for key in ("vision", "text", "embedding"):
+        if key in role.lower():
+            budget_role = key
+            break
+    role_limit = _DEFAULT_BUDGETS.get(budget_role, _DEFAULT_BUDGETS["default"])
+
+    try:
+        pool = await get_shared_pool()
+        async with pool.acquire() as conn:
+            role_spent = float(await conn.fetchval(
+                "SELECT COALESCE(SUM(cost_usd),0) FROM api_cost_log "
+                "WHERE created_at>=CURRENT_DATE AND role LIKE $1",
+                f"%{budget_role}%") or 0)
+            global_spent = float(await conn.fetchval(
+                "SELECT COALESCE(SUM(cost_usd),0) FROM api_cost_log "
+                "WHERE created_at>=CURRENT_DATE") or 0)
+    except Exception as exc:
+        logger.warning("check_budget query failed: %s — allowing call", exc)
+        return
+
+    if role_spent + estimated_cost_usd > role_limit:
+        raise BudgetExceededError(
+            f"{budget_role} budget: ${role_spent:.2f}+${estimated_cost_usd:.4f} > ${role_limit:.2f}")
+    if global_spent + estimated_cost_usd > _GLOBAL_DAILY_BUDGET:
+        raise BudgetExceededError(
+            f"Global budget: ${global_spent:.2f}+${estimated_cost_usd:.4f} > ${_GLOBAL_DAILY_BUDGET:.2f}")
+
 # SQL — additive columns from Phase 1 migration must exist before this runs.
 _INSERT_SQL = """
 INSERT INTO api_cost_log (

@@ -74,6 +74,13 @@ POLL_INTERVAL_S = float(os.environ.get("POSITION_MONITOR_POLL_S", "60"))
 BATCH_SIZE = int(os.environ.get("POSITION_MONITOR_BATCH", "50"))
 AGENT_OPINION_EVERY_N = int(os.environ.get("POSITION_MONITOR_OPINION_EVERY", "10"))
 DEFAULT_TIMEFRAME = os.environ.get("POSITION_MONITOR_TF", "1m")
+# 2026-05-22 — Activation recency bound. The candle that triggers a pending
+# -> open transition must be NEWER than ``now - activation_lookback_s``. This
+# stops the monitor from "catching up" on touches that happened during
+# previous downtime (the agent wasn't watching → it doesn't get the fill).
+# Default 30 minutes — generous enough to survive a single restart, tight
+# enough that day-old touches don't activate retroactively.
+ACTIVATION_LOOKBACK_S = float(os.environ.get("POSITION_MONITOR_ACTIVATION_LOOKBACK_S", "1800"))
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +94,7 @@ class MonitorConfig:
     batch_size: int = BATCH_SIZE
     agent_opinion_every_n: int = AGENT_OPINION_EVERY_N
     default_timeframe: str = DEFAULT_TIMEFRAME
+    activation_lookback_s: float = ACTIVATION_LOOKBACK_S
 
 
 @dataclass
@@ -143,7 +151,8 @@ async def fetch_open_positions(
                stop_loss, take_profit_1,
                status, created_at, updated_at,
                lowest_price, highest_price,
-               expiry_at, signal_timestamp
+               expiry_at, signal_timestamp,
+               notional_usd
         FROM public.tracked_positions
         WHERE status IN ('open', 'partial_exit')
         ORDER BY created_at DESC
@@ -153,7 +162,23 @@ async def fetch_open_positions(
     )
 
 
+_INSTRUMENT_ID_CACHE = {}
+
 async def _resolve_instrument_id(
+    pool: DatabasePool,
+    raw_symbol: str,
+    raw_exchange: Optional[str],
+) -> Optional[int]:
+    cache_key = (raw_symbol, raw_exchange)
+    if cache_key in _INSTRUMENT_ID_CACHE:
+        return _INSTRUMENT_ID_CACHE[cache_key]
+    res = await _resolve_instrument_id_impl(pool, raw_symbol, raw_exchange)
+    if res is not None:
+        _INSTRUMENT_ID_CACHE[cache_key] = res
+    return res
+
+
+async def _resolve_instrument_id_impl(
     pool: DatabasePool,
     raw_symbol: str,
     raw_exchange: Optional[str],
@@ -329,6 +354,310 @@ async def fetch_latest_price(
     return None
 
 
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _find_sl_tp_wick_candle(
+    pool: DatabasePool,
+    *,
+    symbol: str,
+    exchange: Optional[str],
+    timeframe: str,
+    direction: str,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+    since: datetime,
+    max_candles: int = 10000,
+    adapters: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[datetime, float, str, float]]:
+    """Find the FIRST 1m candle since ``since`` whose ``[low, high]`` range
+    wicked through SL or TP.
+
+    Mirrors the per-candle scan ``copy_trade_monitor`` uses for the bot
+    SL/TP checks. SL is evaluated BEFORE TP within the same candle
+    (conservative trader convention — if a 1m candle prints both SL and
+    TP, we assume the SL fired first, since OHLC order is ambiguous
+    intra-candle).
+
+    Args:
+        pool: Shared Postgres pool.
+        symbol: Position's instrument_symbol.
+        exchange: Position's instrument_exchange (may be None).
+        timeframe: Candle timeframe (typically ``'1m'``).
+        direction: ``'long'`` or ``'short'``.
+        stop_loss: SL price (may be None — that path is skipped).
+        take_profit: TP price (may be None — that path is skipped).
+        since: Only candles strictly newer than this are considered.
+        max_candles: Hard cap on rows fetched (default 10000 = ~7 days
+            of 1m). Backfill jobs may pass a higher value.
+        adapters: Optional dictionary to cache and reuse CCXTAdapter connections.
+
+    Returns:
+        ``(timestamp, close, hit_type, hit_price)`` where ``hit_type``
+        is ``'sl'`` or ``'tp'`` and ``hit_price`` is the SL/TP level
+        that was wicked (this becomes the fill price for ``_settle_close``,
+        which is what the trader's broker would have given them — NOT
+        the candle close, which can lie about intra-candle highs/lows).
+        Returns ``None`` if no candle since ``since`` wicked either level.
+    """
+    if direction not in ("long", "short"):
+        return None
+    if stop_loss is None and take_profit is None:
+        return None
+    instrument_id = await _resolve_instrument_id(pool, symbol, exchange)
+    if instrument_id is None:
+        return None
+    since_utc = ensure_utc(since)
+    try:
+        rows = await pool.fetch_all(
+            """
+            SELECT "timestamp", high, low, close
+            FROM public.candles
+            WHERE instrument_id = $1
+              AND timeframe = $2
+              AND "timestamp" >= $3
+            ORDER BY "timestamp" ASC
+            LIMIT $4
+            """,
+            (instrument_id, timeframe, since_utc, max_candles),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.exception(
+            "_find_sl_tp_wick_candle query failed instrument_id=%s tf=%s: %s",
+            instrument_id, timeframe, exc,
+        )
+        rows = []
+
+    if not rows:
+        # Fallback: Query historical candle data (OHLCV) on-the-fly from the exchange via CCXT
+        try:
+            from shared.connectors.ccxt_adapter import CCXTAdapter
+            from shared.market_data.live_price import _candidate_symbols
+            exchange_id = exchange or "bybit"
+            logger.info(
+                "_find_sl_tp_wick_candle: Local candles missing for %s since %s. "
+                "Falling back to CCXT OHLCV fetch via %s adapter.",
+                symbol, since_utc, exchange_id
+            )
+            
+            is_cached = False
+            if adapters is not None and exchange_id in adapters:
+                adapter = adapters[exchange_id]
+                is_cached = True
+            else:
+                adapter = CCXTAdapter(exchange_id)
+                if adapters is not None:
+                    adapters[exchange_id] = adapter
+                    is_cached = True
+                    
+            try:
+                candidates = _candidate_symbols(symbol)
+                ccxt_candles = []
+                last_err = None
+                for cand_sym in candidates:
+                    try:
+                        ccxt_candles = await adapter.fetch_ohlcv(
+                            symbol=cand_sym,
+                            timeframe=timeframe,
+                            since=since_utc,
+                            limit=1000
+                        )
+                        if ccxt_candles:
+                            logger.debug("Successfully fetched candles for %s using symbol form %s", symbol, cand_sym)
+                            break
+                    except Exception as sym_exc:
+                        last_err = sym_exc
+                        continue
+                if not ccxt_candles and last_err is not None:
+                    raise last_err
+
+                if ccxt_candles:
+                    logger.debug("Successfully fetched %d candles from CCXT for %s", len(ccxt_candles), symbol)
+                    rows = []
+                    for c in ccxt_candles:
+                        rows.append({
+                            "timestamp": c.timestamp,
+                            "high": float(c.high),
+                            "low": float(c.low),
+                            "close": float(c.close)
+                        })
+            finally:
+                if not is_cached:
+                    await adapter.close()
+        except Exception as fallback_exc:
+            logger.warning(
+                "_find_sl_tp_wick_candle CCXT fallback failed for %s: %s",
+                symbol, fallback_exc
+            )
+
+    for r in rows:
+        hi = float(r["high"])
+        lo = float(r["low"])
+        close_v = float(r["close"])
+        if direction == "long":
+            # Long: SL is BELOW entry → wick down through SL = stop hit.
+            # TP is ABOVE entry → wick up through TP = profit hit.
+            if stop_loss is not None and lo <= stop_loss:
+                return r["timestamp"], close_v, "sl", float(stop_loss)
+            if take_profit is not None and hi >= take_profit:
+                return r["timestamp"], close_v, "tp", float(take_profit)
+        else:
+            # Short: SL is ABOVE entry → wick up through SL = stop hit.
+            # TP is BELOW entry → wick down through TP = profit hit.
+            if stop_loss is not None and hi >= stop_loss:
+                return r["timestamp"], close_v, "sl", float(stop_loss)
+            if take_profit is not None and lo <= take_profit:
+                return r["timestamp"], close_v, "tp", float(take_profit)
+    return None
+
+
+async def _find_entry_touch_candle(
+    pool: DatabasePool,
+    *,
+    symbol: str,
+    exchange: Optional[str],
+    timeframe: str,
+    entry: float,
+    since: datetime,
+    not_before: Optional[datetime] = None,
+    adapters: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[datetime, float]]:
+    """Find the FIRST 1m candle (strictly newer than ``since`` AND newer
+    than ``not_before`` if supplied) whose ``[low, high]`` range contains
+    the entry price.
+
+    Used by :meth:`PositionMonitor._activate_pending_positions` to detect
+    a genuine entry touch. Same predicate ``copy_trade_monitor`` uses for
+    SL/TP — works for ANY direction (long/short) and ANY entry style
+    (limit-below, breakout-above, limit-above, breakdown-below).
+
+    Args:
+        pool: Shared Postgres pool.
+        symbol: Position's instrument_symbol (slash form, e.g. ``BTC/USDT``).
+        exchange: Position's instrument_exchange (may be None).
+        timeframe: Candle timeframe to scan (typically ``'1m'``).
+        entry: Trader's anticipated entry price.
+        since: Position's ``created_at`` — only candles AFTER this count.
+            Prevents retro-fitting from historical candles created before
+            the trader posted the chart.
+        not_before: Recency cutoff (e.g. ``now - activation_lookback_s``).
+            If supplied, only candles whose ``timestamp >= not_before``
+            are eligible. Use this to enforce a "live watcher" semantic
+            so the bot does NOT retroactively claim entry on a candle
+            that happened while it was offline.
+        adapters: Optional dictionary to cache and reuse CCXTAdapter connections.
+
+    Returns:
+        ``(candle_timestamp, candle_close)`` of the first eligible
+        touching candle, or ``None`` if no such candle exists yet
+        (position should stay pending). The trader's anticipated ``entry``
+        on the row is left untouched so downstream P&L math still
+        references it; the candle close becomes the position's
+        ``current_price`` at activation time.
+    """
+    instrument_id = await _resolve_instrument_id(pool, symbol, exchange)
+    if instrument_id is None:
+        return None
+    since_utc = ensure_utc(since)
+    not_before_utc = ensure_utc(not_before)
+    # The effective floor for the timestamp search is the LATER of
+    # ``since`` (anti-historical-retrofit) and ``not_before`` (recency).
+    floor_ts = since_utc
+    if not_before_utc is not None and not_before_utc > since_utc:
+        floor_ts = not_before_utc
+    try:
+        row = await pool.fetch_one(
+            """
+            SELECT "timestamp", high, low, close
+            FROM public.candles
+            WHERE instrument_id = $1
+              AND timeframe = $2
+              AND "timestamp" > $3
+              AND low <= $4
+              AND high >= $4
+            ORDER BY "timestamp" ASC
+            LIMIT 1
+            """,
+            (instrument_id, timeframe, floor_ts, entry),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.exception(
+            "_find_entry_touch_candle query failed instrument_id=%s tf=%s: %s",
+            instrument_id, timeframe, exc,
+        )
+        row = None
+
+    if row is None:
+        try:
+            from shared.connectors.ccxt_adapter import CCXTAdapter
+            from shared.market_data.live_price import _candidate_symbols
+            exchange_id = exchange or "bybit"
+            logger.info(
+                "_find_entry_touch_candle: Local touch not found for %s. "
+                "Checking CCXT OHLCV fallback via %s.",
+                symbol, exchange_id
+            )
+            
+            is_cached = False
+            if adapters is not None and exchange_id in adapters:
+                adapter = adapters[exchange_id]
+                is_cached = True
+            else:
+                adapter = CCXTAdapter(exchange_id)
+                if adapters is not None:
+                    adapters[exchange_id] = adapter
+                    is_cached = True
+            
+            try:
+                candidates = _candidate_symbols(symbol)
+                ccxt_candles = []
+                last_err = None
+                for cand_sym in candidates:
+                    try:
+                        ccxt_candles = await adapter.fetch_ohlcv(
+                            symbol=cand_sym,
+                            timeframe=timeframe,
+                            since=floor_ts,
+                            limit=1000
+                        )
+                        if ccxt_candles:
+                            logger.debug("Successfully fetched candles for %s using symbol form %s", symbol, cand_sym)
+                            break
+                    except Exception as sym_exc:
+                        last_err = sym_exc
+                        continue
+                if not ccxt_candles and last_err is not None:
+                    raise last_err
+
+                if ccxt_candles:
+                    logger.debug("Fetched %d candles from CCXT for %s entry check", len(ccxt_candles), symbol)
+                    for c in ccxt_candles:
+                        hi = float(c.high)
+                        lo = float(c.low)
+                        if lo <= entry <= hi:
+                            logger.info(
+                                "Entry touch found via CCXT OHLCV fallback for %s at %s (entry=%.6f, low=%.6f, high=%.6f)",
+                                symbol, c.timestamp, entry, lo, hi
+                            )
+                            return c.timestamp, float(c.close)
+            finally:
+                if not is_cached:
+                    await adapter.close()
+        except Exception as fallback_exc:
+            logger.warning(
+                "_find_entry_touch_candle CCXT fallback failed for %s: %s",
+                symbol, fallback_exc
+            )
+        return None
+
+    return row["timestamp"], float(row["close"])
+
+
 async def fetch_latest_price_by_epic(
     pool: DatabasePool,
     epic: str,
@@ -364,6 +693,55 @@ async def fetch_latest_price_by_epic(
     return None
 
 
+async def fetch_live_price_from_feed(symbol: str) -> Optional[float]:
+    """Fetch the latest price for *symbol* from the price feed daemon.
+
+    Connects to the daemon's internal WebSocket, requests the latest
+    cached price, and disconnects. Falls back to None if the daemon
+    is unreachable or the symbol is not subscribed.
+
+    Args:
+        symbol: Canonical symbol (e.g. ``"BTC/USDT"``).
+
+    Returns:
+        Latest price as float, or None.
+    """
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect("ws://127.0.0.1:18790") as ws:
+                await ws.send_json({"subscribe": [symbol]})
+                try:
+                    msg = await asyncio.wait_for(ws.receive_json(), timeout=3.0)
+                    price = msg.get("price")
+                    if price is not None:
+                        return float(price)
+                except asyncio.TimeoutError:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def _clamp_pct(value: Optional[float], max_abs: float = 1_000_000.0) -> float:
+    """Clamp a percentage value to a sane range.
+
+    Shitcoins with tiny entry prices (e.g. PEPE at 0.00000038, or AVAX
+    with a chart-reading error at 0.00000394 instead of $9.40) can produce
+    absurd distance/pnl percentages that overflow the numeric(14,4) columns.
+    This clamp caps values to ±1,000,000% (10,000x) — far beyond any real
+    trade outcome — preventing DB overflow while preserving the signal that
+    "something is wrong with this entry price."
+    """
+    if value is None:
+        return 0.0
+    if value > max_abs:
+        return max_abs
+    if value < -max_abs:
+        return -max_abs
+    return value
+
+
 def _build_snapshot(
     position: Dict[str, Any],
     current_price: float,
@@ -389,12 +767,23 @@ def _build_snapshot(
     direction = position["direction"]
     raw_entry = position.get("entry_price")
     raw_qty = position.get("position_size")
+    raw_notional = position.get("notional_usd")
+
+    # If position_size is missing but we have notional_usd and entry_price,
+    # derive the quantity: qty = notional / entry_price.
+    if raw_qty is None and raw_entry is not None and raw_notional is not None:
+        try:
+            raw_qty = float(raw_notional) / float(raw_entry)
+        except (TypeError, ValueError, ZeroDivisionError):
+            raw_qty = None
+
     if raw_entry is None or raw_qty is None:
         logger.info(
-            "Position %s skipped (missing_levels): entry_price=%s position_size=%s",
+            "Position %s skipped (missing_levels): entry_price=%s position_size=%s notional=%s",
             position.get("id"),
             raw_entry,
             raw_qty,
+            raw_notional,
         )
         return None
 
@@ -413,7 +802,7 @@ def _build_snapshot(
 
     lev = float(position.get("leverage") or 1.0)
     sl = position.get("stop_loss")
-    tp = position.get("take_profit_1")
+    tp = position.get("take_profit_1") or position.get("take_profit")
     sl_val = float(sl) if sl is not None else None
     tp_val = float(tp) if tp is not None else None
 
@@ -457,6 +846,18 @@ def _build_snapshot(
     else:
         distance_to_entry_pct = 0.0
 
+    # Phase 8 — clamp all pct values to a sane range.
+    # Shitcoins with tiny prices (e.g. PEPE at 0.00000038) can produce
+    # absurd percentages when entry_price data is wrong. numeric(14,4)
+    # on the DB side handles up to 9,999,999,999.9999; this clamp
+    # prevents obviously-wrong values from polluting reports.
+    pnl_pct = _clamp_pct(pnl_pct)
+    distance_to_entry_pct = _clamp_pct(distance_to_entry_pct)
+    dist_sl = _clamp_pct(dist["distance_to_sl_pct"])
+    dist_tp = _clamp_pct(dist["distance_to_tp_pct"])
+    mae_pct = _clamp_pct(mae_pct)
+    mfe_pct = _clamp_pct(mfe_pct)
+
     return PositionSnapshot(
         position_id=position["id"],
         current_price=current_price,
@@ -464,9 +865,9 @@ def _build_snapshot(
         pnl_pct=pnl_pct,
         distance_to_entry_pct=distance_to_entry_pct,
         distance_to_sl=dist["distance_to_sl"],
-        distance_to_sl_pct=dist["distance_to_sl_pct"],
+        distance_to_sl_pct=dist_sl,
         distance_to_tp=dist["distance_to_tp"],
-        distance_to_tp_pct=dist["distance_to_tp_pct"],
+        distance_to_tp_pct=dist_tp,
         hours_open=time_metrics["hours_open"],
         mae_pct=mae_pct,
         mfe_pct=mfe_pct,
@@ -636,6 +1037,45 @@ async def update_position_extremes(
     return await pool.execute(sql, tuple(params))
 
 
+async def update_position_price_pnl(
+    pool: DatabasePool,
+    position_id: int,
+    current_price: float,
+    pnl_pct: float,
+    unrealized_pnl_usd: float,
+) -> int:
+    """Update current_price, pnl_pct, unrealized_pnl_usd on tracked_positions.
+
+    Idempotent: only writes when at least one value differs from the stored
+    row, avoiding unnecessary write amplification on every cycle.
+
+    Args:
+        pool: Shared Postgres pool.
+        position_id: tracked_positions.id.
+        current_price: Current market price.
+        pnl_pct: Unrealized P&L percentage.
+        unrealized_pnl_usd: Unrealized P&L in USD.
+
+    Returns:
+        Affected row count.
+    """
+    return await pool.execute(
+        """
+        UPDATE public.tracked_positions
+        SET current_price = $1,
+            unrealized_pnl_pct = $2,
+            unrealized_pnl_usd = $3,
+            price_updated_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $4
+          AND (current_price IS DISTINCT FROM $1
+               OR unrealized_pnl_pct IS DISTINCT FROM $2
+               OR unrealized_pnl_usd IS DISTINCT FROM $3)
+        """,
+        (current_price, pnl_pct, unrealized_pnl_usd, position_id),
+    )
+
+
 # Phase 8 §G: ChartHackerOpinionService is the sole writer to agent_opinions.
 # The dual-role generate_agent_opinion() has been removed from PositionMonitor.
 # All agent_opinion writes now flow through shared.intelligence.chart_hacker_opinion_service.
@@ -651,6 +1091,7 @@ class PositionMonitor:
         self.cfg = cfg or MonitorConfig()
         self._stop = asyncio.Event()
         self._cycle_count = 0
+        self._adapters: Dict[str, Any] = {}
 
     async def _ensure_pool(self) -> DatabasePool:
         return await get_shared_pool()
@@ -702,13 +1143,24 @@ class PositionMonitor:
                 return None
 
             opened_at = position.get("signal_timestamp") or position["created_at"]
+
+            # F2 — derive qty from notional_usd when position_size is NULL
+            raw_qty = position.get("position_size")
+            raw_entry = position.get("entry_price")
+            raw_notional = position.get("notional_usd")
+            if raw_qty is None and raw_entry is not None and raw_notional is not None:
+                try:
+                    raw_qty = float(raw_notional) / float(raw_entry)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    raw_qty = None
+
             breakdown = await compute_realized_pnl_db(
                 pool,
                 instrument_id=instrument_id,
                 direction=position["direction"],
-                entry_price=position["entry_price"],
+                entry_price=raw_entry,
                 exit_price=exit_price,
-                qty=position["position_size"],
+                qty=raw_qty,
                 leverage=position.get("leverage") or 1,
                 opened_at=opened_at,
                 closed_at=now,
@@ -742,6 +1194,162 @@ class PositionMonitor:
             )
             return None
 
+    async def _activate_pending_positions(
+        self,
+        pool: DatabasePool,
+        now: datetime,
+    ) -> Dict[str, int]:
+        """Activate pending tracked_positions whose entry price has been reached.
+
+        Correct activation semantics (2026-05-22 fix):
+            A position transitions ``pending -> open`` ONLY when a 1m candle
+            whose ``timestamp > position.created_at`` had a ``[low, high]``
+            range that included the entry price. The candle's close at that
+            moment becomes ``current_price``.
+
+        This unified ``low <= entry <= high`` predicate works for every
+        direction and every entry style (limit-below, breakout-above,
+        limit-above-short, breakdown-below-short) — same predicate
+        ``copy_trade_monitor`` already uses for SL/TP detection.
+
+        The previous implementation compared the latest 1m close to entry
+        with ``current_price >= entry`` (long) / ``current_price <= entry``
+        (short). For ``limit_below`` longs (buy-the-dip) and
+        ``limit_above`` shorts (sell-the-rip), the condition was trivially
+        satisfied at signal time, causing instant retro-activation even
+        when the market never printed at entry. Forensic evidence in
+        ``/opt/tickles/.cursor/debug-c8d268.log`` (run "retrofit-*")
+        confirmed 15/15 currently-open positions activated this way with
+        NO real candle touch between created_at and updated_at.
+
+        Positions older than 7 days are expired with ``entry_never_reached``.
+
+        Args:
+            pool: Shared Postgres pool.
+            now: Current UTC timestamp.
+
+        Returns:
+            Dict with counts for ``activated``, ``expired``, ``no_price``,
+            and ``error``. The ``no_price`` bucket is reused for "no real
+            candle touched entry yet" (i.e. the position remains pending —
+            normal, not an error).
+        """
+        pending = await pool.fetch_all(
+            """
+            SELECT id, instrument_symbol, instrument_exchange,
+                   direction, entry_price, created_at
+            FROM public.tracked_positions
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            LIMIT 200
+            """,
+        )
+
+        if not pending:
+            return {"activated": 0, "expired": 0, "no_price": 0, "error": 0}
+
+        activated = 0
+        expired = 0
+        no_price = 0
+        error = 0
+        expiry_cutoff = now - timedelta(days=7)
+
+        for pos in pending:
+            if self._stop.is_set():
+                break
+            try:
+                pos_id = int(pos["id"])
+                created = pos["created_at"]
+                # Expire positions older than 7 days
+                if isinstance(created, datetime) and created < expiry_cutoff:
+                    await pool.execute(
+                        """
+                        UPDATE public.tracked_positions
+                        SET status = 'expired',
+                            status_reason = 'entry_never_reached',
+                            updated_at = $1
+                        WHERE id = $2
+                        """,
+                        (now, pos_id),
+                    )
+                    expired += 1
+                    logger.info(
+                        "Expired pending position %s (symbol=%s, age > 7 days)",
+                        pos_id, pos["instrument_symbol"],
+                    )
+                    continue
+
+                entry_price = pos["entry_price"]
+                if entry_price is None or created is None:
+                    no_price += 1
+                    continue
+
+                entry = float(entry_price)
+                # Recency bound: only candles within the last
+                # ``activation_lookback_s`` (default 30 min) can trigger
+                # activation. This enforces "the agent must be watching"
+                # — touches that happened while the monitor was down or
+                # the position was undetected don't retro-activate.
+                not_before = now - timedelta(seconds=self.cfg.activation_lookback_s)
+                triggered = await _find_entry_touch_candle(
+                    pool=pool,
+                    symbol=pos["instrument_symbol"],
+                    exchange=pos.get("instrument_exchange"),
+                    timeframe=self.cfg.default_timeframe,
+                    entry=entry,
+                    since=created,
+                    not_before=not_before,
+                    adapters=self._adapters,
+                )
+                if triggered is None:
+                    # No candle whose [low, high] contains entry has printed
+                    # since the position was created. Still pending —
+                    # nothing to do, just leave it. Counted under no_price
+                    # so the existing log line keeps working.
+                    no_price += 1
+                    continue
+
+                trigger_ts, trigger_close = triggered
+                await pool.execute(
+                    """
+                    UPDATE public.tracked_positions
+                    SET status = 'open',
+                        status_reason = NULL,
+                        current_price = $1,
+                        price_updated_at = $2,
+                        updated_at = $2
+                    WHERE id = $3
+                    """,
+                    (trigger_close, trigger_ts, pos_id),
+                )
+                activated += 1
+                logger.info(
+                    "Activated pending position %s: %s %s entry=%.6f "
+                    "triggered_by_candle_at=%s close=%.6f",
+                    pos_id, pos["instrument_symbol"], pos["direction"],
+                    entry, trigger_ts, trigger_close,
+                )
+
+            except Exception as exc:
+                logger.exception(
+                    "Error activating pending position %s: %s",
+                    pos.get("id"), exc,
+                )
+                error += 1
+
+        if activated or expired:
+            logger.info(
+                "Pending activation cycle: activated=%s expired=%s no_price=%s error=%s",
+                activated, expired, no_price, error,
+            )
+
+        return {
+            "activated": activated,
+            "expired": expired,
+            "no_price": no_price,
+            "error": error,
+        }
+
     async def _process_one(
         self,
         pool: DatabasePool,
@@ -774,9 +1382,110 @@ class PositionMonitor:
         epic = position.get("epic_code")
         instrument_exchange = position.get("instrument_exchange")
 
-        # Fetch price
+        # 2026-05-22 — Wick-aware SL/TP close detection.
+        # Scan 1m candles since the previous monitor tick. If any candle's
+        # [low, high] range wicked through SL or TP, the trader's broker
+        # would have filled there — close at that level, not at the
+        # snapshot close (which can lie when price wicked through and
+        # closed back inside). Mirrors copy_trade_monitor's per-candle
+        # convention (SL beats TP on same-candle ambiguity).
+        sl_val_for_wick = position.get("stop_loss")
+        tp_val_for_wick = position.get("take_profit_1") or position.get("take_profit")
+        wick: Optional[Tuple[datetime, float, str, float]] = None
+        wick_since: Optional[datetime] = None
+        if sl_val_for_wick is not None or tp_val_for_wick is not None:
+            wick_since = (
+                position.get("price_updated_at")
+                or position.get("updated_at")
+                or position.get("created_at")
+            )
+            if wick_since is not None:
+                try:
+                    wick = await _find_sl_tp_wick_candle(
+                        pool,
+                        symbol=symbol,
+                        exchange=instrument_exchange,
+                        timeframe=self.cfg.default_timeframe,
+                        direction=position.get("direction", ""),
+                        stop_loss=float(sl_val_for_wick) if sl_val_for_wick is not None else None,
+                        take_profit=float(tp_val_for_wick) if tp_val_for_wick is not None else None,
+                        since=wick_since,
+                        adapters=self._adapters,
+                    )
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    logger.warning(
+                        "wick check raised for position %s: %s", pos_id, exc,
+                    )
+
+        if wick is not None:
+            wick_ts, _wick_close, hit_type, hit_price = wick
+            outcome = "sl_hit" if hit_type == "sl" else "tp1_hit"
+            wick_snapshot = _build_snapshot(position, hit_price, wick_ts)
+            if wick_snapshot is None:
+                return {
+                    "position_id": pos_id,
+                    "status": "missing_levels",
+                    "instrument_symbol": symbol,
+                }
+            update_id = await write_position_update(pool, wick_snapshot)
+            breakdown = await self._settle_close(
+                pool, position, wick_snapshot, outcome, hit_price, wick_ts,
+            )
+            if breakdown is not None:
+                logger.info(
+                    "Position %s closed via wick %s at level=%.6f candle_ts=%s "
+                    "net_pnl=%s",
+                    pos_id, outcome, hit_price, wick_ts, breakdown.net_pnl_usd,
+                )
+                return {
+                    "position_id": pos_id,
+                    "status": "closed",
+                    "outcome": outcome,
+                    "update_id": update_id,
+                    "realized_pnl": float(breakdown.net_pnl_usd),
+                    "wick_close": True,
+                }
+            return {
+                "position_id": pos_id,
+                "status": "settle_deferred",
+                "reason": f"{outcome}_no_profile",
+                "update_id": update_id,
+                "wick_close": True,
+            }
+
+        if wick is None and wick_since is not None:
+            # Optimize future cycles: since we found no wick hit, advance the check watermark
+            # to the newest candle's timestamp currently in the database to prevent missing late-ingested candles.
+            try:
+                instrument_id = await _resolve_instrument_id(pool, symbol, instrument_exchange)
+                max_ts = None
+                if instrument_id is not None:
+                    max_ts = await pool.fetch_val(
+                        """
+                        SELECT MAX("timestamp") FROM public.candles
+                        WHERE instrument_id = $1 AND timeframe = $2
+                        """,
+                        (instrument_id, self.cfg.default_timeframe)
+                    )
+                
+                watermark = max_ts if max_ts is not None else datetime.now(timezone.utc)
+                await pool.execute(
+                    """
+                    UPDATE public.tracked_positions
+                    SET price_updated_at = $1,
+                        updated_at = NOW()
+                    WHERE id = $2
+                    """,
+                    (watermark, pos_id,)
+                )
+            except Exception as exc:
+                logger.warning("Failed to advance price_updated_at watermark for position %s: %s", pos_id, exc)
+
+        # Fetch price — try live feed first, fall back to candles.
         price: Optional[float] = None
-        if epic:
+        if not epic:
+            price = await fetch_live_price_from_feed(symbol)
+        if price is None and epic:
             price = await fetch_latest_price_by_epic(pool, epic, self.cfg.default_timeframe)
         if price is None:
             price = await fetch_latest_price(pool, symbol, instrument_exchange, self.cfg.default_timeframe)
@@ -805,6 +1514,16 @@ class PositionMonitor:
             pos_id,
             worst_price=price if snapshot.mae_pct > 0 else None,
             best_price=price if snapshot.mfe_pct > 0 else None,
+        )
+
+        # Write current_price, pnl_pct, unrealized_pnl_usd back to tracked_positions
+        # so the dashboard snapshot can show real P&L numbers without extra queries.
+        await update_position_price_pnl(
+            pool,
+            pos_id,
+            snapshot.current_price,
+            snapshot.pnl_pct,
+            snapshot.unrealized_pnl,
         )
 
         # Expiry check (F2): runs before SL/TP so an expired position
@@ -870,52 +1589,128 @@ class PositionMonitor:
         }
 
     async def run_cycle(self) -> Dict[str, Any]:
-        """Run one monitoring cycle: fetch open positions, snapshot each.
+        """Run one monitoring cycle: activate pending, then snapshot open positions.
+
+        2026-05-22 — Wraps the cycle in a try/except + heartbeat. Heartbeat
+        status is:
+          * ``ok``     — cycle completed and zero per-position errors.
+          * ``partial`` — cycle completed but some positions raised.
+          * ``error``  — cycle itself raised (pool, query, etc.).
+        The cron-canary watchdog reads ``cron_heartbeats`` and alerts when
+        ``now - last_run_at > expected_interval_seconds × N``, so a hung
+        or crashed monitor surfaces without us hand-tailing the log.
 
         Returns:
             Summary dict with counts.
         """
-        pool = await self._ensure_pool()
-        now = datetime.now(timezone.utc)
-        positions = await fetch_open_positions(pool, self.cfg.batch_size)
+        # The interval the canary uses to decide "stale". We pad the poll
+        # interval by 2× so a single slow cycle doesn't flap as stale.
+        expected_interval = int(max(60, self.cfg.poll_interval_s * 2))
+        per_position_errors = 0
+        try:
+            pool = await self._ensure_pool()
+            now = datetime.now(timezone.utc)
 
-        if not positions:
-            logger.debug("No open positions to monitor")
-            return {"monitored": 0, "closed": 0, "no_price": 0}
+            # Activate pending positions whose entry price has been reached
+            pending_result = await self._activate_pending_positions(pool, now)
 
-        monitored = 0
-        closed = 0
-        no_price = 0
-        settle_deferred = 0
+            positions = await fetch_open_positions(pool, self.cfg.batch_size)
 
-        for pos in positions:
-            if self._stop.is_set():
-                break
+            if not positions:
+                logger.debug("No open positions to monitor")
+                await self._heartbeat(
+                    status="ok",
+                    expected_interval_seconds=expected_interval,
+                    message=(
+                        f"no_positions activated={pending_result.get('activated', 0)} "
+                        f"pending_expired={pending_result.get('expired', 0)}"
+                    ),
+                )
+                return {"monitored": 0, "closed": 0, "no_price": 0}
+
+            monitored = 0
+            closed = 0
+            no_price = 0
+            settle_deferred = 0
+
+            for pos in positions:
+                if self._stop.is_set():
+                    break
+                try:
+                    result = await self._process_one(pool, pos, now)
+                    status = result["status"]
+                    if status == "closed":
+                        closed += 1
+                    elif status == "no_price_data":
+                        no_price += 1
+                    elif status == "settle_deferred":
+                        settle_deferred += 1
+                    else:
+                        monitored += 1
+                except Exception as exc:
+                    per_position_errors += 1
+                    logger.exception("Error processing position %s: %s", pos.get("id"), exc)
+
+            self._cycle_count += 1
+            logger.info(
+                "Cycle %s: pending_activated=%s pending_expired=%s monitored=%s closed=%s no_price=%s settle_deferred=%s",
+                self._cycle_count,
+                pending_result.get("activated", 0),
+                pending_result.get("expired", 0),
+                monitored, closed, no_price, settle_deferred,
+            )
+
+            hb_status: str = "partial" if per_position_errors else "ok"
+            await self._heartbeat(
+                status=hb_status,
+                expected_interval_seconds=expected_interval,
+                message=(
+                    f"cycle={self._cycle_count} monitored={monitored} "
+                    f"closed={closed} no_price={no_price} "
+                    f"deferred={settle_deferred} per_pos_errors={per_position_errors}"
+                ),
+            )
+            return {
+                "monitored": monitored,
+                "closed": closed,
+                "no_price": no_price,
+                "settle_deferred": settle_deferred,
+                "pending_activated": pending_result.get("activated", 0),
+                "pending_expired": pending_result.get("expired", 0),
+            }
+        except Exception as exc:
+            logger.exception("run_cycle aborted: %s", exc)
+            # Best-effort heartbeat — never crash on heartbeat failure.
             try:
-                result = await self._process_one(pool, pos, now)
-                status = result["status"]
-                if status == "closed":
-                    closed += 1
-                elif status == "no_price_data":
-                    no_price += 1
-                elif status == "settle_deferred":
-                    settle_deferred += 1
-                else:
-                    monitored += 1
-            except Exception as exc:
-                logger.exception("Error processing position %s: %s", pos.get("id"), exc)
+                await self._heartbeat(
+                    status="error",
+                    expected_interval_seconds=expected_interval,
+                    message=f"run_cycle exception: {exc}",
+                )
+            except Exception:  # pragma: no cover — defensive
+                pass
+            raise
 
-        self._cycle_count += 1
-        logger.info(
-            "Cycle %s: monitored=%s closed=%s no_price=%s settle_deferred=%s",
-            self._cycle_count, monitored, closed, no_price, settle_deferred,
-        )
-        return {
-            "monitored": monitored,
-            "closed": closed,
-            "no_price": no_price,
-            "settle_deferred": settle_deferred,
-        }
+    async def _heartbeat(
+        self, *, status: str, expected_interval_seconds: int,
+        message: Optional[str] = None,
+    ) -> None:
+        """Tiny wrapper around shared.intelligence.heartbeat.record_heartbeat.
+
+        Kept here so the monitor never imports the heartbeat module at
+        module level (keeps test fixtures simple) and so a heartbeat
+        failure can never abort a cycle.
+        """
+        try:
+            from shared.intelligence.heartbeat import record_heartbeat
+            await record_heartbeat(
+                agent_id="position-monitor",
+                status=status,  # type: ignore[arg-type]
+                expected_interval_seconds=expected_interval_seconds,
+                message=message,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.debug("heartbeat write failed (non-fatal): %s", exc)
 
     async def run_forever(self) -> None:
         """Main loop: run cycles until stopped."""
@@ -925,19 +1720,29 @@ class PositionMonitor:
             self.cfg.batch_size,
             self.cfg.agent_opinion_every_n,
         )
-        while not self._stop.is_set():
-            try:
-                await self.run_cycle()
-            except Exception as exc:
-                logger.exception("Cycle failed: %s", exc)
-            try:
-                await asyncio.wait_for(
-                    self._stop.wait(),
-                    timeout=self.cfg.poll_interval_s,
-                )
-            except asyncio.TimeoutError:
-                pass
-        logger.info("PositionMonitor stopped")
+        try:
+            while not self._stop.is_set():
+                try:
+                    await self.run_cycle()
+                except Exception as exc:
+                    logger.exception("Cycle failed: %s", exc)
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(),
+                        timeout=self.cfg.poll_interval_s,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if self._adapters:
+                logger.info("Closing %d cached CCXT exchange adapters...", len(self._adapters))
+                for exchange_id, adapter in list(self._adapters.items()):
+                    try:
+                        await adapter.close()
+                    except Exception as exc:
+                        logger.warning("Error closing cached adapter %s: %s", exchange_id, exc)
+                self._adapters.clear()
+            logger.info("PositionMonitor stopped")
 
     def stop(self) -> None:
         """Signal the daemon to stop gracefully."""

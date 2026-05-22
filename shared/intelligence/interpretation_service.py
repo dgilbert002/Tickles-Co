@@ -92,6 +92,7 @@ FALLBACK_MODEL = os.environ.get("CHART_HACKER_MODEL_FALLBACK", "google/gemini-2.
 PREFILTER_MODEL = os.environ.get("CHART_HACKER_PREFILTER_MODEL", "google/gemini-2.5-flash")
 PREFILTER_ENABLED = os.environ.get("CHART_HACKER_PREFILTER_ENABLED", "true").lower() in ("1", "true", "yes")
 FRESHNESS_THRESHOLD_S = float(os.environ.get("INTERPRETATION_FRESHNESS_S", "180"))
+MEDIA_RETENTION_DAYS = float(os.environ.get("MEDIA_RETENTION_DAYS", "7.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +110,7 @@ class InterpretationConfig:
     primary_model: str = PRIMARY_MODEL
     fallback_model: str = FALLBACK_MODEL
     freshness_threshold_s: float = FRESHNESS_THRESHOLD_S
+    media_retention_days: float = MEDIA_RETENTION_DAYS
 
 
 @dataclass
@@ -252,6 +254,90 @@ async def _lookup_current_price(
         return float(row["close"])
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — Always-on quant: CCXT live-price probe (degraded fallback)
+# ---------------------------------------------------------------------------
+async def _ccxt_live_price(
+    symbol: str,
+    exchange: str = "bybit",
+    *,
+    timeout_s: float = 5.0,
+) -> Optional[Tuple[float, str, int]]:
+    """Probe CCXT for the live price of ``symbol`` on ``exchange``.
+
+    Thin wrapper around :func:`shared.market_data.live_price.fetch_live_price`
+    that swallows all errors and returns ``None`` so the quant track can
+    fall back to a degraded ``QuantResult`` rather than abort. Always
+    closes the underlying CCXT instance via the helper's ``finally``.
+
+    Args:
+        symbol: Trading pair (any common form).
+        exchange: Lower-cased exchange id.
+        timeout_s: Hard deadline for the probe.
+
+    Returns:
+        ``(price, resolved_symbol, ts_ms)`` on success, else ``None``.
+    """
+    if not symbol:
+        return None
+    try:
+        from shared.market_data.live_price import fetch_live_price
+    except Exception as exc:  # noqa: BLE001 - import-time failure
+        logger.debug("ccxt live-price helper unavailable: %s", exc)
+        return None
+    try:
+        result = await fetch_live_price(
+            symbol, exchange or "bybit", timeout_s=timeout_s,
+        )
+    except Exception as exc:  # noqa: BLE001 - probe is best-effort
+        logger.info(
+            "ccxt live-price probe failed for %s@%s: %s",
+            symbol, exchange, exc,
+        )
+        return None
+    return result.price, result.symbol, result.ts_ms
+
+
+def _quant_symbol_candidates(symbol: str) -> List[str]:
+    """Return alternate ``instruments.symbol`` forms to look up in DB.
+
+    The collector / LLM may yield slash form (``BTC/USDT``), no-slash
+    (``BTCUSDT``), or perp-suffixed (``TAOUSDT.P``). The instruments
+    table can store any of those depending on origin, so we try all
+    plausible forms before short-circuiting the quant track.
+
+    Args:
+        symbol: Caller's input.
+
+    Returns:
+        Ordered, deduped list of forms.
+    """
+    if not symbol:
+        return []
+    s = symbol.strip().upper()
+    out: List[str] = [s]
+    base = s[:-2] if s.endswith(".P") else s
+    if base != s and base not in out:
+        out.append(base)
+    if "/" not in base and len(base) > 3:
+        for quote in ("USDT", "USDC", "BUSD", "USD"):
+            if base.endswith(quote) and len(base) > len(quote):
+                slash = base[: -len(quote)] + "/" + quote
+                if slash not in out:
+                    out.append(slash)
+                break
+    elif "/" in base:
+        no_slash = base.replace("/", "")
+        if no_slash not in out:
+            out.append(no_slash)
+        # Perp variant ``BTC/USDT.P`` -> ``BTCUSDT.P``
+        if not s.endswith(".P"):
+            perp = no_slash + ".P"
+            if perp not in out:
+                out.append(perp)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -851,13 +937,17 @@ async def run_quant_track(
     exchange: str,
     freshness_threshold: float,
 ) -> QuantResult:
-    if not instrument_symbol:
-        logger.warning("Quant track: instrument_symbol is None or empty")
-        return QuantResult(direction="unclear", confidence=0.0, indicators={})
     """Run the quant indicator track: read recent candles, compute lightweight signals.
 
     Reads the last 100 1m candles for the instrument, computes RSI(14), EMA(20/50),
     ATR(14), and Bollinger(20,2). Derives a directional score from the ensemble.
+
+    If the instrument is not registered in ``public.instruments`` under the given
+    symbol form, alternate symbol forms are tried (slash/no-slash, ``.P`` perp
+    suffix). If no candles can be located at all, the function falls back to a
+    CCXT live-price probe and returns a degraded :class:`QuantResult` whose
+    ``indicators`` carry just ``current_price`` and ``price_source`` so the
+    downstream interpretation can still stamp a price.
 
     Args:
         shared_pool: DatabasePool for the shared database (instruments, candles).
@@ -869,33 +959,64 @@ async def run_quant_track(
     Returns:
         QuantResult with direction, confidence, and indicator snapshot.
     """
-    # Resolve instrument_id from symbol + exchange (shared DB)
-    row = await shared_pool.fetch_one(
-        "SELECT id FROM public.instruments WHERE symbol = $1 AND exchange = $2",
-        (instrument_symbol, exchange),
-    )
-    if not row:
-        logger.warning("Quant track: no instrument found for %s@%s", instrument_symbol, exchange)
+    if not instrument_symbol:
+        logger.warning("Quant track: instrument_symbol is None or empty")
         return QuantResult(direction="unclear", confidence=0.0, indicators={})
 
-    instrument_id = row["id"]
+    exch = (exchange or "").strip().lower() or "bybit"
+    candidates = _quant_symbol_candidates(instrument_symbol)
+
+    # Resolve instrument_id from symbol + exchange (shared DB) — try alternates.
+    instrument_id: Optional[int] = None
+    resolved_symbol: Optional[str] = None
+    for cand in candidates:
+        try:
+            row = await shared_pool.fetch_one(
+                "SELECT id FROM public.instruments WHERE symbol = $1 AND exchange = $2",
+                (cand, exch),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Quant track: instruments lookup failed for %s@%s: %s",
+                cand, exch, exc,
+            )
+            row = None
+        if row:
+            instrument_id = int(row["id"])
+            resolved_symbol = cand
+            break
+
+    if instrument_id is None:
+        logger.info(
+            "Quant track: no instrument row for %s@%s (tried %s); "
+            "attempting CCXT live-price fallback",
+            instrument_symbol, exch, candidates,
+        )
+        return await _quant_degraded_from_ccxt(instrument_symbol, exch)
 
     # Fetch last 100 1m candles (shared DB)
-    candles = await shared_pool.fetch_all(
-        "SELECT timestamp, open, high, low, close, volume "
-        "FROM public.candles "
-        "WHERE instrument_id = $1 AND source = $2 AND timeframe = '1m' "
-        "ORDER BY timestamp DESC LIMIT 100",
-        (instrument_id, exchange),
-    )
-    if len(candles) < 50:
-        logger.warning(
-            "Quant track: only %d candles for %s@%s, need >=50",
-            len(candles),
-            instrument_symbol,
-            exchange,
+    try:
+        candles = await shared_pool.fetch_all(
+            "SELECT timestamp, open, high, low, close, volume "
+            "FROM public.candles "
+            "WHERE instrument_id = $1 AND source = $2 AND timeframe = '1m' "
+            "ORDER BY timestamp DESC LIMIT 100",
+            (instrument_id, exch),
         )
-        return QuantResult(direction="unclear", confidence=0.0, indicators={})
+    except Exception as exc:
+        logger.warning(
+            "Quant track: candles query failed for %s@%s: %s",
+            resolved_symbol, exch, exc,
+        )
+        candles = []
+
+    if len(candles) < 50:
+        logger.info(
+            "Quant track: only %d candles for %s@%s, need >=50; "
+            "attempting CCXT live-price fallback",
+            len(candles), resolved_symbol, exch,
+        )
+        return await _quant_degraded_from_ccxt(instrument_symbol, exch)
 
     # Freshness guard on the most recent candle
     latest_ts = candles[0]["timestamp"]
@@ -973,11 +1094,71 @@ async def run_quant_track(
         "atr14": round(atr_val, 4),
         "bollinger": bb,
         "last_close": round(last_close, 4),
+        "current_price": round(last_close, 4),
+        "price_source": "candles_1m",
         "score": round(score, 4),
         "reasons": reasons,
     }
 
     return QuantResult(direction=direction, confidence=confidence, indicators=indicators)
+
+
+async def _quant_degraded_from_ccxt(
+    instrument_symbol: str,
+    exchange: str,
+) -> QuantResult:
+    """Return a degraded :class:`QuantResult` based on a CCXT live-price probe.
+
+    Used by :func:`run_quant_track` when ``public.instruments`` has no row for
+    the requested symbol (or no recent candles). Tries each candidate symbol
+    form against CCXT in order, and on the first successful probe returns a
+    QuantResult with ``direction='unclear'``, ``confidence=0.0`` and a small
+    ``indicators`` payload containing the live price so downstream code can
+    still stamp ``current_price`` on the interpretation row.
+
+    Args:
+        instrument_symbol: Original symbol requested by the caller.
+        exchange: Exchange name to probe.
+
+    Returns:
+        A :class:`QuantResult`. ``indicators`` is empty if every probe failed.
+    """
+    if not instrument_symbol:
+        return QuantResult(direction="unclear", confidence=0.0, indicators={})
+    candidates = _quant_symbol_candidates(instrument_symbol)
+    exch = (exchange or "bybit").strip().lower() or "bybit"
+    for cand in candidates:
+        try:
+            probe = await _ccxt_live_price(cand, exch)
+        except Exception as exc:
+            logger.debug(
+                "Quant degraded probe error %s@%s: %s", cand, exch, exc,
+            )
+            probe = None
+        if probe is None:
+            continue
+        price, resolved_sym, ts_ms = probe
+        logger.info(
+            "Quant degraded fallback: live price %s for %s@%s (ts=%s)",
+            price, resolved_sym, exch, ts_ms,
+        )
+        return QuantResult(
+            direction="unclear",
+            confidence=0.0,
+            indicators={
+                "current_price": float(price),
+                "price_source": "ccxt_live",
+                "live_symbol": resolved_sym,
+                "live_exchange": exch,
+                "live_ts_ms": int(ts_ms) if ts_ms else 0,
+                "degraded": True,
+            },
+        )
+    logger.info(
+        "Quant degraded fallback: no CCXT live price for %s on %s (tried %s)",
+        instrument_symbol, exch, candidates,
+    )
+    return QuantResult(direction="unclear", confidence=0.0, indicators={})
 
 
 def _rsi(closes: List[float], period: int = 14) -> float:
@@ -1121,6 +1302,11 @@ async def fetch_pending_media(
     Joins news_items to get headline, content, source_id (for company resolution).
     Filters out items older than max_age_hours.
     """
+    # Slice 4 — only feed `image` media into the vision pipeline. Videos (and
+    # any other non-image media_type) crashed the vision LLM with
+    # "INVALID_ARGUMENT: Provided image is not valid". Non-image rows are
+    # excluded here and handled separately by `cleanup_unsupported_media()`,
+    # which transitions them to processing_status='skipped_unsupported_media'.
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     sql = (
         "SELECT "
@@ -1129,6 +1315,7 @@ async def fetch_pending_media(
         "  m.local_path, "
         "  m.source_url, "
         "  m.mime_type, "
+        "  m.media_type, "
         "  m.processing_status, "
         "  n.headline, "
         "  n.content, "
@@ -1136,11 +1323,13 @@ async def fetch_pending_media(
         "  n.instruments, "
         "  n.author, "
         "  n.channel_name, "
-        "  n.collected_at "
+        "  n.collected_at, "
+        "  n.context_window "
         "FROM public.media_items m "
         "JOIN public.news_items n ON n.id = m.news_item_id "
         "WHERE (m.processing_status = 'downloaded' "
         "       OR (m.processing_status = 'pending' AND m.source_url IS NOT NULL)) "
+        "  AND m.media_type = 'image' "
         "  AND n.collected_at > $1 "
         "ORDER BY n.collected_at ASC "
         "LIMIT $2"
@@ -1148,6 +1337,162 @@ async def fetch_pending_media(
     async with shared_pool.acquire() as conn:
         rows = await conn.fetch(sql, cutoff, batch_size)
     return [dict(r) for r in rows]
+
+
+async def cleanup_unsupported_media(
+    shared_pool: DatabasePool,
+    max_age_hours: float,
+) -> int:
+    """Mark non-image pending/downloaded media as ``skipped_unsupported_media``.
+
+    Videos and other non-image media types cannot be processed by the vision
+    LLM. Leaving them at status ``pending``/``downloaded`` causes them to
+    accumulate forever and pollute the queue view. This routine sweeps them
+    into a terminal status so the queue stays small.
+
+    Args:
+        shared_pool: Shared Postgres pool.
+        max_age_hours: Only consider rows whose parent news_item is younger
+            than this. Older rows are not touched here — the daemon's
+            existing age cutoff already excludes them from work selection.
+
+    Returns:
+        Number of media rows transitioned to ``skipped_unsupported_media``.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    sql = (
+        "UPDATE public.media_items AS m "
+        "SET processing_status = 'skipped_unsupported_media', "
+        "    processing_error  = COALESCE(m.processing_error, '') || "
+        "                        'slice4: media_type != image', "
+        "    processed_at      = NOW() "
+        "FROM public.news_items AS n "
+        "WHERE n.id = m.news_item_id "
+        "  AND m.media_type IS DISTINCT FROM 'image' "
+        "  AND m.processing_status IN ('pending','downloaded') "
+        "  AND n.collected_at > $1"
+    )
+    try:
+        async with shared_pool.acquire() as conn:
+            result = await conn.execute(sql, cutoff)
+        # asyncpg returns a string like "UPDATE 7"; parse the trailing int.
+        try:
+            count = int(str(result).rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            count = 0
+        if count:
+            logger.info(
+                "Slice 4 hygiene: marked %d non-image media rows as "
+                "skipped_unsupported_media",
+                count,
+            )
+        return count
+    except Exception as exc:
+        logger.warning("cleanup_unsupported_media failed: %s", exc)
+        return 0
+
+
+async def cleanup_expired_local_media(
+    shared_pool: DatabasePool,
+    retention_days: float = 7.0,
+) -> int:
+    """Scan and delete local media files older than retention_days, updating
+    local_path to NULL so the frontend falls back to the original source_url.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    sql_fetch = (
+        "SELECT id, local_path FROM public.media_items "
+        "WHERE local_path IS NOT NULL "
+        "  AND processing_status NOT IN ('analyzing', 'downloading', 'pending', 'downloaded') "
+        "  AND created_at < $1 "
+        "LIMIT 100"
+    )
+    sql_update = (
+        "UPDATE public.media_items "
+        "SET local_path = NULL "
+        "WHERE id = $1"
+    )
+    deleted_count = 0
+    try:
+        async with shared_pool.acquire() as conn:
+            rows = await conn.fetch(sql_fetch, cutoff)
+            if not rows:
+                return 0
+                
+            for r in rows:
+                mid = r["id"]
+                path_str = r["local_path"]
+                if path_str:
+                    p = Path(path_str)
+                    if p.exists() and p.is_file():
+                        try:
+                            p.unlink()
+                            deleted_count += 1
+                        except Exception as exc:
+                            logger.warning("Failed to delete local file %s for media_id=%s: %s", path_str, mid, exc)
+                
+                # Update DB row to set local_path to NULL
+                await conn.execute(sql_update, mid)
+                
+        if deleted_count:
+            logger.info("Local media cleanup: unlinked %d files older than %.1f days", deleted_count, retention_days)
+        return deleted_count
+    except Exception as exc:
+        logger.warning("cleanup_expired_local_media failed: %s", exc)
+        return 0
+
+
+async def cleanup_stale_pending_news(
+    shared_pool: DatabasePool,
+    stale_after_hours: float = 6.0,
+) -> int:
+    """Drain stale text-only news with no media and no signal from the queue.
+
+    News items that arrive with neither media nor a signal interpretation
+    after ``stale_after_hours`` are not going to produce a signal — most are
+    chat noise. We mark them ``skipped_no_content`` on
+    ``news_items.enrichment_status`` so the dashboard stops counting them
+    as "pending".
+
+    Args:
+        shared_pool: Shared Postgres pool.
+        stale_after_hours: Age threshold (hours) past which a pending,
+            mediumless, signalless news_item is dropped.
+
+    Returns:
+        Number of news_items transitioned to ``skipped_no_content``.
+    """
+    if stale_after_hours <= 0:
+        return 0
+    sql = (
+        "UPDATE public.news_items AS n "
+        "SET enrichment_status = 'skipped_no_content', "
+        "    enriched_at       = NOW() "
+        "WHERE n.collected_at < NOW() - ($1 || ' hours')::interval "
+        "  AND n.has_media = FALSE "
+        "  AND n.enrichment_status = 'pending' "
+        "  AND NOT EXISTS ( "
+        "    SELECT 1 FROM public.signal_interpretations si "
+        "     WHERE si.news_item_id = n.id "
+        "  )"
+    )
+    try:
+        async with shared_pool.acquire() as conn:
+            result = await conn.execute(sql, str(stale_after_hours))
+        try:
+            count = int(str(result).rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            count = 0
+        if count:
+            logger.info(
+                "Slice 4 hygiene: drained %d stale text-only news_items as "
+                "skipped_no_content (older than %.1fh, no media, no signal)",
+                count, stale_after_hours,
+            )
+        return count
+    except Exception as exc:
+        logger.warning("cleanup_stale_pending_news failed: %s", exc)
+        return 0
 
 
 async def resolve_company_for_source(
@@ -1173,6 +1518,24 @@ async def resolve_company_for_source(
         except json.JSONDecodeError:
             metadata = {}
     return metadata.get("company_id") or metadata.get("company") or "jarvais"
+
+
+async def is_valid_db_instrument(shared_pool: DatabasePool, symbol: str) -> bool:
+    """Check if a symbol (or any of its candidate forms) exists in public.instruments."""
+    if not symbol or symbol == "UNKNOWN":
+        return False
+    candidates = _quant_symbol_candidates(symbol)
+    for cand in candidates:
+        try:
+            row = await shared_pool.fetch_one(
+                "SELECT id FROM public.instruments WHERE symbol = $1",
+                (cand,),
+            )
+            if row:
+                return True
+        except Exception as exc:
+            logger.warning("is_valid_db_instrument check failed for %s: %s", cand, exc)
+    return False
 
 
 async def resolve_instrument_symbol(
@@ -1271,6 +1634,76 @@ async def get_or_create_trader_profile(
     )
 
 
+def _coerce_level(value: Any) -> Optional[float]:
+    """Coerce a heterogeneous LLM-supplied level value to a float.
+
+    The LLM emits levels as either JSON numbers (``42500.5``) or JSON
+    strings (``"42,500.50"``, ``"$42500"``, ``"~42.5k"``). We strip
+    everything but digits/sign/decimal point and parse. Anything that
+    cannot be expressed as a finite positive number returns ``None``
+    so the column stays NULL rather than poisoning downstream consumers.
+
+    Args:
+        value: Raw value from the LLM levels dict — number, string, or None.
+
+    Returns:
+        ``float`` if a finite positive number was extracted, else ``None``.
+    """
+    try:
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            num = float(value)
+        elif isinstance(value, str):
+            cleaned = _re.sub(r"[^0-9.\-]", "", value)
+            if not cleaned or cleaned in ("-", ".", "-."):
+                return None
+            num = float(cleaned)
+        else:
+            return None
+        if num != num or num == float("inf") or num == float("-inf"):
+            return None
+        if num <= 0:
+            return None
+        return num
+    except (TypeError, ValueError):
+        return None
+
+
+def _flatten_llm_levels(levels: Optional[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    """Pull entry/SL/TP1..6 out of an LLM levels dict into dedicated floats.
+
+    The Phase Z migration added dedicated NUMERIC columns mirrored from
+    the canonical ``llm_levels`` JSONB. This helper extracts each known
+    key, coerces it via :func:`_coerce_level`, and returns a stable
+    six-TP shape suitable for direct binding to asyncpg parameters.
+
+    Args:
+        levels: The ``llm_levels`` dict from the LLM (may be ``None``).
+
+    Returns:
+        Dict with keys ``entry_price``, ``stop_loss``,
+        ``take_profit_1`` .. ``take_profit_6`` — each ``Optional[float]``.
+    """
+    out: Dict[str, Optional[float]] = {
+        "entry_price": None,
+        "stop_loss": None,
+        "take_profit_1": None,
+        "take_profit_2": None,
+        "take_profit_3": None,
+        "take_profit_4": None,
+        "take_profit_5": None,
+        "take_profit_6": None,
+    }
+    if not isinstance(levels, dict):
+        return out
+    out["entry_price"] = _coerce_level(levels.get("entry"))
+    out["stop_loss"] = _coerce_level(levels.get("stop_loss"))
+    for n in range(1, 7):
+        out[f"take_profit_{n}"] = _coerce_level(levels.get(f"take_profit_{n}"))
+    return out
+
+
 async def write_signal_interpretation(
     shared_pool: DatabasePool,
     news_item_id: int,
@@ -1305,6 +1738,12 @@ async def write_signal_interpretation(
     llm = consensus.llm_result
     quant = consensus.quant_result
 
+    # Phase Z — denormalised level mirrors. Read from the canonical
+    # ``llm.levels`` JSONB and bind to dedicated NUMERIC columns so the
+    # Signals dashboard / live-vs-signal trackers don't have to parse
+    # JSON on every read. JSONB stays the source of truth for new keys.
+    levels_flat = _flatten_llm_levels(llm.levels if llm else None)
+
     sql = (
         "INSERT INTO public.signal_interpretations ("
         "  news_item_id, media_item_id, trader_profile_id, "
@@ -1322,6 +1761,10 @@ async def write_signal_interpretation(
         # Phase J — dual-extraction columns
         "  timeframe, chart_analysis, trader_trades, chart_hacker_trades, "
         "  ai_agreement_score, ai_comment, "
+        # Phase Z — denormalised level columns
+        "  entry_price, stop_loss, "
+        "  take_profit_1, take_profit_2, take_profit_3, "
+        "  take_profit_4, take_profit_5, take_profit_6, "
         "  created_at"
         ") VALUES ("
         "  $1, $2, $3, $4, $5, $6, "
@@ -1338,6 +1781,10 @@ async def write_signal_interpretation(
         # Phase J params $32..$37
         "  $32, $33::jsonb, $34::jsonb, $35::jsonb, "
         "  $36, $37, "
+        # Phase Z params $38..$45
+        "  $38, $39, "
+        "  $40, $41, $42, "
+        "  $43, $44, $45, "
         "  NOW()"
         ")"
         "ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING "
@@ -1383,6 +1830,15 @@ async def write_signal_interpretation(
         json.dumps(llm.chart_hacker_trades if llm and llm.chart_hacker_trades else []),
         round(llm.ai_agreement, 2) if llm and llm.ai_agreement else None,
         (llm.ai_comment if llm and llm.ai_comment else None),
+        # Phase Z — denormalised level mirrors ($38..$45)
+        levels_flat["entry_price"],
+        levels_flat["stop_loss"],
+        levels_flat["take_profit_1"],
+        levels_flat["take_profit_2"],
+        levels_flat["take_profit_3"],
+        levels_flat["take_profit_4"],
+        levels_flat["take_profit_5"],
+        levels_flat["take_profit_6"],
     )
     row = await shared_pool.fetch_one(sql, params)
     if row is None:
@@ -1569,6 +2025,81 @@ def _parse_price_level(value: Any) -> Optional[float]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Slice 3 — Entry-price resolution helper.
+# ---------------------------------------------------------------------------
+_ENTRY_PRICE_SOURCES = (
+    "trader",
+    "llm",
+    "live_price",
+    "last_candle",
+    "surgeon",  # exchange fill mirrored from a Surgeon daemon (Slice 3 bridge)
+    "none",
+)
+
+
+async def _resolve_entry_price(
+    pool: DatabasePool,
+    interpretation: Dict[str, Any],
+    symbol: str,
+    exchange: str,
+) -> Tuple[Optional[float], str]:
+    """Resolve an entry price for a tracked_position with provenance.
+
+    Tries, in order:
+      1. ``interpretation['trader_entry']`` — explicit trader-marked price.
+      2. ``interpretation['llm_entry']``    — LLM-extracted level.
+      3. live CCXT price probe              — degraded but real-time.
+      4. last 1m candle close (DB)          — coldest fallback.
+
+    Args:
+        pool: Shared Postgres pool used by the candle fallback.
+        interpretation: Mapping that may contain ``trader_entry``/``llm_entry``
+            keys (raw values get parsed via :func:`_parse_price_level`).
+        symbol: Slash-form symbol (e.g. ``BTC/USDT``) for the live/candle path.
+        exchange: Venue string (e.g. ``bybit``).
+
+    Returns:
+        Tuple ``(price, source)`` where ``source`` is one of
+        ``{'trader','llm','live_price','last_candle','none'}``. ``price`` is
+        ``None`` only when source is ``'none'``.
+    """
+    try:
+        trader_raw = interpretation.get("trader_entry") if isinstance(interpretation, dict) else None
+        trader_p = _parse_price_level(trader_raw)
+        if trader_p is not None and trader_p > 0.0:
+            return trader_p, "trader"
+    except Exception as exc:
+        logger.debug("entry resolve trader stage failed: %s", exc)
+
+    try:
+        llm_raw = interpretation.get("llm_entry") if isinstance(interpretation, dict) else None
+        llm_p = _parse_price_level(llm_raw)
+        if llm_p is not None and llm_p > 0.0:
+            return llm_p, "llm"
+    except Exception as exc:
+        logger.debug("entry resolve llm stage failed: %s", exc)
+
+    if symbol and symbol.upper() != "UNKNOWN":
+        try:
+            probe = await _ccxt_live_price(symbol, exchange or "bybit")
+            if probe is not None:
+                px = float(probe[0])
+                if px > 0.0:
+                    return px, "live_price"
+        except Exception as exc:
+            logger.debug("entry resolve live_price stage failed: %s", exc)
+
+        try:
+            cdl = await _lookup_current_price(pool, symbol, exchange or "bybit")
+            if cdl is not None and cdl > 0.0:
+                return float(cdl), "last_candle"
+        except Exception as exc:
+            logger.debug("entry resolve last_candle stage failed: %s", exc)
+
+    return None, "none"
+
+
 async def create_tracked_position_from_interpretation(
     shared_pool: DatabasePool,
     signal_interpretation_id: int,
@@ -1601,6 +2132,8 @@ async def create_tracked_position_from_interpretation(
     take_profit_4: Optional[float] = None,
     take_profit_5: Optional[float] = None,
     take_profit_6: Optional[float] = None,
+    # Slice 3 — entry-price provenance
+    entry_price_source: Optional[str] = None,
 ) -> Optional[int]:
     """Create a tracked_positions row from a signal interpretation.
 
@@ -1644,6 +2177,26 @@ async def create_tracked_position_from_interpretation(
         )
         return None
 
+    # Slice 3 — explicit gating: require minimum confidence and a known symbol.
+    try:
+        _conf = float(detection_confidence)
+    except (TypeError, ValueError):
+        _conf = 0.0
+    if _conf < 0.4:
+        logger.debug(
+            "Skipping tracked_position creation: confidence=%.4f below 0.4 "
+            "(symbol=%s direction=%s news_item_id=%s)",
+            _conf, instrument_symbol, direction, news_item_id,
+        )
+        return None
+    if not instrument_symbol or str(instrument_symbol).strip().upper() == "UNKNOWN":
+        logger.debug(
+            "Skipping tracked_position creation: symbol=%r is UNKNOWN "
+            "(direction=%s news_item_id=%s)",
+            instrument_symbol, direction, news_item_id,
+        )
+        return None
+
     # F5 — entry_price sanity guard.
     #
     # Pre-F5, the pipeline would silently insert tracked_positions with
@@ -1676,6 +2229,37 @@ async def create_tracked_position_from_interpretation(
         )
         return None
 
+    # Phase 8 — entry_price sanity: reject implausibly low entries for major coins
+    _MIN_ENTRY_PRICE = {
+        "BTC": 500.0,
+        "ETH": 50.0,
+        "SOL": 5.0,
+        "AVAX": 1.0,
+        "BNB": 10.0,
+        "XRP": 0.01,
+    }
+    _base = (instrument_symbol or "").split("/")[0].upper()
+    _min = _MIN_ENTRY_PRICE.get(_base)
+    if _min is not None and entry_price is not None and float(entry_price) < _min:
+        logger.warning(
+            "F5 reject tracked_position: entry_price=%.8f below sanity floor "
+            "for %s (min=%.2f) news_item_id=%s — likely chart-reading error",
+            float(entry_price), instrument_symbol, _min, news_item_id,
+        )
+        return None
+
+    # Phase 8 — consensus quality gate: when LLM and quant disagree
+    # on direction (method="conflict"), skip position creation. 54% of
+    # interpretations currently have conflicting tracks — creating
+    # positions from these produces noise that expires uselessly.
+    if detection_method == "conflict":
+        logger.info(
+            "Skipping tracked_position: LLM/quant conflict on direction "
+            "(symbol=%s news_item_id=%s conf=%.4f)",
+            instrument_symbol, news_item_id, detection_confidence,
+        )
+        return None
+
     now = datetime.now(timezone.utc)
 
     # Phase 6: normalise instrument symbol for cross-venue lookups
@@ -1700,6 +2284,148 @@ async def create_tracked_position_from_interpretation(
                 exc,
             )
 
+    # Map consensus method values to detection_method CHECK constraint values.
+    # ConsensusResult.method ∈ {agreement, quant_dominant, llm_dominant, conflict};
+    # text-track passes 'text_extraction'. The DB CHECK constraint allows only
+    # {manual, llm_vision, text_parser, quant_pattern, agent_override}.
+    _METHOD_MAP = {
+        "agreement": "llm_vision",
+        "llm_dominant": "llm_vision",
+        "conflict": "llm_vision",
+        "quant_dominant": "quant_pattern",
+        "text_extraction": "text_parser",
+    }
+    _ALLOWED_METHODS = {
+        "manual",
+        "llm_vision",
+        "text_parser",
+        "quant_pattern",
+        "agent_override",
+    }
+    detection_method = _METHOD_MAP.get(detection_method, detection_method)
+    if detection_method not in _ALLOWED_METHODS:
+        logger.warning(
+            "Unknown detection_method=%r for news_item_id=%s; defaulting to llm_vision",
+            detection_method,
+            news_item_id,
+        )
+        detection_method = "llm_vision"
+
+    # asyncpg cannot bind a Python list to pgvector; serialise to the
+    # PostgreSQL vector literal form '[a,b,c]' so the $23::vector(384) cast
+    # accepts it as text.
+    trader_embed_literal: Optional[str] = None
+    if trader_embed:
+        try:
+            trader_embed_literal = (
+                "[" + ",".join(repr(float(x)) for x in trader_embed) + "]"
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Failed to serialise trader_embed for news_item_id=%s: %s",
+                news_item_id,
+                exc,
+            )
+            trader_embed_literal = None
+
+    # Slice 3 — sanitise entry_price_source against the known set.
+    if entry_price_source is not None and entry_price_source not in _ENTRY_PRICE_SOURCES:
+        logger.warning(
+            "Unknown entry_price_source=%r for news_item_id=%s; storing NULL",
+            entry_price_source, news_item_id,
+        )
+        entry_price_source = None
+
+    # 2026-05-22 — Already-In-Play / Play-Out Guard.
+    # Check if the trade setup has already been completed or played out by the time
+    # we first process/detect it. This prevents creating pending positions for
+    # retroactive retrospective/autopsy posts where price has already hit TP or SL.
+    if entry_price is not None and entry_price > 0:
+        try:
+            probe = await _ccxt_live_price(instrument_symbol, instrument_exchange or "bybit")
+            if probe is not None:
+                live_px, _, _ = probe
+                if direction == "long":
+                    if stop_loss is not None and float(stop_loss) > 0 and live_px <= float(stop_loss):
+                        logger.warning(
+                            "Already-In-Play Guard reject tracked_position: LONG already stopped out "
+                            "(Symbol=%s, Live=%.6f, Entry=%.6f, SL=%.6f) news_item_id=%s",
+                            instrument_symbol, live_px, entry_price, float(stop_loss), news_item_id,
+                        )
+                        return None
+                    if take_profit_1 is not None and float(take_profit_1) > 0 and live_px >= float(take_profit_1):
+                        logger.warning(
+                            "Already-In-Play Guard reject tracked_position: LONG already hit TP1 "
+                            "(Symbol=%s, Live=%.6f, Entry=%.6f, TP1=%.6f) news_item_id=%s",
+                            instrument_symbol, live_px, entry_price, float(take_profit_1), news_item_id,
+                        )
+                        return None
+                elif direction == "short":
+                    if stop_loss is not None and float(stop_loss) > 0 and live_px >= float(stop_loss):
+                        logger.warning(
+                            "Already-In-Play Guard reject tracked_position: SHORT already stopped out "
+                            "(Symbol=%s, Live=%.6f, Entry=%.6f, SL=%.6f) news_item_id=%s",
+                            instrument_symbol, live_px, entry_price, float(stop_loss), news_item_id,
+                        )
+                        return None
+                    if take_profit_1 is not None and float(take_profit_1) > 0 and live_px <= float(take_profit_1):
+                        logger.warning(
+                            "Already-In-Play Guard reject tracked_position: SHORT already hit TP1 "
+                            "(Symbol=%s, Live=%.6f, Entry=%.6f, TP1=%.6f) news_item_id=%s",
+                            instrument_symbol, live_px, entry_price, float(take_profit_1), news_item_id,
+                        )
+                        return None
+        except Exception as exc:
+            logger.warning("Already-In-Play Guard price lookup failed: %s", exc)
+
+    # Phase 8 — cross-actor dedup: if a pending position already exists on
+    # the same symbol+direction within ±1% entry price in the last 24h,
+    # update the existing row instead of creating a duplicate.
+    if entry_price is not None and entry_price > 0:
+        try:
+            existing = await shared_pool.fetch_one(
+                """
+                SELECT id, entry_price
+                FROM public.tracked_positions
+                WHERE status = 'pending'
+                  AND instrument_symbol = $1
+                  AND direction = $2
+                  AND ABS((entry_price - $3) / entry_price) <= 0.01
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                instrument_symbol, direction, entry_price,
+            )
+        except Exception:
+            existing = None  # defensive — never block a signal on dedup query failure
+
+        if existing is not None:
+            await shared_pool.execute(
+                """
+                UPDATE public.tracked_positions
+                SET entry_price = $1,
+                    entry_reason_trader = COALESCE($2, entry_reason_trader),
+                    entry_reason_llm = COALESCE($3, entry_reason_llm),
+                    raw_signal_text = CASE WHEN $4 != '' THEN $4 ELSE raw_signal_text END,
+                    deduped_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = $5
+                """,
+                entry_price,
+                entry_reason_trader,
+                entry_reason_llm,
+                (raw_signal_text or ""),
+                existing["id"],
+            )
+            logger.info(
+                "Dedup: updated existing pending position %s "
+                "(symbol=%s dir=%s entry=%.4f) instead of creating "
+                "duplicate from news_item_id=%s",
+                existing["id"], instrument_symbol, direction, entry_price, news_item_id,
+            )
+            return int(existing["id"])
+
     row = await shared_pool.fetch_one(
         """
         INSERT INTO public.tracked_positions (
@@ -1710,7 +2436,7 @@ async def create_tracked_position_from_interpretation(
             direction, entry_price, stop_loss, take_profit_1,
             detection_method, detection_confidence,
             raw_signal_text, signal_timestamp,
-            status, company_id,
+            status, status_reason, company_id,
             entry_reason_trader, entry_reason_llm, entry_reason_agent,
             entry_reason_frozen_at, reason_agreement_score,
             entry_reason_trader_embedding,
@@ -1719,6 +2445,7 @@ async def create_tracked_position_from_interpretation(
             trade_type, timeframe,
             take_profit_2, take_profit_3,
             take_profit_4, take_profit_5, take_profit_6,
+            entry_price_source,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3,
@@ -1728,16 +2455,17 @@ async def create_tracked_position_from_interpretation(
             $8, $9, $10, $11,
             $12, $13,
             $14, $15,
-            $16, $17,
-            $18, $19, $20,
-            $21, $22,
-            $23::vector(384),
-            $24,
-            $25, $26, $27,
-            $28, $29,
-            $30, $31,
-            $32, $33, $34,
-            $35, $35
+            $16, $17, $18,
+            $19, $20, $21,
+            $22, $23,
+            $24::vector(384),
+            $25,
+            $26, $27, $28,
+            $29, $30,
+            $31, $32,
+            $33, $34, $35,
+            $36,
+            $37, $37
         )
         ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction)
         DO NOTHING
@@ -1759,14 +2487,15 @@ async def create_tracked_position_from_interpretation(
             round(detection_confidence, 4),
             raw_signal_text[:2000] if raw_signal_text else "",
             now,
-            "open",
+            "pending",
+            "awaiting_entry",
             company_id,
             entry_reason_trader[:2000] if entry_reason_trader else None,
             entry_reason_llm[:2000] if entry_reason_llm else None,
             entry_reason_agent[:2000] if entry_reason_agent else None,
             now,
             round(reason_agreement, 4) if reason_agreement is not None else None,
-            trader_embed,
+            trader_embed_literal,
             correlation_id or None,
             signal_source,
             actor_type,
@@ -1778,6 +2507,7 @@ async def create_tracked_position_from_interpretation(
             take_profit_4,
             take_profit_5,
             take_profit_6,
+            entry_price_source,
             now,
         ),
     )
@@ -1868,6 +2598,78 @@ async def broadcast_insight(
 
 
 # ---------------------------------------------------------------------------
+# Surrounding Context Extractor
+# ---------------------------------------------------------------------------
+def _format_context_window(context_window_raw: Any, target_author: str) -> str:
+    """Format the context window messages from the same author chronologically."""
+    if not context_window_raw:
+        return ""
+    
+    try:
+        if isinstance(context_window_raw, str):
+            try:
+                context_window = json.loads(context_window_raw)
+            except Exception:
+                return ""
+        else:
+            context_window = context_window_raw
+                
+        if not isinstance(context_window, dict):
+            return ""
+            
+        before_msgs = context_window.get("before")
+        after_msgs = context_window.get("after")
+        
+        if not isinstance(before_msgs, list):
+            before_msgs = []
+        if not isinstance(after_msgs, list):
+            after_msgs = []
+        
+        all_msgs = []
+        
+        def is_same_author(msg_author: Any) -> bool:
+            if not msg_author or not target_author:
+                return False
+            ma = str(msg_author).lower().strip()
+            ta = str(target_author).lower().strip()
+            return ma == ta
+        
+        # Add before messages
+        for msg in before_msgs:
+            if isinstance(msg, dict) and is_same_author(msg.get("author")):
+                all_msgs.append(msg)
+                
+        # Add after messages
+        for msg in after_msgs:
+            if isinstance(msg, dict) and is_same_author(msg.get("author")):
+                all_msgs.append(msg)
+                
+        if not all_msgs:
+            return ""
+            
+        lines = ["--- Surrounding Context Messages ---"]
+        for m in all_msgs:
+            if not isinstance(m, dict):
+                continue
+            ts_val = m.get("timestamp")
+            ts = str(ts_val) if ts_val is not None else "unknown"
+            if isinstance(ts_val, str) and "T" in ts_val:
+                try:
+                    dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+                    ts = dt.strftime("%H:%M:%S")
+                except Exception:
+                    pass
+            author_display = str(m.get("author", "trader"))
+            text_display = str(m.get("text", ""))
+            lines.append(f"[{ts}] {author_display}: {text_display}")
+        lines.append("----------------------------------")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Failed to format context window safely: %s", exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Main Worker
 # ---------------------------------------------------------------------------
 class InterpretationService:
@@ -1889,6 +2691,30 @@ class InterpretationService:
         media_row: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Process a single media item: resolve context, run dual-track, write results.
+
+        Returns a status dict for logging/metrics.
+        """
+        from typing import List, Optional
+        tmp_holder: List[Optional[str]] = [None]
+        try:
+            return await self._process_one_impl(media_row, tmp_holder)
+        finally:
+            if tmp_holder[0]:
+                try:
+                    from pathlib import Path
+                    p = Path(tmp_holder[0])
+                    if p.exists() and p.is_file():
+                        p.unlink()
+                        logger.debug("Successfully cleaned up downloaded CDN temp file: %s", tmp_holder[0])
+                except Exception as exc:
+                    logger.warning("Failed to delete temp file %s: %s", tmp_holder[0], exc)
+
+    async def _process_one_impl(
+        self,
+        media_row: Dict[str, Any],
+        tmp_holder: List[Optional[str]],
+    ) -> Dict[str, Any]:
+        """Process a single media item implementation: resolve context, run dual-track, write results.
 
         Returns a status dict for logging/metrics.
         """
@@ -1964,6 +2790,7 @@ class InterpretationService:
                                 import os
                                 suffix = ".png" if ".png" in source_url else ".jpg"
                                 fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+                                tmp_holder[0] = tmp_path
                                 try:
                                     os.write(fd, await resp.read())
                                     local_path = tmp_path
@@ -2058,6 +2885,10 @@ class InterpretationService:
 
         # --- LLM Track (with rate limiting) ---
         news_context = f"{headline}\n{content}"[:1000]
+        context_window_raw = media_row.get("context_window")
+        ctx_txt = _format_context_window(context_window_raw, author)
+        if ctx_txt:
+            news_context = f"{news_context}\n\n{ctx_txt}"
         # Phase J — pull chart_hacker's relevant past memories (best-effort,
         # never blocks). Provides self-recall + trader-specific observations.
         recall_context = await _recall_relevant_memories(
@@ -2094,15 +2925,49 @@ class InterpretationService:
                 "reason": str(exc),
             }
 
+        # --- Slice 4: prefilter rejection short-circuit ---
+        # `run_prefilter()` returns an LlmResult with direction='unclear' and
+        # reasoning prefixed 'pre-filter:' when the cheap classifier decides
+        # the image is commentary / meme / unclear. Previously this still
+        # flowed through the full consensus + signal_interpretation write,
+        # leaving media_items.processing_status at 'analyzed' and the queue
+        # view confusing ("why are these still here?"). We now mark the row
+        # 'skipped_not_chart' and return early — no expensive vision call,
+        # no signal row, terminal state.
+        if (
+            llm_result is not None
+            and llm_result.direction == "unclear"
+            and isinstance(llm_result.reasoning, str)
+            and llm_result.reasoning.startswith("pre-filter:")
+        ):
+            reason_snippet = llm_result.reasoning[:240]
+            logger.info(
+                "media_id=%s: prefilter rejected — marking skipped_not_chart "
+                "(reason=%s)",
+                media_id, reason_snippet,
+            )
+            await update_media_status(
+                shared_pool,
+                media_id,
+                "skipped_not_chart",
+                error=f"prefilter: not a chart — {reason_snippet}"[:500],
+            )
+            return {
+                "media_id": media_id,
+                "status": "skipped_not_chart",
+                "reason": reason_snippet,
+            }
+
         # --- Post-LLM instrument resolution ---
         # If the collector didn't provide an instrument, use what the LLM
         # identified from the chart image. This replaces the old F8 hard-fail.
         #
-        # TODO(dashboard-rebuild D2.4): the chart-vision prompt template
-        # (around line 656) skews toward crypto and tags ambiguous charts
-        # as BTC by default. The text-side fixes here cover headlines,
-        # but the LLM-vision branch still needs a prompt-bias pass.
-        # Re-tagging the existing 446 mistagged rows is out of scope.
+        # The vision prompt (shared/intelligence/prompts/chart_analysis.json)
+        # forbids guessing: when no ticker text is visible, the LLM must
+        # return "UNKNOWN", which is caught a few lines below and marks the
+        # media row as failed_unresolved_instrument. signal_interpretations
+        # rows produced from this branch are tagged instrument_resolved_from
+        # = 'inferred' so downstream consumers can apply lower trust.
         if symbol_from_llm and llm_result and llm_result.instrument:
             llm_instrument = llm_result.instrument.strip().upper()
             if llm_instrument and llm_instrument != "UNKNOWN":
@@ -2145,6 +3010,35 @@ class InterpretationService:
             freshness_threshold=self.cfg.freshness_threshold_s,
         )
 
+        # --- Stamp interpretation-time price into quant_indicators (Slice 2) ---
+        # `run_quant_track` already injects `current_price` and `price_source`
+        # for both the happy-path (last candle close) and the degraded CCXT
+        # fallback. We additionally stamp a wall-clock UTC timestamp so the
+        # drawer can compute drift between interp-time and live-now price
+        # without reaching back to the candles table.
+        try:
+            interp_indicators = dict(quant_result.indicators or {})
+            current_price = interp_indicators.get("current_price")
+            if current_price is not None:
+                interp_indicators["current_price_at_interp"] = float(current_price)
+                interp_indicators["interp_price_source"] = (
+                    interp_indicators.get("price_source") or "unknown"
+                )
+                interp_indicators["interp_price_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                quant_result = QuantResult(
+                    direction=quant_result.direction,
+                    confidence=quant_result.confidence,
+                    indicators=interp_indicators,
+                    cost_usd=quant_result.cost_usd,
+                )
+        except Exception as exc:
+            logger.debug(
+                "Slice 2 price-stamp non-fatal failure for media_id=%s: %s",
+                media_id, exc,
+            )
+
         # --- Consensus ---
         consensus = run_consensus(llm_result, quant_result)
 
@@ -2169,10 +3063,21 @@ class InterpretationService:
         market_data_at = datetime.now(timezone.utc)
 
         # --- Write signal_interpretation ---
-        # Phase 9: determine instrument_resolved_from based on news_item context_window
-        resolved_from = "message"
-        if news_item.get("context_window"):
+        # Determine instrument_resolved_from honestly based on where the symbol
+        # actually came from, so we can later filter / audit "vision-only" rows.
+        #   - "inferred"  → symbol came from the LLM reading the chart image
+        #                   (collector provided no instrument). These rows are
+        #                   inherently lower-trust because the model can guess.
+        #   - "context"   → symbol came from a context_window attached to the
+        #                   media row (e.g. surrounding messages or thread).
+        #   - "message"   → symbol came from the news_item message text /
+        #                   collector-extracted instruments JSONB.
+        if symbol_from_llm:
+            resolved_from = "inferred"
+        elif media_row.get("context_window"):
             resolved_from = "context"
+        else:
+            resolved_from = "message"
         sig_id = await write_signal_interpretation(
             shared_pool=shared_pool,
             news_item_id=news_item_id,
@@ -2213,17 +3118,14 @@ class InterpretationService:
                 direction = str(trade.get("direction", "")).lower().strip()
                 if direction not in ("long", "short"):
                     return  # neutral/unclear/missing → skip
-                entry_p = _parse_price_level(trade.get("entry"))
-                # Phase J — fall back to current market price when entry missing
-                if entry_p is None and symbol and direction:
-                    entry_p = await _lookup_current_price(
-                        shared_pool, symbol, exchange or "bybit"
-                    )
-                    if entry_p is not None:
-                        logger.info(
-                            "media_id=%s: %s entry filled from md.quote: %s @ %.6f",
-                            media_id, source, symbol, entry_p,
-                        )
+                # Resolve entry price via 4-tier pipeline (trader → LLM → live_price → last_candle)
+                entry_levels: Dict[str, Any] = {
+                    "trader_entry": trade.get("entry"),
+                    "llm_entry": None,
+                }
+                entry_p, entry_src = await _resolve_entry_price(
+                    shared_pool, entry_levels, symbol, exchange or "bybit",
+                )
                 try:
                     pid = await create_tracked_position_from_interpretation(
                         shared_pool=shared_pool,
@@ -2262,6 +3164,7 @@ class InterpretationService:
                         take_profit_4=_parse_price_level(trade.get("tp4")),
                         take_profit_5=_parse_price_level(trade.get("tp5")),
                         take_profit_6=_parse_price_level(trade.get("tp6")),
+                        entry_price_source=entry_src,
                     )
                     if pid:
                         positions_created.append(pid)
@@ -2305,6 +3208,13 @@ class InterpretationService:
             # format), preserve the previous single-write behaviour.
             if not positions_created and consensus.direction in ("long", "short"):
                 try:
+                    legacy_levels: Dict[str, Any] = {
+                        "trader_entry": llm_result.levels.get("entry") if llm_result.levels else None,
+                        "llm_entry": None,
+                    }
+                    legacy_entry_p, legacy_entry_src = await _resolve_entry_price(
+                        shared_pool, legacy_levels, symbol, exchange or "bybit",
+                    )
                     legacy_pid = await create_tracked_position_from_interpretation(
                         shared_pool=shared_pool,
                         signal_interpretation_id=sig_id,
@@ -2314,7 +3224,7 @@ class InterpretationService:
                         instrument_symbol=symbol,
                         instrument_exchange=exchange or "bybit",
                         direction=consensus.direction,
-                        entry_price=_parse_price_level(llm_result.levels.get("entry")) if llm_result.levels else None,
+                        entry_price=legacy_entry_p,
                         stop_loss=_parse_price_level(llm_result.levels.get("stop_loss")) if llm_result.levels else None,
                         take_profit_1=_parse_price_level(llm_result.levels.get("take_profit")) if llm_result.levels else None,
                         detection_method=consensus.method,
@@ -2328,6 +3238,7 @@ class InterpretationService:
                         actor_type="trader_human",
                         actor_id=f"{company}_trader_{trader_profile_id}",
                         timeframe=llm_result.timeframe or None,
+                        entry_price_source=legacy_entry_src,
                     )
                     if legacy_pid:
                         positions_created.append(legacy_pid)
@@ -2430,6 +3341,15 @@ class InterpretationService:
         if not symbol:
             symbol = signal.get("symbol", "UNKNOWN")
 
+        # Validate symbol exists in our instruments catalog
+        if not await is_valid_db_instrument(shared_pool, symbol):
+            logger.warning(
+                "news_item_id=%s: text-extracted symbol %r is not a valid instrument. skipping.",
+                news_item_id,
+                symbol,
+            )
+            return {"news_item_id": news_item_id, "status": "skipped_unresolved_instrument"}
+
         # Resolve trader profile
         platform = "discord"
         trader_profile_id = await get_or_create_trader_profile(
@@ -2453,6 +3373,44 @@ class InterpretationService:
                 news_item_id,
                 dup_id,
             )
+            # Write a placeholder signal_interpretation so it doesn't get picked up again
+            try:
+                text_consensus = ConsensusResult(
+                    direction=signal["direction"],
+                    confidence=signal.get("confidence", 0.5),
+                    method="text_dedup_continuation",
+                    llm_result=None,
+                    quant_result=None,
+                )
+                param_hash = _param_hash(
+                    model="text_extractor",
+                    primary_model="regex+llm",
+                    fallback_model="dedup",
+                    freshness_threshold=self.cfg.freshness_threshold_s,
+                    max_age_hours=self.cfg.max_age_hours,
+                )
+                await write_signal_interpretation(
+                    shared_pool=shared_pool,
+                    news_item_id=news_item_id,
+                    media_item_id=None,
+                    trader_profile_id=trader_profile_id,
+                    consensus=text_consensus,
+                    param_hash=param_hash,
+                    candle_data_hash="n/a",
+                    instrument_symbol=symbol,
+                    exchange=exchange,
+                    market_data_fresh=False,
+                    market_data_at=datetime.now(timezone.utc),
+                    instrument_resolved_from="message",
+                )
+            except Exception as e:
+                logger.warning("Failed to write duplicate placeholder interpretation for news_item_id=%s: %s", news_item_id, e)
+                return {
+                    "news_item_id": news_item_id,
+                    "status": "failed",
+                    "reason": f"Failed to write duplicate placeholder: {e}",
+                }
+
             return {
                 "news_item_id": news_item_id,
                 "status": "analyzed",
@@ -2482,7 +3440,7 @@ class InterpretationService:
         )
         # Phase 9: text-only signals resolve from message text
         text_resolved_from = "message"
-        if news_item.get("context_window"):
+        if news_row.get("context_window"):
             text_resolved_from = "context"
         sig_id = await write_signal_interpretation(
             shared_pool=shared_pool,
@@ -2502,16 +3460,24 @@ class InterpretationService:
         # --- Wire to tracked_positions ---
         if sig_id is not None:
             try:
+                text_symbol = symbol or signal.get("symbol", "UNKNOWN")
+                text_levels: Dict[str, Any] = {
+                    "trader_entry": signal.get("entry"),
+                    "llm_entry": None,
+                }
+                text_entry_p, text_entry_src = await _resolve_entry_price(
+                    shared_pool, text_levels, text_symbol or "", exchange or "bybit",
+                )
                 await create_tracked_position_from_interpretation(
                     shared_pool=shared_pool,
                     signal_interpretation_id=sig_id,
                     news_item_id=news_item_id,
                     media_item_id=None,
                     trader_profile_id=trader_profile_id,
-                    instrument_symbol=symbol or signal.get("symbol", "UNKNOWN"),
+                    instrument_symbol=text_symbol,
                     instrument_exchange=exchange or "bybit",
                     direction=signal["direction"],
-                    entry_price=_parse_price_level(signal.get("entry")),
+                    entry_price=text_entry_p,
                     stop_loss=_parse_price_level(signal.get("stop_loss")),
                     take_profit_1=_parse_price_level((signal.get("take_profits") or [None])[0]),
                     detection_method="text_extraction",
@@ -2519,6 +3485,7 @@ class InterpretationService:
                     raw_signal_text=content[:2000],
                     company_id=company,
                     entry_reason_trader=content[:2000] if content else None,
+                    entry_price_source=text_entry_src,
                 )
             except Exception as exc:
                 logger.warning("Failed to create tracked_position for text sig_id=%s: %s", sig_id, exc)
@@ -2548,6 +3515,42 @@ class InterpretationService:
         in parallel tracks.
         """
         shared_pool = await self._ensure_pool()
+
+        # ── Slice 4: Feed hygiene ─────────────────────────────────────
+        # Sweep non-image media and stale text-only news BEFORE fetching the
+        # next batch so the queue view reflects reality. Failures here must
+        # never block a cycle — they're best-effort housekeeping.
+        unsupported_media_swept = 0
+        stale_news_drained = 0
+        local_media_cleaned = 0
+        try:
+            unsupported_media_swept = await cleanup_unsupported_media(
+                shared_pool,
+                max_age_hours=self.cfg.max_age_hours,
+            )
+        except Exception as exc:
+            logger.warning("cleanup_unsupported_media failed: %s", exc)
+        try:
+            stale_news_drained = await cleanup_stale_pending_news(
+                shared_pool,
+                stale_after_hours=6.0,
+            )
+        except Exception as exc:
+            logger.warning("cleanup_stale_pending_news failed: %s", exc)
+        try:
+            local_media_cleaned = await cleanup_expired_local_media(
+                shared_pool,
+                retention_days=self.cfg.media_retention_days,
+            )
+        except Exception as exc:
+            logger.warning("cleanup_expired_local_media failed: %s", exc)
+        if unsupported_media_swept or stale_news_drained or local_media_cleaned:
+            logger.info(
+                "Feed hygiene: unsupported_media_swept=%d stale_news_drained=%d local_media_cleaned=%d",
+                unsupported_media_swept,
+                stale_news_drained,
+                local_media_cleaned,
+            )
 
         # ── Media track ───────────────────────────────────────────────
         media_rows = await fetch_pending_media(
@@ -2605,24 +3608,34 @@ class InterpretationService:
 
         analyzed_media = sum(1 for r in media_results if r.get("status") == "analyzed")
         skipped_media = sum(1 for r in media_results if r.get("status") == "skipped_vision_unavailable")
+        skipped_not_chart = sum(1 for r in media_results if r.get("status") == "skipped_not_chart")
         failed_media = sum(1 for r in media_results if r.get("status") == "failed")
         analyzed_text = sum(1 for r in text_results if r.get("status") == "analyzed")
+        failed_text = sum(1 for r in text_results if r.get("status") == "failed")
 
         logger.info(
-            "Interpretation cycle complete: media(analyzed=%d skipped=%d failed=%d) "
-            "text(analyzed=%d failed=%d)",
+            "Interpretation cycle complete: media(analyzed=%d skipped_vision=%d "
+            "skipped_not_chart=%d failed=%d) text(analyzed=%d failed=%d) "
+            "hygiene(unsupported=%d stale_news=%d)",
             analyzed_media,
             skipped_media,
+            skipped_not_chart,
             failed_media,
             analyzed_text,
-            sum(1 for r in text_results if r.get("status") == "failed"),
+            failed_text,
+            unsupported_media_swept,
+            stale_news_drained,
         )
         return {
             "processed": len(media_results) + len(text_results),
             "analyzed_media": analyzed_media,
             "skipped_media": skipped_media,
+            "skipped_not_chart": skipped_not_chart,
             "failed_media": failed_media,
             "analyzed_text": analyzed_text,
+            "failed_text": failed_text,
+            "unsupported_media_swept": unsupported_media_swept,
+            "stale_news_drained": stale_news_drained,
             "results": media_results + text_results,
         }
 
@@ -2637,7 +3650,7 @@ class InterpretationService:
         sql = (
             "SELECT "
             "  n.id, n.headline, n.content, n.author, n.source_id, "
-            "  n.instruments, n.collected_at "
+            "  n.instruments, n.collected_at, n.context_window "
             "FROM public.news_items n "
             "LEFT JOIN public.media_items m ON m.news_item_id = n.id "
             "WHERE m.id IS NULL "

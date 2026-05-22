@@ -29,6 +29,11 @@ from typing import Dict, List, Optional, Tuple
 sys.path.append("/opt/tickles")
 from shared.utils.freshness import validate_freshness, StaleDataError
 from shared.utils.mem0_config import ScopedMemory
+from shared.intelligence.surgeon_position_bridge import (
+    SOURCE_SURGEON_V1,
+    bridge_surgeon_position_close_sync,
+    bridge_surgeon_position_open_sync,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s surgeon %(message)s")
 LOG = logging.getLogger("surgeon.trader")
@@ -277,6 +282,35 @@ def open_position(state: State, asset_sym: str, price: float, side: str,
         reason=reason,
     )
     state.positions.append(pos)
+
+    # Forward-bridge to shared tracked_positions ledger (best-effort, non-blocking).
+    try:
+        bridge_surgeon_position_open_sync(
+            company_id=DEFAULT_COMPANY,
+            source=SOURCE_SURGEON_V1,
+            actor_id=DEFAULT_AGENT_ID,
+            symbol=asset_sym,
+            side=side,
+            entry_price=entry,
+            entry_ts=ts,
+            notional_usd=notional,
+            leverage=float(leverage),
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            reason=reason,
+            confidence=0.7 if tier in ("HIGH", "MAX") else 0.5,
+            extra_metadata={
+                "tier": tier,
+                "trade_id": state.trade_counter,
+                "divergence_at_entry": div,
+                "funding_at_entry": funding,
+            },
+        )
+    except Exception as exc:
+        LOG.warning("bridge_open failed (non-fatal): %s", exc)
+
     return pos
 
 
@@ -305,6 +339,23 @@ def close_partial(state: State, pos: Position, price: float, frac: float, reason
         "cumulative_net_pnl": round(state.realized_pnl, 4),
     }
     state.closed_trades.append(closed_entry)
+
+    # Forward-bridge to shared tracked_positions ledger when fully closed.
+    if pos.remaining_frac <= 0:
+        try:
+            bridge_surgeon_position_close_sync(
+                company_id=DEFAULT_COMPANY,
+                source=SOURCE_SURGEON_V1,
+                actor_id=DEFAULT_AGENT_ID,
+                symbol=pos.symbol,
+                side=pos.side,
+                exit_price=exit_px,
+                exit_ts=closed_entry["ts"],
+                realized_pnl_usd=net,
+                exit_reason=reason,
+            )
+        except Exception as exc:
+            LOG.warning("bridge_close failed (non-fatal): %s", exc)
 
     # --- Learning Loop: Post-Trade Autopsy ---
     if memory and pos.remaining_frac <= 0:
@@ -651,7 +702,7 @@ def format_open_entry(pos: Position) -> str:
 def main() -> None:
     """CLI entry point for the surgeon paper trader."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", default="/root/.openclaw/workspace/rubicon_surgeon")
+    parser.add_argument("--workspace", default="/var/lib/tickles/surgeon_workspace")
     parser.add_argument("--interval", type=int, default=900, help="seconds between cycles (default 15 min)")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
     parser.add_argument("--dry", action="store_true")

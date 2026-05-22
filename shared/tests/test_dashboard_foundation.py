@@ -56,12 +56,18 @@ async def test_aggregate_open_positions_shared_ledger():
     acquire_ctx.__aexit__ = AsyncMock(return_value=None)
     mock_pool.acquire = MagicMock(return_value=acquire_ctx)
 
-    mock_conn.fetch = AsyncMock(
-        return_value=[
+    # Return different results for the 3 queries:
+    # 1) positions_current -> empty (no live exchange data in test)
+    # 2) tracked_positions open -> 2 rows
+    # 3) tracked_positions closed -> empty (no recently-closed in test)
+    mock_conn.fetch = AsyncMock(side_effect=[
+        [],  # positions_current
+        [
             {"id": 1, "status": "open", "company_id": "rubicon"},
             {"id": 2, "status": "open", "company_id": "testco"},
-        ]
-    )
+        ],  # tracked_positions open
+        [],  # tracked_positions closed
+    ])
 
     with patch(
         "shared.utils.db.get_shared_pool", new_callable=AsyncMock

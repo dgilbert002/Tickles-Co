@@ -269,9 +269,10 @@ def test_snapshot_builder_returns_dict_with_notes():
         builder = SnapshotBuilder(providers=providers)
         snap = await builder.build()
         data = snapshot_to_dict(snap)
-        assert data["services_total"] > 0
+        assert data["services_total_count"] > 0
         assert data["submissions_active"] == 2
-        assert "intents: provider not wired" in data["notes"]
+        # New API: providers that are None silently return without adding notes.
+        assert "intents: provider not wired" not in data["notes"]
     asyncio.run(_run())
 
 
@@ -317,7 +318,7 @@ def test_http_otp_flow_and_snapshot():
             )
             assert r3.status == 200
             snap = await r3.json()
-            assert snap["services_total"] > 0
+            assert snap["services_total_count"] > 0
 
             r4 = await client.get("/api/snapshot")
             assert r4.status == 401

@@ -3,420 +3,91 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Tickles Intelligence Dashboard</title>
+  <title>Tickles Trading Floor</title>
   <script>
-    // Dynamic base tag to handle prefixes like /dashboard/
     const base = document.createElement('base');
     base.href = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
     document.head.appendChild(base);
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="static/echarts.min.js"></script>
   <link rel="stylesheet" href="static/app.css">
-  <style>
-    /* Inline fallback styles */
-    body { background: #0b0f14; color: #e6edf3; font-family: sans-serif; margin: 0; padding: 20px; }
-    .hidden { display: none !important; }
-    .card { background: #12181f; border: 1px solid #30363d; border-radius: 10px; padding: 20px; max-width: 400px; margin: 40px auto; }
-    .btn { background: #3fb950; color: #0b0f14; border: 0; border-radius: 6px; padding: 10px 20px; font-weight: 600; cursor: pointer; width: 100%; }
-    .input { background: #1a2029; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 10px; width: 100%; margin-bottom: 10px; box-sizing: border-box; }
-  </style>
 </head>
 <body>
-
-<header>
-  <h1>Tickles Intelligence</h1>
-  <div class="row">
-    <select id="company-filter" class="input" style="padding: 4px 8px; font-size: 12px;">
-        <option value="all">All Companies</option>
-        <option value="rubicon">Rubicon</option>
-    </select>
-    <button class="btn secondary" id="logout" style="padding: 4px 12px; font-size: 12px;">Log out</button>
-  </div>
-</header>
-
-<div id="login" class="hidden">
-    <div class="card">
-        <h2>Tickles Intelligence</h2>
-        <div id="otpStage" class="hidden">
-            <input type="text" id="otpCode" class="input" placeholder="Enter OTP">
-            <button id="verifyOtp" class="btn">Verify</button>
-        </div>
-        <div id="requestStage">
-            <input type="text" id="chatId" class="input" placeholder="Telegram Chat ID">
-            <button id="requestOtp" class="btn">Send Code</button>
-        </div>
-        <button id="skipLogin" class="btn secondary" style="margin-top: 10px;">Skip (Dev)</button>
-    </div>
-</div>
-
-<div id="app">
-    <nav>
-        <a data-tab="overview" class="active">Overview</a>
-        <a data-tab="leaderboard">Leaderboard</a>
-        <a data-tab="signals">Signals</a>
-        <a data-tab="positions">Positions</a>
-        <a data-tab="interpretations">Interpretations</a>
-        <a data-tab="queue">Live Queue</a>
-        <a data-tab="learning">Learning</a>
-        <a data-tab="news">News</a>
-        <a data-tab="config">Config</a>
-        <a data-tab="trader-drill" class="hidden">Trader Drill</a>
+<div id="app" class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">T</div><div><strong>Tickles</strong><span>Trading intelligence</span></div></div>
+    <nav class="nav">
+      <button class="nav-link active" data-tab="floor"><span>⌁</span>Trading Floor</button>
+      <button class="nav-link" data-tab="radar"><span>◎</span>Entry Radar</button>
+      <button class="nav-link" data-tab="competition"><span>♛</span>Competition</button>
+      <button class="nav-link" data-tab="signals"><span>↯</span>Signals Watch</button>
+      <button class="nav-link" data-tab="positions"><span>◆</span>Positions</button>
+      <button class="nav-link" data-tab="traders"><span>@</span>Trader Intel</button>
+      <button class="nav-link" data-tab="news"><span>☰</span>Discord Feed</button>
+      <button class="nav-link" data-tab="learning"><span>✦</span>AI Learning</button>
+      <button class="nav-link" data-tab="ops"><span>$</span>Ops & Cost</button>
     </nav>
+    <div class="side-status"><i></i><span id="status-text">connecting</span></div>
+  </aside>
 
-    <div class="stats-strip">
-        <div class="stat-item">
-            <span class="stat-label">Signals Today</span>
-            <span class="stat-value" id="stat-signals">0</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">API Cost</span>
-            <span class="stat-value" id="stat-cost">$0.00</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">Open Positions</span>
-            <span class="stat-value" id="stat-pos">0</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">Unrealized PnL</span>
-            <span class="stat-value" id="stat-pnl">$0.00</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">Ingest Depth</span>
-            <span class="stat-value" id="stat-ingest">0</span>
-        </div>
-    </div>
-
-    <main>
-        <!-- Overview Tab -->
-        <div id="tab-overview" class="tab-content active">
-            <div class="grid">
-                <div class="card">
-                    <h2>System Health</h2>
-                    <table>
-                        <thead>
-                            <tr><th>Service</th><th>Kind</th><th>Phase</th><th>Status</th><th>Last Seen</th></tr>
-                        </thead>
-                        <tbody id="svc-list"></tbody>
-                    </table>
-                </div>
-                <div class="card">
-                    <h2>Quick Stats</h2>
-                    <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 12px;">
-                        <div class="row" style="justify-content: space-between;">
-                            <span class="muted">Trader Positions</span>
-                            <span id="stat-trader-pos">0</span>
-                        </div>
-                        <div class="row" style="justify-content: space-between;">
-                            <span class="muted">Agent Positions</span>
-                            <span id="stat-agent-pos">0</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Leaderboard Tab -->
-        <div id="tab-leaderboard" class="tab-content">
-            <div class="card">
-                <h2>Actor Leaderboard</h2>
-                <div class="scroll">
-                    <table>
-                        <thead>
-                            <tr><th>Rank</th><th>Actor</th><th>Type</th><th>Edge Score</th><th>Closed</th></tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-
-        <!-- Signals Tab -->
-        <div id="tab-signals" class="tab-content">
-            <div class="grid"></div>
-        </div>
-
-        <!-- Positions Tab -->
-        <div id="tab-positions" class="tab-content">
-            <div class="grid"></div>
-        </div>
-
-        <!-- Interpretations Tab -->
-        <div id="tab-interpretations" class="tab-content">
-            <div class="grid"></div>
-        </div>
-
-        <!-- Queue Tab -->
-        <div id="tab-queue" class="tab-content">
-            <div class="grid">
-                <div class="card">
-                    <h2>Pending News</h2>
-                    <div class="scroll">
-                        <table id="queue-news-table">
-                            <thead>
-                                <tr><th>Source</th><th>Headline</th><th>Status</th><th>Collected</th></tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-                <div class="card">
-                    <h2>Pending Media</h2>
-                    <div class="scroll">
-                        <table id="queue-media-table">
-                            <thead>
-                                <tr><th>Type</th><th>Status</th><th>Created</th></tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-            <div class="card" style="margin-top: 20px;">
-                <h2>Active Positions</h2>
-                <div class="scroll">
-                    <table id="queue-pos-table">
-                        <thead>
-                            <tr><th>Symbol</th><th>Side</th><th>Actor</th><th>Company</th><th>Signal At</th></tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-
-        <!-- Learning Tab (Phase Y) -->
-        <div id="tab-learning" class="tab-content">
-            <!-- Header strip: skill score sparkline + failed-trade badge + window selector -->
-            <div class="card" style="margin-bottom: 16px;">
-                <h2>
-                    <span>Skill vs Luck — Headline</span>
-                    <span class="window-tabs" id="learning-window-tabs">
-                        <a data-window="7d" class="window-tab">7D</a>
-                        <a data-window="14d" class="window-tab">14D</a>
-                        <a data-window="1m" class="window-tab active">1M</a>
-                    </span>
-                </h2>
-                <div id="learning-header-strip">
-                    <div class="muted">Loading…</div>
-                </div>
-            </div>
-
-            <div class="grid">
-                <!-- Memory Feed (D2) -->
-                <div class="card">
-                    <h2>
-                        <span>Memory Feed</span>
-                        <span class="row" style="gap: 8px;">
-                            <select id="learning-feed-dim" class="input"
-                                    style="padding: 2px 6px; font-size: 11px;">
-                                <option value="">All dimensions</option>
-                                <option value="setup">Setup</option>
-                                <option value="regime">Regime</option>
-                                <option value="symbol">Symbol</option>
-                                <option value="actor">Actor</option>
-                            </select>
-                        </span>
-                    </h2>
-                    <div class="scroll" style="max-height: 480px;">
-                        <table id="learning-feed-table">
-                            <thead>
-                                <tr>
-                                    <th>When</th>
-                                    <th>Kind</th>
-                                    <th>Dimension</th>
-                                    <th>Outcome</th>
-                                    <th>Source</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Agent Brain Cards (D3) -->
-                <div class="card">
-                    <h2>
-                        <span>Agent Brain</span>
-                        <span class="muted" style="font-size: 11px;">Wins / breakeven / losses per actor</span>
-                    </h2>
-                    <div id="learning-brain-cards">
-                        <div class="muted">Loading…</div>
-                    </div>
-                </div>
-
-                <!-- Guard Activity sidebar (Y.5 / PHASE_Y §9.2) -->
-                <div class="card">
-                    <h2>
-                        <span>Guard Activity</span>
-                        <span class="muted" style="font-size: 11px;">System self-validation warnings</span>
-                    </h2>
-                    <div id="learning-guard-list">
-                        <div class="muted">Loading…</div>
-                    </div>
-                </div>
-
-                <!-- Prompt Evolution timeline (Y.5 / PHASE_Y §12 item 6) -->
-                <div class="card">
-                    <h2>
-                        <span>Prompt Evolution</span>
-                        <span class="muted" style="font-size: 11px;">Coach-promoted variants</span>
-                    </h2>
-                    <div class="scroll" style="max-height: 320px;">
-                        <div id="learning-prompt-timeline">
-                            <div class="muted">Loading…</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Phase X.4 — News Feed Tab -->
-        <div id="tab-news" class="tab-content">
-            <div class="card" style="margin-bottom: 16px;">
-                <h2>
-                    News Feed
-                    <span class="window-tabs" id="news-window-tabs">
-                        <a class="window-tab" data-window="24h">24h</a>
-                        <a class="window-tab" data-window="7d">7d</a>
-                        <a class="window-tab" data-window="30d">30d</a>
-                    </span>
-                </h2>
-                <div class="row" style="gap: 12px; flex-wrap: wrap; align-items: center;">
-                    <label class="muted" style="font-size: 12px;">Source
-                        <select id="news-source-filter" class="input" style="margin-left: 6px;">
-                            <option value="">All sources</option>
-                            <option value="discord">Discord</option>
-                            <option value="telegram">Telegram</option>
-                            <option value="twitter">Twitter</option>
-                            <option value="rss">RSS</option>
-                            <option value="web">Web</option>
-                            <option value="manual">Manual</option>
-                        </select>
-                    </label>
-                    <label class="muted" style="font-size: 12px;">Media
-                        <select id="news-media-filter" class="input" style="margin-left: 6px;">
-                            <option value="">Any</option>
-                            <option value="true">With media</option>
-                            <option value="false">Text only</option>
-                        </select>
-                    </label>
-                    <span class="muted" id="news-row-count" style="margin-left: auto; font-size: 12px;">—</span>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="scroll" style="max-height: 640px;">
-                    <table id="news-feed-table">
-                        <thead>
-                            <tr>
-                                <th>When</th>
-                                <th>Source</th>
-                                <th>Headline</th>
-                                <th>Instruments</th>
-                                <th>Sentiment</th>
-                                <th>Media</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td colspan="6" class="muted">Loading…</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-
-        <!-- Phase X.6 — Config Tab -->
-        <div id="tab-config" class="tab-content">
-            <div class="card" style="margin-bottom: 16px;">
-                <h2>
-                    Config
-                    <span class="muted" id="config-row-count" style="margin-left: auto; font-size: 12px; float: right;">—</span>
-                </h2>
-                <div class="row" style="gap: 12px; flex-wrap: wrap; align-items: center;">
-                    <label class="muted" style="font-size: 12px;">Search
-                        <input id="config-search" type="search" class="input" placeholder="key, value, namespace…" style="margin-left: 6px; min-width: 220px;" />
-                    </label>
-                    <label class="muted" style="font-size: 12px;">Show secrets
-                        <input id="config-show-secrets" type="checkbox" style="margin-left: 6px;" disabled title="Secrets are redacted server-side; this control is informational only." />
-                    </label>
-                </div>
-            </div>
-
-            <div class="card">
-                <h3>Shared (<code>system_config</code>)</h3>
-                <div id="config-shared-body" class="scroll" style="max-height: 480px;">
-                    <div class="muted" style="padding: 12px;">Loading…</div>
-                </div>
-            </div>
-
-            <div class="card" style="margin-top: 16px;">
-                <h3>Per-company (<code>company_config</code>)</h3>
-                <div id="config-companies-body" class="scroll" style="max-height: 480px;">
-                    <div class="muted" style="padding: 12px;">Loading…</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Trader Drill Tab -->
-        <div id="tab-trader-drill" class="tab-content">
-            <div class="card">
-                <h2 id="drill-name">Trader Profile</h2>
-                <div class="stats-strip" style="margin: 10px 0; background: none; padding: 0;">
-                    <div class="stat-item">
-                        <span class="stat-label">Platform</span>
-                        <span class="stat-value" id="drill-platform" style="font-size: 1.2em;">—</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">Handle</span>
-                        <span class="stat-value" id="drill-handle" style="font-size: 1.2em;">—</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="grid">
-                <div class="card">
-                    <h3>Performance History</h3>
-                    <div class="scroll">
-                        <table id="drill-perf-table">
-                            <thead>
-                                <tr><th>Period</th><th>Accuracy</th><th>Sharpe</th><th>Trades</th></tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-                <div class="card">
-                    <h3>Recent Trades</h3>
-                    <div class="scroll">
-                        <table id="drill-trades-table">
-                            <thead>
-                                <tr><th>Symbol</th><th>Side</th><th>PnL</th><th>Date</th></tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card" style="margin-top: 20px;">
-                <h3>Recent Signals</h3>
-                <div class="grid" id="drill-signals-grid"></div>
-            </div>
-        </div>
-    </main>
-</div>
-
-<!-- Phase X.5 — Cross-tab Interpretation Drawer -->
-<div id="interp-drawer-backdrop" class="interp-drawer-backdrop hidden" aria-hidden="true"></div>
-<aside id="interp-drawer" class="interp-drawer hidden" role="dialog" aria-modal="true" aria-labelledby="interp-drawer-title" tabindex="-1">
-    <header class="interp-drawer-header">
-        <h2 id="interp-drawer-title">Interpretation</h2>
-        <button id="interp-drawer-close" class="btn secondary" type="button" aria-label="Close drawer">✕</button>
+  <main class="main-content">
+    <header class="topbar">
+      <div><div id="eyebrow" class="eyebrow">TRADING COMPANY</div><h1 id="page-title">Trading Floor</h1></div>
+      <div class="top-controls">
+        <select id="company-filter" class="select"><option value="all">All companies</option><option value="rubicon">Rubicon</option></select>
+        <button id="refresh-btn" class="pill-btn">Refresh</button>
+        <span id="updated-at" class="updated">—</span>
+      </div>
     </header>
-    <div id="interp-drawer-body" class="interp-drawer-body">
-        <div class="muted" style="padding: 20px; text-align: center;">Loading…</div>
-    </div>
-</aside>
 
+    <section id="tab-floor" class="tab active">
+      <div class="stats-row">
+        <div class="stat"><label>Open P&L</label><strong id="stat-pnl">$0.00</strong><span id="stat-open-count">0 open positions</span></div>
+        <div class="stat"><label>Signals 24h</label><strong id="stat-signals">0</strong><span id="stat-ingest">0 ingest depth</span></div>
+        <div class="stat"><label>Best trader/agent</label><strong id="stat-top">—</strong><span id="stat-edge">edge —</span></div>
+        <div class="stat"><label>Cost today</label><strong id="stat-cost">$0.00</strong><span id="stat-budget">budget —</span></div>
+      </div>
+      <div class="floor-grid">
+        <section class="panel span-2"><div class="panel-head"><h2>Signals approaching entry</h2><div class="filters"><input id="floor-signal-filter" class="input" placeholder="filter symbol / trader"><button class="mini" data-open="signals">All signals</button></div></div><div id="floor-signals" class="table-wrap"></div></section>
+        <section class="panel"><div class="panel-head"><h2>Competition leaders</h2><button class="mini" data-open="competition">Open</button></div><div id="floor-competition"></div></section>
+        <section class="panel span-2"><div class="panel-head"><h2>Live positions</h2><div class="filters"><input id="floor-position-filter" class="input" placeholder="filter positions"><button class="mini" data-open="positions">All positions</button></div></div><div id="floor-positions" class="table-wrap"></div></section>
+        <section class="panel"><div class="panel-head"><h2>Latest Discord</h2><button class="mini" data-open="news">Feed</button></div><div id="floor-news" class="discord-list"></div></section>
+      </div>
+    </section>
+
+    <section id="tab-radar" class="tab">
+      <div class="panel full">
+        <div class="panel-head"><div><h2>Entry Radar</h2><p>Pending calls sorted by live distance to entry. Closest setup floats to the top.</p></div><div class="filters"><input id="radar-filter" class="input wide" placeholder="symbol / Discord user"><select id="radar-age" class="select small"><option value="">All ages</option><option value="2">≤2d</option><option value="7">≤7d</option><option value="14">≤14d</option></select></div></div>
+        <div id="entry-radar" class="radar-grid"></div>
+      </div>
+    </section>
+
+    <section id="tab-competition" class="tab"><div class="panel full"><div class="panel-head"><h2>Copy-trade competition</h2><p>Agents, strategy descriptions, equity, return, win rate and open risk.</p></div><div id="competition-body"></div></div></section>
+
+    <section id="tab-signals" class="tab"><div class="panel full"><div class="panel-head"><h2>Signals Watch</h2><div class="filters"><input id="signals-filter" class="input wide" placeholder="symbol / Discord user / status"><select id="signals-status" class="select small"><option value="">All status</option><option value="pending">Pending</option><option value="open">Open</option><option value="closed">Closed</option></select></div></div><div id="signals-table" class="table-wrap"></div></div></section>
+
+    <section id="tab-positions" class="tab"><div class="panel full"><div class="panel-head"><h2>Positions</h2><div class="filters"><input id="positions-filter" class="input wide" placeholder="symbol / trader / source"><select id="positions-status" class="select small"><option value="">All</option><option value="open" selected>Open</option><option value="pending">Pending</option><option value="closed">Closed</option></select></div></div><div id="positions-table" class="table-wrap"></div></div></section>
+
+    <section id="tab-traders" class="tab">
+      <div class="panel full"><div class="panel-head"><h2>Trader intelligence</h2><div class="filters"><input id="traders-filter" class="input wide" placeholder="Discord handle / actor"><select id="traders-sort" class="select small"><option value="success">Success</option><option value="trades">Trades</option><option value="pnl">P&L</option><option value="edge">Edge</option></select></div></div><div id="traders-table" class="table-wrap"></div></div>
+    </section>
+
+    <section id="tab-news" class="tab"><div class="panel full"><div class="panel-head"><h2>Discord message feed</h2><div class="filters"><input id="news-filter" class="input wide" placeholder="user / text / symbol"><select id="news-media" class="select small"><option value="">All</option><option value="media">Has charts</option></select></div></div><div id="news-list" class="discord-list"></div></div></section>
+
+    <section id="tab-learning" class="tab">
+      <div class="stats-row"><div class="stat"><label>Memory writes</label><strong id="learn-total">0</strong><span>30 day window</span></div><div class="stat"><label>Actors modelled</label><strong id="learn-actors">0</strong><span>skill summaries</span></div><div class="stat"><label>Active brains</label><strong id="learn-brains">0</strong><span>agent profiles</span></div><div class="stat"><label>Technique focus</label><strong id="learn-focus">—</strong><span>latest recurring theme</span></div></div>
+      <div class="floor-grid two"><section class="panel"><div class="panel-head"><h2>Recent lessons</h2></div><div id="learning-lessons" class="lesson-feed"></div></section><section class="panel"><div class="panel-head"><h2>Trader models</h2></div><div id="learning-models" class="table-wrap"></div></section></div>
+    </section>
+
+    <section id="tab-ops" class="tab"><div class="floor-grid two"><section class="panel"><div class="panel-head"><h2>Cost envelope</h2></div><div id="cost-chart" class="chart"></div></section><section class="panel"><div class="panel-head"><h2>Service health</h2></div><div id="services-grid" class="service-grid"></div></section></div></section>
+  </main>
+
+  <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
+  <aside id="drawer" class="drawer hidden"><div id="drawer-resizer" title="Drag to resize"></div><div class="drawer-head"><div><div id="drawer-kicker" class="eyebrow">DETAIL</div><h2 id="drawer-title">Signal intelligence</h2></div><button id="drawer-close" class="close">×</button></div><div id="drawer-body" class="drawer-body"></div></aside>
+</div>
 <script src="static/app.js"></script>
 </body>
 </html>

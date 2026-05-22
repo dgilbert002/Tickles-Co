@@ -1,0 +1,21 @@
+[Unit]
+Description=Tickles Price Feed Daemon (async CCXT Pro WebSocket market data)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/usr/bin/python3 /opt/tickles/shared/market_data/price_feed.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tickles/price_feed.log
+StandardError=append:/var/log/tickles/price_feed.log
+SyslogIdentifier=tickles-price-feed
+
+[Install]
+WantedBy=multi-user.target

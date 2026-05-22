@@ -33,15 +33,26 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from shared.dashboard.db_pools import get_company_pool
+from shared.dashboard.db_pools import (  # noqa: F401 — kept for clarity; overridden below
+    get_company_pool as _original_get_company_pool,
+)
 from shared.utils.companies import list_active_companies
 from shared.utils.db import get_shared_pool
+
+# The v_actor_skill_* and v_memory_feed_* views live in tickles_shared,
+# not per-company databases. Redirect all pool calls to shared.
+async def _get_shared_for_views(_company: str = ""):
+    """Return the shared pool (views live in tickles_shared, not per-company)."""
+    return await get_shared_pool()
+
+# Override the import so all existing get_company_pool() calls hit shared pool
+get_company_pool = _get_shared_for_views  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
 # 250ms hard budget per provider per PHASE_Y §4.3 ("each source must
 # complete in 250ms or its lane shows partial — N/M sources reported").
-PROVIDER_TIMEOUT_S: float = 0.25
+PROVIDER_TIMEOUT_S: float = 2.0  # was 0.25 — too tight for shared pool + view queries
 
 # Allowed window labels — internally always 7/14/30. The "1M" UI label
 # (per §11 Q3) is mapped at the API layer, NOT here. This keeps the
@@ -227,8 +238,24 @@ class SkillSummaryProvider:
 
         view = f"v_actor_skill_{window}d"
         sql = (
-            f"SELECT actor_id, company_id, skill_score, window_days "
-            f"FROM {view}"
+            f"SELECT v.actor_id, v.company_id, v.skill_score, v.window_days, "
+            f"  COALESCE(tc.n_trades, 0) AS trade_count, "
+            f"  COALESCE(tp.handle_normalized, "
+            f"    CASE WHEN v.actor_id LIKE 'jarvais_trader_%' "
+            f"      THEN REPLACE(v.actor_id, 'jarvais_trader_', 'trader_') "
+            f"      ELSE v.actor_id END"
+            f"  ) AS display_name "
+            f"FROM {view} v "
+            f"LEFT JOIN ("
+            f"  SELECT actor_id, company_id, COUNT(*) AS n_trades "
+            f"  FROM tracked_positions "
+            f"  WHERE closed_at IS NOT NULL "
+            f"    AND closed_at > now() - make_interval(days => {window}) "
+            f"    AND realized_pnl_usd_final IS NOT NULL "
+            f"  GROUP BY actor_id, company_id"
+            f") tc ON tc.actor_id = v.actor_id AND tc.company_id = v.company_id "
+            f"LEFT JOIN trader_profiles tp ON "
+            f"  'jarvais_trader_' || tp.id::text = v.actor_id"
         )
 
         async def _do_fetch() -> List[Dict[str, Any]]:
@@ -253,7 +280,10 @@ class SkillSummaryProvider:
                             "company": company,
                             "company_id": rec["company_id"],
                             "skill_score": float(score) if score is not None else None,
+                            "skill_pct": round(float(score) * 100, 1) if score is not None else None,
                             "window_days": int(rec["window_days"]),
+                            "trade_count": int(rec["trade_count"] or 0),
+                            "display_name": rec["display_name"] or rec["actor_id"],
                         }
                     )
             return rows
@@ -436,25 +466,22 @@ class AgentBrainProvider:
         # bucket sensibly via the $1 floor.
         sql = (
             "SELECT "
-            "  actor_instance_id AS actor_id, "
+            "  actor_id, "
             "  count(*) FILTER ( "
-            "    WHERE realized_pnl_usd_final "
-            "          > GREATEST(COALESCE(total_fees_usd, 0)::numeric, 1.00::numeric) "
+            "    WHERE realized_pnl_usd_final > 1.00 "
             "  ) AS wins, "
             "  count(*) FILTER ( "
-            "    WHERE realized_pnl_usd_final "
-            "          < -GREATEST(COALESCE(total_fees_usd, 0)::numeric, 1.00::numeric) "
+            "    WHERE realized_pnl_usd_final < -1.00 "
             "  ) AS losses, "
             "  count(*) FILTER ( "
-            "    WHERE abs(realized_pnl_usd_final) "
-            "          <= GREATEST(COALESCE(total_fees_usd, 0)::numeric, 1.00::numeric) "
+            "    WHERE abs(realized_pnl_usd_final) <= 1.00 "
             "  ) AS breakeven, "
             "  count(*) AS total "
             "FROM tracked_positions "
             "WHERE closed_at IS NOT NULL "
             "  AND realized_pnl_usd_final IS NOT NULL "
             "  AND closed_at >= now() - ($1::int * interval '1 day') "
-            "GROUP BY actor_instance_id"
+            "GROUP BY actor_id"
         )
 
         async def _do_fetch() -> List[Dict[str, Any]]:

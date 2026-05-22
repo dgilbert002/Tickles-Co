@@ -54,11 +54,9 @@
 
     if (opts.method && opts.method !== 'GET' && opts.method !== 'HEAD') {
       const csrf = getCsrfToken();
-      if (!csrf) {
-        showError('Missing CSRF token — please reload the page.');
-        throw new Error('no_csrf');
+      if (csrf) {
+        opts.headers[CSRF_HEADER] = csrf;
       }
-      opts.headers[CSRF_HEADER] = csrf;
     }
 
     let resp;
@@ -69,18 +67,10 @@
       throw netErr;
     }
 
-    if (resp.status === 401) {
-      window.location.href = '/login';
-      throw new Error('auth');
-    }
-    if (resp.status === 403) {
-      showError('Permission / CSRF rejected — reload page.');
-      throw new Error('csrf');
-    }
-    if (resp.status === 429) {
-      const retry = resp.headers.get('Retry-After') || '5';
-      showError('Rate limited — retry in ' + retry + 's');
-      throw new Error('rate');
+    if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
+      // Auth/CSRF/RateLimit disabled per user request.
+      // If we still get these, log but don't block/redirect.
+      console.warn('Auth/CSRF/RateLimit response received despite being disabled:', resp.status);
     }
     if (!resp.ok) {
       showError('Server error ' + resp.status);

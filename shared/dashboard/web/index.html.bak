@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tickles Intelligence</title>
+  <script>
+    const base = document.createElement('base');
+    base.href = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
+    document.head.appendChild(base);
+  </script>
+  <link rel="stylesheet" href="static/app.css">
+</head>
+<body class="theme-dark">
+
+<div id="app" class="layout-shell">
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
+                <span class="logo-text">Tickles</span>
+            </div>
+            <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle Sidebar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            </button>
+        </div>
+
+        <nav class="sidebar-nav">
+            <a data-tab="overview" class="active">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                <span>Overview</span>
+            </a>
+            <a data-tab="positions">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>
+                <span>Positions</span>
+            </a>
+            <a data-tab="signals">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline><polyline points="16 7 22 7 22 13"></polyline></svg>
+                <span>Signals</span>
+            </a>
+            <a data-tab="interpretations">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                <span>Interpretations</span>
+            </a>
+            <a data-tab="leaderboard">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"></path><path d="M12 20V4"></path><path d="M6 20v-6"></path></svg>
+                <span>Leaderboard</span>
+            </a>
+            <a data-tab="competitions">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5C7 4 7 7 7 7"></path><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5C17 4 17 7 17 7"></path><path d="M4 22h16"></path><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"></path><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"></path><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"></path></svg>
+                <span>Competitions</span>
+            </a>
+            <a data-tab="news">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22 6 12 13 2 6"></polyline></svg>
+                <span>News</span>
+            </a>
+            <a data-tab="queue">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                <span>Live Queue</span>
+            </a>
+            <a data-tab="learning">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+                <span>Learning</span>
+            </a>
+            <a data-tab="agents">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"></circle><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"></path><circle cx="17" cy="11" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path></svg>
+                <span>Agents</span>
+            </a>
+            <a data-tab="config">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span>Config</span>
+            </a>
+            <a data-tab="trader-drill" class="hidden">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <span>Trader Drill</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+        </div>
+    </aside>
+
+    <div class="main-container">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <h2 id="current-tab-title">Overview</h2>
+                <div id="refresh-indicator" class="refresh-indicator" title="Next refresh">
+                    <div class="refresh-spinner"></div>
+                    <span id="last-updated-text">Just now</span>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <div class="filter-group">
+                    <select id="company-filter" class="input filter-select">
+                        <option value="all">All Companies</option>
+                        <option value="rubicon">Rubicon</option>
+                    </select>
+                </div>
+                <button id="manual-refresh" class="icon-btn" title="Refresh Now">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                </button>
+            </div>
+        </header>
+
+        <div class="kpi-grid">
+            <div class="kpi-card" id="kpi-signals">
+                <div class="kpi-head">
+                    <span class="kpi-label">Signals (24h)</span>
+                    <span class="kpi-delta" id="stat-signals-delta"></span>
+                </div>
+                <div class="kpi-body">
+                    <span class="kpi-value" id="stat-signals">0</span>
+                    <div class="kpi-sparkline" id="spark-signals"></div>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-cost">
+                <div class="kpi-head">
+                    <span class="kpi-label">API Cost (24h)</span>
+                    <span class="kpi-delta" id="stat-cost-delta"></span>
+                </div>
+                <div class="kpi-body">
+                    <span class="kpi-value" id="stat-cost">$0.00</span>
+                    <div class="kpi-sparkline" id="spark-cost"></div>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-positions">
+                <div class="kpi-head">
+                    <span class="kpi-label">Open Positions</span>
+                </div>
+                <div class="kpi-body">
+                    <span class="kpi-value" id="stat-pos">0</span>
+                    <div class="kpi-sparkline" id="spark-pos"></div>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-pnl">
+                <div class="kpi-head">
+                    <span class="kpi-label">Unrealized PnL</span>
+                </div>
+                <div class="kpi-body">
+                    <span class="kpi-value" id="stat-pnl">$0.00</span>
+                    <div class="kpi-sparkline" id="spark-pnl"></div>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-ingest">
+                <div class="kpi-head">
+                    <span class="kpi-label">Ingest Depth</span>
+                </div>
+                <div class="kpi-body">
+                    <span class="kpi-value" id="stat-ingest">0</span>
+                    <div class="kpi-sparkline" id="spark-ingest"></div>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-dedup">
+                <div class="kpi-head">
+                    <span class="kpi-label">Deduped (24h)</span>
+                </div>
+                <div class="kpi-body">
+                    <span class="kpi-value" id="stat-dedup">0</span>
+                </div>
+            </div>
+        </div>
+
+        <main class="content-area">
+            <!-- Overview Tab -->
+            <section id="tab-overview" class="tab-content active">
+                <div class="grid-row">
+                    <div class="content-card full-width">
+                        <div class="card-header">
+                            <h3>System Health</h3>
+                        </div>
+                        <div class="table-container">
+                            <table class="dense-table">
+                                <thead>
+                                    <tr><th>Service</th><th>Kind</th><th>Phase</th><th>Status</th><th>Last Seen</th></tr>
+                                </thead>
+                                <tbody id="svc-list"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Leaderboard Tab -->
+            <section id="tab-leaderboard" class="tab-content">
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3>Actor Leaderboard</h3>
+                        <div class="card-actions">
+                            <span class="muted small">Top 50 by Edge Score</span>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="leaderboard-table">
+                            <thead>
+                                <tr>
+                                    <th>Rank</th>
+                                    <th>Actor</th>
+                                    <th>Type</th>
+                                    <th class="num">Edge Score</th>
+                                    <th class="num">Closed</th>
+                                    <th>Company</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Competitions Tab -->
+            <section id="tab-competitions" class="tab-content">
+                <div id="competitions-container">
+                    <div class="muted center-pad">Loading competitions…</div>
+                </div>
+            </section>
+
+            <!-- Signals Tab -->
+            <section id="tab-signals" class="tab-content">
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3>Recent Signals</h3>
+                        <div class="card-actions">
+                            <input type="search" class="input search-input" id="signals-search" placeholder="Filter symbol/actor...">
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="signals-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Symbol</th>
+                                    <th>Side</th>
+                                    <th class="num">Conf</th>
+                                    <th class="num">Entry</th>
+                                    <th class="num">SL</th>
+                                    <th class="num">TP1</th>
+                                    <th class="num">Live</th>
+                                    <th class="num">Δ vs entry</th>
+                                    <th>Actor</th>
+                                    <th>Trader</th>
+                                    <th>Headline</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Positions Tab -->
+            <section id="tab-positions" class="tab-content">
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3>Open Positions</h3>
+                        <div class="card-actions">
+                            <input type="search" class="input search-input" id="positions-search" placeholder="Filter symbol/actor...">
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Opened</th>
+                                    <th>Symbol</th>
+                                    <th>Side</th>
+                                    <th class="num">Notional</th>
+                                    <th class="num">Entry</th>
+                                    <th class="num">Now</th>
+                                    <th class="num">Status</th>
+                                    <th class="num">PnL %</th>
+                                    <th class="num">PnL $</th>
+                                    <th>Actor</th>
+                                    <th>Source</th>
+                                    <th>Act</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Interpretations Tab -->
+            <section id="tab-interpretations" class="tab-content">
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3>Interpretations</h3>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="interpretations-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Symbol</th>
+                                    <th>Direction</th>
+                                    <th class="num">Confidence</th>
+                                    <th>Method</th>
+                                    <th>Trader</th>
+                                    <th>Headline</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Queue Tab -->
+            <section id="tab-queue" class="tab-content">
+                <div class="grid-2col">
+                    <div class="content-card">
+                        <div class="card-header"><h3>Pending News</h3></div>
+                        <div class="table-container">
+                            <table class="dense-table" id="queue-news-table">
+                                <thead>
+                                    <tr><th>Source</th><th>Headline</th><th>Status</th><th>Collected</th></tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="content-card">
+                        <div class="card-header"><h3>Pending Media</h3></div>
+                        <div class="table-container">
+                            <table class="dense-table" id="queue-media-table">
+                                <thead>
+                                    <tr><th>Type</th><th>Status</th><th>Created</th></tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Learning Tab -->
+            <section id="tab-learning" class="tab-content">
+                <div class="learning-header content-card" style="margin-bottom: 16px;">
+                    <div class="card-header">
+                        <h3>Skill vs Luck</h3>
+                        <div class="window-tabs" id="learning-window-tabs">
+                            <a data-window="7d" class="window-tab">7D</a>
+                            <a data-window="14d" class="window-tab">14D</a>
+                            <a data-window="1m" class="window-tab active">1M</a>
+                        </div>
+                    </div>
+                    <div id="learning-header-strip" class="learning-strip">
+                        <div class="muted">Loading…</div>
+                    </div>
+                </div>
+
+                <div class="grid-2col">
+                    <div class="content-card">
+                        <div class="card-header">
+                            <h3>Memory Feed</h3>
+                            <select id="learning-feed-dim" class="input filter-select small">
+                                <option value="">All dimensions</option>
+                                <option value="setup">Setup</option>
+                                <option value="regime">Regime</option>
+                                <option value="symbol">Symbol</option>
+                                <option value="actor">Actor</option>
+                            </select>
+                        </div>
+                        <div class="table-container">
+                            <table class="dense-table" id="learning-feed-table">
+                                <thead>
+                                    <tr><th>When</th><th>Kind</th><th>Dimension</th><th>Outcome</th><th>Source</th></tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="content-card">
+                        <div class="card-header"><h3>Agent Brain</h3></div>
+                        <div id="learning-brain-cards" class="brain-grid">
+                            <div class="muted">Loading…</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Agents Tab -->
+            <section id="tab-agents" class="tab-content">
+                <div class="content-card" style="margin-bottom: 16px;">
+                    <div class="card-header">
+                        <h3>Agent Performance Leaderboard</h3>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="agent-perf-table">
+                            <thead>
+                                <tr>
+                                    <th>Agent</th>
+                                    <th>Role</th>
+                                    <th class="num">Total Trades</th>
+                                    <th class="num">Win Rate</th>
+                                    <th class="num">Total PnL</th>
+                                    <th class="num">Avg PnL</th>
+                                    <th class="num">Best Trade</th>
+                                    <th class="num">Worst Trade</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="content-card" style="margin-bottom: 16px;">
+                    <div class="card-header">
+                        <h3>Agent Achievements</h3>
+                    </div>
+                    <div id="agent-achievements-list">
+                        <div class="muted">Loading…</div>
+                    </div>
+                </div>
+
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3>Recent Agent Decisions</h3>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="agent-decisions-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Agent</th>
+                                    <th>Role</th>
+                                    <th>Mode</th>
+                                    <th>Verdict</th>
+                                    <th class="num">Confidence</th>
+                                    <th>Rationale</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- News Tab -->
+            <section id="tab-news" class="tab-content">
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3>News Feed</h3>
+                        <div class="card-actions">
+                            <div class="window-tabs" id="news-window-tabs">
+                                <a class="window-tab" data-window="24h">24h</a>
+                                <a class="window-tab" data-window="7d">7d</a>
+                                <a class="window-tab active" data-window="30d">30d</a>
+                            </div>
+                            <select id="news-source-filter" class="input filter-select small">
+                                <option value="">All sources</option>
+                                <option value="discord">Discord</option>
+                                <option value="telegram">Telegram</option>
+                                <option value="twitter">Twitter</option>
+                                <option value="rss">RSS</option>
+                                <option value="web">Web</option>
+                                <option value="manual">Manual</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="dense-table" id="news-feed-table">
+                            <thead>
+                                <tr><th>When</th><th>Source</th><th>User</th><th>Channel</th><th>Headline</th><th>Instruments</th><th>Sentiment</th><th>Media</th></tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Config Tab -->
+            <section id="tab-config" class="tab-content">
+                <div class="content-card" style="margin-bottom: 12px;">
+                    <div class="card-header">
+                        <h3>Read-only view</h3>
+                        <span class="muted small">
+                            The dashboard is a strict consumer. To add/disable sources, channels, or users, use the
+                            <a href="/manage/sources" class="link" target="_blank" rel="noopener">Manage Panel</a>
+                            (CSRF + audit logged).
+                        </span>
+                    </div>
+                </div>
+                <div class="config-grid">
+                    <div class="content-card">
+                        <div class="card-header">
+                            <h3>Shared (system_config)</h3>
+                            <input id="config-search" type="search" class="input search-input" placeholder="Search config...">
+                        </div>
+                        <div id="config-shared-body" class="config-body">
+                            <div class="muted">Loading…</div>
+                        </div>
+                    </div>
+                    <div class="content-card">
+                        <div class="card-header">
+                            <h3>Per-company (company_config)</h3>
+                        </div>
+                        <div id="config-companies-body" class="config-body">
+                            <div class="muted">Loading…</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Trader Drill Tab -->
+            <section id="tab-trader-drill" class="tab-content">
+                <div class="drill-header content-card" style="margin-bottom: 16px;">
+                    <div class="card-header">
+                        <h3 id="drill-name">Trader Profile</h3>
+                    </div>
+                    <div class="drill-stats">
+                        <div class="drill-stat">
+                            <span class="label">Platform</span>
+                            <span class="value" id="drill-platform">—</span>
+                        </div>
+                        <div class="drill-stat">
+                            <span class="label">Handle</span>
+                            <span class="value" id="drill-handle">—</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid-2col">
+                    <div class="content-card">
+                        <div class="card-header"><h3>Performance</h3></div>
+                        <div class="table-container">
+                            <table class="dense-table" id="drill-perf-table">
+                                <thead><tr><th>Period</th><th>Accuracy</th><th>Sharpe</th><th>Trades</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="content-card">
+                        <div class="card-header"><h3>Recent Trades</h3></div>
+                        <div class="table-container">
+                            <table class="dense-table" id="drill-trades-table">
+                                <thead><tr><th>Symbol</th><th>Side</th><th>PnL</th><th>Date</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+</div>
+
+<!-- Interpretation Drawer -->
+<div id="interp-drawer-backdrop" class="drawer-backdrop hidden"></div>
+<aside id="interp-drawer" class="side-drawer hidden">
+    <header class="drawer-header">
+        <h2 id="interp-drawer-title">Interpretation</h2>
+        <button id="interp-drawer-close" class="close-btn">✕</button>
+    </header>
+    <div id="interp-drawer-body" class="drawer-body">
+        <div class="muted center-pad">Loading…</div>
+    </div>
+</aside>
+
+<script src="static/app.js"></script>
+</body>
+</html>

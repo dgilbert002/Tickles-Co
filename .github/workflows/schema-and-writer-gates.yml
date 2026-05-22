@@ -1,0 +1,46 @@
+# .github/workflows/schema-and-writer-gates.yml
+name: Schema & Writer Gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  schema-diff:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pg: ["15", "16"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 10s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - name: Master sync (fresh)
+        run: python shared/scripts/master_sync.py --mode fresh --dsn postgresql://postgres:test@localhost/postgres
+      - name: Schema diff (shared)
+        run: python shared/scripts/schema_diff.py --dsn postgresql://postgres:test@localhost/postgres --snapshot tickles_shared
+
+  writer-registry:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: test }
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - run: psql postgresql://postgres:test@localhost/postgres -f shared/migration/tickles_shared_pg.sql
+      - run: python shared/scripts/writer_registry_grep.py --dsn postgresql://postgres:test@localhost/postgres

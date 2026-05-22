@@ -31,6 +31,14 @@ sys.path.append("/opt/tickles")
 from shared.utils.config import load_env
 from shared.utils.freshness import validate_freshness, StaleDataError
 from shared.utils.mem0_config import ScopedMemory
+from shared.intelligence.surgeon_position_bridge import (
+    SOURCE_SURGEON_V2,
+    bridge_surgeon_position_close_sync,
+    bridge_surgeon_position_open_sync,
+)
+
+SURGEON2_COMPANY_ID = os.environ.get("SURGEON2_COMPANY_ID", "rubicon")
+SURGEON2_ACTOR_ID = os.environ.get("SURGEON2_ACTOR_ID", "surgeon2")
 
 # Load environment variables from .env
 load_env()
@@ -405,6 +413,26 @@ def cycle(company_conn, shared_conn, memory: Optional[ScopedMemory] = None) -> N
                 "last_progress_ts": pos["last_progress_ts"],
                 "closed_at": pos.get("closed_at"),
             })
+            # Forward-bridge to shared tracked_positions ledger on full close.
+            if pos["remaining_frac"] <= 0:
+                try:
+                    bridge_surgeon_position_close_sync(
+                        company_id=SURGEON2_COMPANY_ID,
+                        source=SOURCE_SURGEON_V2,
+                        actor_id=SURGEON2_ACTOR_ID,
+                        symbol=sym,
+                        side=side,
+                        exit_price=exit_px,
+                        exit_ts=pos.get("closed_at") or now_utc(),
+                        realized_pnl_usd=net,
+                        exit_reason=f"{action}/{reason}",
+                        exchange="bybit",
+                    )
+                except Exception as bridge_exc:
+                    LOG.warning(
+                        "tracked_positions close-bridge failed for trade=%s sym=%s: %s",
+                        pos.get("trade_id"), sym, bridge_exc,
+                    )
             insert_log(company_conn, {
                 "ts": now_utc(), "trade_id": pos["trade_id"], "symbol": sym,
                 "side": side, "action": action, "entry_price": ep,
@@ -533,6 +561,33 @@ def cycle(company_conn, shared_conn, memory: Optional[ScopedMemory] = None) -> N
                 "reason": reason,
             }
             insert_position(company_conn, pos)
+            # Forward-bridge to shared tracked_positions ledger (best-effort).
+            try:
+                bridge_surgeon_position_open_sync(
+                    company_id=SURGEON2_COMPANY_ID,
+                    source=SOURCE_SURGEON_V2,
+                    actor_id=SURGEON2_ACTOR_ID,
+                    symbol=sym,
+                    side=side,
+                    entry_price=entry,
+                    entry_ts=ts,
+                    notional_usd=notional,
+                    leverage=float(LEVERAGE_DEFAULT),
+                    sl=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    tp3=tp3,
+                    reason=reason,
+                    confidence=0.7 if tier in ("HIGH", "MAX") else 0.5,
+                    extra_metadata={
+                        "tier": tier,
+                        "trade_id": trade_counter,
+                        "divergence_at_entry": m["divergence_pct"],
+                        "funding_at_entry": m["funding"],
+                    },
+                )
+            except Exception as exc:
+                LOG.warning("bridge_open failed (non-fatal): %s", exc)
             insert_log(company_conn, {
                 "ts": ts, "trade_id": trade_counter, "symbol": sym, "side": side,
                 "action": "OPEN", "entry_price": entry, "exit_price": None,

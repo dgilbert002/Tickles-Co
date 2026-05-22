@@ -52,6 +52,15 @@ _PERP_SUFFIXES: Tuple[str, ...] = ("PERP", "P", "SWAP", "FUT")
 
 _NON_ALNUM_RX = re.compile(r"[^A-Z0-9]+")
 
+# CCXT-style perpetual / swap symbols look like ``BTC/USDT:USDT`` (slash
+# separator AND a colon-marked settle currency). When we see this exact
+# pattern we strip the colon-and-settle tail BEFORE collapsing separators,
+# otherwise the redundant settle currency (USDT) gets merged into the base
+# (``BTCUSDTUSDT`` → wrongly splits as ``BTCUSDT/USDT``).
+_CCXT_PERP_RX = re.compile(
+    r"^([A-Z0-9]+)/([A-Z0-9]+):([A-Z0-9]+)(?:-.+)?$"
+)
+
 
 def _strip_contract_tag(token: str) -> Tuple[str, Optional[str]]:
     """Split off a trailing perpetual/contract tag, if any.
@@ -67,6 +76,25 @@ def _strip_contract_tag(token: str) -> Tuple[str, Optional[str]]:
         if token.endswith(tag) and len(token) > len(tag):
             return token[: -len(tag)], tag
     return token, None
+
+
+def _pre_strip_ccxt_perp(raw_upper: str) -> Tuple[str, bool]:
+    """If ``raw_upper`` is a CCXT perp / swap, strip the ``:settle[-tail]``
+    portion before the rest of normalisation runs.
+
+    Args:
+        raw_upper: Uppercased input (may still contain ``/`` and ``:``).
+
+    Returns:
+        ``(cleaned, was_perp)``. ``cleaned`` is ``raw_upper`` with the
+        colon-and-settle tail removed (e.g. ``BTC/USDT:USDT`` becomes
+        ``BTC/USDT``). ``was_perp`` is True when the strip happened.
+    """
+    m = _CCXT_PERP_RX.match(raw_upper)
+    if not m:
+        return raw_upper, False
+    base, quote, _settle = m.group(1), m.group(2), m.group(3)
+    return f"{base}/{quote}", True
 
 
 def _split_base_quote(token: str) -> Optional[Tuple[str, str]]:
@@ -128,7 +156,18 @@ def to_canonical_symbol(raw_symbol: str | None) -> str:
     try:
         if not raw_symbol:
             return ""
-        cleaned = _NON_ALNUM_RX.sub("", raw_symbol.upper())
+        raw_upper = raw_symbol.upper().strip()
+        # CCXT-perp short-circuit: if the input is ``BTC/USDT:USDT`` (or
+        # ``BTC/USDT:USDT-260626-90000-C`` for options) we can lift base
+        # and quote directly without going through the alnum-collapse path
+        # that was historically merging the settle currency into the base.
+        # Returns the *spot* slash form (``BTC/USDT``) — the perp/swap
+        # marker is intentionally dropped because downstream tables join
+        # on the spot form and the per-venue contract tag lives elsewhere.
+        cleaned_pre, was_ccxt_perp = _pre_strip_ccxt_perp(raw_upper)
+        if was_ccxt_perp:
+            return cleaned_pre
+        cleaned = _NON_ALNUM_RX.sub("", raw_upper)
         if not cleaned:
             return ""
         core, tag = _strip_contract_tag(cleaned)

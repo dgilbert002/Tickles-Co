@@ -16,12 +16,60 @@ import asyncpg
 
 from shared.intelligence.prompt_registry import register_prompt
 from shared.utils.db import get_shared_pool
+from shared.intelligence.heartbeat import record_heartbeat
 
 logger = logging.getLogger(__name__)
 
 PROMOTION_LIFT_THRESHOLD = float(os.environ.get("COACH_PROMOTION_LIFT_THRESHOLD", "0.05"))
 PROMOTION_MIN_TRADES = int(os.environ.get("COACH_PROMOTION_MIN_TRADES", "50"))
 _ADVISORY_LOCK_KEY = "coach_service"
+
+
+# ---------------------------------------------------------------------------
+# D1 — push prompt promotion lessons into mem0
+# ---------------------------------------------------------------------------
+async def _push_promotion_to_mem0(
+    company: str,
+    prompt_name: str,
+    winner: str,
+    lift: float,
+    num_trades: int,
+) -> None:
+    """Write a prompt promotion event into mem0 for cross-agent learning.
+
+    Best-effort: any failure is logged and swallowed.
+    """
+    try:
+        from shared.utils.mem0_config import get_memory
+    except Exception as exc:
+        logger.debug("coach→mem0: import failed: %s", exc)
+        return
+
+    try:
+        mem, agent_id = get_memory(company, "coach")
+    except Exception as exc:
+        logger.warning("coach→mem0: get_memory failed: %s", exc)
+        return
+
+    text = (
+        f"Promoted {prompt_name} variant {winner} "
+        f"(lift={lift:+.4f} over {num_trades} trades)"
+    )
+    metadata = {
+        "type": "prompt_promotion",
+        "prompt_name": prompt_name,
+        "winner": winner,
+        "lift": lift,
+        "num_trades": num_trades,
+    }
+
+    try:
+        await asyncio.to_thread(
+            mem.add, text, user_id=company, agent_id=agent_id, metadata=metadata
+        )
+        logger.info("coach→mem0: wrote promotion %s/%s lift=%.4f", prompt_name, winner, lift)
+    except Exception as exc:
+        logger.warning("coach→mem0: add failed: %s", exc)
 
 
 def assign_variant(actor_id: str, day: date, prompt_name: str, variants: List[str]) -> str:
@@ -217,6 +265,14 @@ class CoachService:
 
             winner, lift = result
             await self._promote_variant(conn, prompt_name, winner, lift)
+            # D1 — push promotion insight to mem0
+            await _push_promotion_to_mem0(
+                company=self.company_id,
+                prompt_name=prompt_name,
+                winner=winner,
+                lift=lift,
+                num_trades=PROMOTION_MIN_TRADES,  # floor; actual count ≥ this
+            )
             return winner
 
     async def tick(self) -> Dict[str, Any]:
@@ -256,6 +312,12 @@ class CoachService:
             finally:
                 await conn.execute(
                     "SELECT pg_advisory_unlock(hashtext($1))", _ADVISORY_LOCK_KEY
+                )
+                # Phase R — Record heartbeat
+                await record_heartbeat(
+                    agent_id="intelligence-coach",
+                    status="ok",
+                    expected_interval_seconds=3600,  # Runs hourly
                 )
 
     async def run_forever(self, interval_seconds: int = 3600) -> None:

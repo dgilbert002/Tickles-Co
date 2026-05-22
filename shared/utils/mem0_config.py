@@ -37,6 +37,7 @@ correct verification pattern.
 
 import os
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 from mem0 import Memory
 
@@ -59,13 +60,47 @@ def _load_env():
 _load_env()
 
 # ---------------------------------------------------------------------------
-# Neutralize OPENROUTER_API_KEY so mem0's OpenAILLM does NOT hard-route to
-# OpenRouter.  mem0's __init__ checks os.environ["OPENROUTER_API_KEY"] FIRST
-# and ignores our api_key / openai_base_url config when it is set.  We save
-# the value in case other code needs it, then remove it from the environment
-# so mem0 falls through to the else-branch that respects our config.
+# OPENROUTER_API_KEY handling.
+#
+# mem0's OpenAILLM hard-codes a priority check for ``os.environ["OPENROUTER_API_KEY"]``
+# inside ``Memory.from_config(...)``. When the env var is set, mem0 ignores
+# our api_key / openai_base_url config and force-routes to OpenRouter.
+#
+# Historically this module *popped* the key from os.environ at import time so
+# mem0 would respect our config. That side-effect was destructive: every other
+# service in the same process (e.g. shared.intelligence.gateway_config) reads
+# OPENROUTER_API_KEY at call time and would break with
+# "OPENROUTER API key not set for service interpretation" the moment any code
+# imported this module.
+#
+# The correct pattern is to scope the pop to the duration of the
+# ``Memory.from_config`` call only, then restore the environment immediately.
+# We snapshot the value once at module import so callers that read
+# ``_OPENROUTER_API_KEY_SAVED`` (e.g. as the LLM fallback key) continue to
+# work without disturbing os.environ.
 # ---------------------------------------------------------------------------
-_OPENROUTER_API_KEY_SAVED = os.environ.pop("OPENROUTER_API_KEY", "")
+_OPENROUTER_API_KEY_SAVED = os.environ.get("OPENROUTER_API_KEY", "")
+
+
+@contextmanager
+def _mem0_env_guard():
+    """Temporarily remove ``OPENROUTER_API_KEY`` so mem0 respects our LLM config.
+
+    mem0's ``Memory.from_config`` checks ``os.environ["OPENROUTER_API_KEY"]``
+    first and force-routes to OpenRouter when present, ignoring our explicit
+    ``api_key`` / ``openai_base_url``. Removing the var only for the duration
+    of that call avoids the side-effect leaking into the rest of the process.
+
+    Yields:
+        None. The previous value is restored in ``finally`` even on exception.
+    """
+    saved = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ["OPENROUTER_API_KEY"] = saved
+
 
 MEM0_MODEL = os.environ.get("MEM0_MODEL", "deepseek/deepseek-chat")
 MEM0_FALLBACK_MODELS = [
@@ -143,7 +178,8 @@ class ScopedMemory:
         last_err = None
         for model in self.models_to_try:
             try:
-                mem = Memory.from_config(self._build_config(model))
+                with _mem0_env_guard():
+                    mem = Memory.from_config(self._build_config(model))
                 # infer=False bypasses LLM extraction; embeddings are still computed locally.
                 result = mem.add(text, infer=False, **kwargs)
                 # Some providers return empty results on auth/model errors instead of raising.
@@ -172,7 +208,8 @@ class ScopedMemory:
         last_err = None
         for model in self.models_to_try:
             try:
-                mem = Memory.from_config(self._build_config(model))
+                with _mem0_env_guard():
+                    mem = Memory.from_config(self._build_config(model))
                 result = mem.search(query, **kwargs)
                 logger.info("[mem0] search OK | model=%s | collection=%s", model, self.collection_name)
                 return result

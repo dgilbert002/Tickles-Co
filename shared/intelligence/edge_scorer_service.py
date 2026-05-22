@@ -20,11 +20,59 @@ from shared.intelligence.edge_scorer import (
     compute_edge_score,
 )
 from shared.utils.db import get_shared_pool
+from shared.intelligence.heartbeat import record_heartbeat
 
 logger = logging.getLogger(__name__)
 
 _ADVISORY_LOCK_KEY = "edge_scorer"
 _DELTA_THRESHOLD = float(os.environ.get("EDGE_SCORE_DELTA_THRESHOLD", "0.05"))
+
+
+# ---------------------------------------------------------------------------
+# D1 — push notable edge score results into mem0
+# ---------------------------------------------------------------------------
+async def _push_edge_summary_to_mem0(
+    company: str,
+    scored: int,
+    top_actor: str,
+    top_window: str,
+    top_score: float,
+) -> None:
+    """Write a periodic edge-scoring summary into mem0.
+
+    Best-effort: any failure is logged and swallowed.
+    """
+    try:
+        from shared.utils.mem0_config import get_memory
+    except Exception as exc:
+        logger.debug("edge_scorer→mem0: import failed: %s", exc)
+        return
+
+    try:
+        mem, agent_id = get_memory(company, "edge_scorer")
+    except Exception as exc:
+        logger.warning("edge_scorer→mem0: get_memory failed: %s", exc)
+        return
+
+    text = (
+        f"Edge score cycle: scored {scored} actors. "
+        f"Top: {top_actor} ({top_window}) edge_score={top_score:.4f}"
+    )
+    metadata = {
+        "type": "edge_score_summary",
+        "actors_scored": scored,
+        "top_actor": top_actor,
+        "top_window": top_window,
+        "top_score": top_score,
+    }
+
+    try:
+        await asyncio.to_thread(
+            mem.add, text, user_id=company, agent_id=agent_id, metadata=metadata
+        )
+        logger.info("edge_scorer→mem0: pushed summary (%d actors)", scored)
+    except Exception as exc:
+        logger.warning("edge_scorer→mem0: add failed: %s", exc)
 
 
 class EdgeScorerService:
@@ -280,6 +328,9 @@ class EdgeScorerService:
             try:
                 actors = await self._fetch_actors(conn)
                 scored = 0
+                top_actor = ""
+                top_window = ""
+                top_score = -999.0
                 for row in actors:
                     if self._stop.is_set():
                         break
@@ -297,6 +348,10 @@ class EdgeScorerService:
                             await self._maybe_log_change(
                                 conn, actor_type, actor_id, window, out
                             )
+                            if out.edge_score > top_score:
+                                top_score = out.edge_score
+                                top_actor = f"{actor_type}:{actor_id}"
+                                top_window = window
                         except Exception as exc:
                             logger.exception(
                                 "edge_scorer: error scoring %s/%s/%s: %s",
@@ -306,10 +361,25 @@ class EdgeScorerService:
                                 exc,
                             )
                     scored += 1
+                # D1 — push cycle summary to mem0
+                if scored > 0:
+                    await _push_edge_summary_to_mem0(
+                        company=self.company_id,
+                        scored=scored,
+                        top_actor=top_actor,
+                        top_window=top_window,
+                        top_score=top_score,
+                    )
                 return {"processed": scored, "actors_scored": len(actors)}
             finally:
                 await conn.execute(
                     "SELECT pg_advisory_unlock(hashtext($1))", _ADVISORY_LOCK_KEY
+                )
+                # Phase R — Record heartbeat
+                await record_heartbeat(
+                    agent_id="intelligence-edge-scorer",
+                    status="ok",
+                    expected_interval_seconds=3600,  # Runs hourly
                 )
 
     async def run_forever(self, interval_seconds: int = 3600) -> None:

@@ -316,6 +316,13 @@ async def call_vision_llm(
     # Phase 1: loop-detector gate
     await _check_loop(cfg, model, system_prompt, user_text, correlation_id, operation)
 
+    # Phase BP: budget circuit-breaker
+    from shared.utils.api_cost_log import check_budget, BudgetExceededError
+    try:
+        await check_budget(cfg.service_name, company_id, 0.01)
+    except BudgetExceededError as exc:
+        raise RuntimeError(f"Budget exceeded: {exc}") from exc
+
     headers = _build_headers(cfg)
 
     payload: Dict[str, Any] = {
@@ -428,6 +435,13 @@ async def chat_completion(
 
     # Phase 1: loop-detector gate
     await _check_loop(cfg, model, system_prompt, user_text, correlation_id, operation)
+
+    # Phase BP: budget circuit-breaker
+    from shared.utils.api_cost_log import check_budget, BudgetExceededError
+    try:
+        await check_budget(cfg.service_name, company_id, 0.01)
+    except BudgetExceededError as exc:
+        raise RuntimeError(f"Budget exceeded: {exc}") from exc
 
     headers = _build_headers(cfg)
 

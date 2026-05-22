@@ -155,6 +155,26 @@ def _row(**overrides: Any) -> Dict[str, Any]:
         "media_thumbnail_path": "/m/7_thumb.png",
         "media_source_url": "https://example.com/img/7",
         "media_type": "image",
+        # --- enrichment fields added alongside Slice 1 §3.0 ---
+        "instrument_resolved_from": "ocr",
+        "prefilter_provider": "google",
+        "prefilter_model": "gemini-2.5-flash",
+        "prefilter_result": "actionable",
+        "prefilter_cost_usd": Decimal("0.0001"),
+        "vision_provider": "openai",
+        "vision_model_requested": "gpt-5-mini",
+        "vision_model_resolved": "gpt-5-mini",
+        "news_content": "BTC just broke out",
+        "news_metadata": {"foo": "bar"},
+        "news_has_media": True,
+        "news_media_count": 1,
+        "media_id": 7,
+        "media_mime_type": "image/png",
+        "trader_handle_raw": "@alpha",
+        "trader_handle_normalized": "alpha",
+        "trader_display_name": "Alpha Bob",
+        "trader_platform": "telegram",
+        "trader_type": "scalper",
     }
     base.update(overrides)
     return base
@@ -550,21 +570,37 @@ async def test_row_to_dict_falls_back_to_exchange_when_instrument_null() -> None
 
 def test_select_clause_joins_news_and_media() -> None:
     sql = InterpretationDrawerProvider._select_clause()
-    assert "FROM signal_interpretations si" in sql
-    assert "LEFT JOIN news_items  ni ON ni.id = si.news_item_id" in sql
-    assert "LEFT JOIN media_items mi ON mi.id = si.media_item_id" in sql
+    # collapse runs of whitespace so the assertion is alignment-tolerant.
+    flat = " ".join(sql.split())
+    assert "FROM signal_interpretations si" in flat
+    assert "LEFT JOIN news_items ni ON ni.id = si.news_item_id" in flat
+    assert "LEFT JOIN media_items mi ON mi.id = si.media_item_id" in flat
+    assert (
+        "LEFT JOIN trader_profiles tp ON tp.id = si.trader_profile_id" in flat
+    )
     # canonical aliases the _row_to_dict relies on
     for alias in (
         "news_headline",
+        "news_content",
         "news_source",
         "news_channel_name",
         "news_author",
         "news_collected_at",
         "news_published_at",
+        "news_metadata",
+        "news_has_media",
+        "news_media_count",
+        "media_id",
         "media_local_path",
         "media_thumbnail_path",
         "media_source_url",
         "media_type",
+        "media_mime_type",
+        "trader_handle_raw",
+        "trader_handle_normalized",
+        "trader_display_name",
+        "trader_platform",
+        "trader_type",
     ):
         assert alias in sql, f"alias {alias!r} missing from _select_clause"
 

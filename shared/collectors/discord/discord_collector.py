@@ -485,6 +485,7 @@ class DiscordCollector(BaseCollector):
 
     def _load_config(self) -> None:
         """Load configuration from CollectorConfig or discord_config.json."""
+        cfg = _load_config_from_file()
         # If config has channels, use them
         if self.config and self.config.channels:
             self._channels = {}
@@ -495,10 +496,15 @@ class DiscordCollector(BaseCollector):
             self._token = self.config.extra.get("token", "")
             self._media_base_dir = self.config.media_base_dir or MEDIA_BASE_DIR
         else:
-            # Fallback to JSON file
-            cfg = _load_config_from_file()
             self._token = cfg.get("token", "")
             self._channels = cfg.get("channels", {}) or cfg.get("enabled_channels", {})
+
+        # Always load filters from the config file if they aren't already set on self.config
+        if self.config:
+            if not self.config.allowed_users and "allowed_users" in cfg:
+                self.config.allowed_users = [str(u) for u in cfg["allowed_users"]]
+            if not self.config.blocked_users and "blocked_users" in cfg:
+                self.config.blocked_users = [str(u) for u in cfg["blocked_users"]]
 
         # Normalize channel config
         for ch_id, ch_info in self._channels.items():
@@ -1035,9 +1041,11 @@ class DiscordCollector(BaseCollector):
             if download_media:
                 await _download_media_for_messages(raw_messages, channel_info, self._media_base_dir)
 
-            # Update high-water mark
+            # Update high-water mark (track in memory first to commit only after successful cycle)
             max_id = str(max(int(m["id"]) for m in raw_messages))
-            await self._save_hwm(channel_id, max_id)
+            if not hasattr(self, "_pending_hwm"):
+                self._pending_hwm = {}
+            self._pending_hwm[channel_id] = max_id
 
             # Filter messages by user if configured
             if self.config and (self.config.allowed_users or self.config.blocked_users):
@@ -1143,12 +1151,24 @@ class DiscordCollector(BaseCollector):
             self.errors += 1
             return []
 
+    async def _commit_pending_hwms(self) -> None:
+        """Commit all pending high-water marks from this cycle to the database."""
+        if not hasattr(self, "_pending_hwm") or not self._pending_hwm:
+            return
+        for channel_id, max_id in list(self._pending_hwm.items()):
+            try:
+                await self._save_hwm(channel_id, max_id)
+            except Exception as e:
+                logger.warning("Discord: failed to save HWM for channel %s: %s", channel_id, e)
+        self._pending_hwm.clear()
+
     async def collect(self) -> List[NewsItem]:
         """Collect messages from all enabled channels.
 
         Returns:
             List of NewsItem objects ready for DB insertion.
         """
+        self._pending_hwm = {}
         if not self._ready:
             logger.warning("Discord client not ready, skipping collection")
             return []
@@ -1235,12 +1255,17 @@ class DiscordCollector(BaseCollector):
                 # ── Collection cycle ─────────────────────────────────
                 try:
                     items = await self.collect()
+                    pool = await self._ensure_db_pool()
                     if items:
-                        pool = await self._ensure_db_pool()
                         inserted = await self.write_to_db(items, pool)
                         if inserted > 0:
                             logger.info("Discord: wrote %d new items", inserted)
+                    # Commit HWMs after successful collection and DB write
+                    await self._commit_pending_hwms()
                 except Exception as e:
+                    # Clear pending hwms on exception so they don't get committed
+                    if hasattr(self, "_pending_hwm"):
+                        self._pending_hwm.clear()
                     err_str = str(e).lower()
                     if "429" in err_str or "too many requests" in err_str or "rate limit" in err_str:
                         rate_limit_hits += 1

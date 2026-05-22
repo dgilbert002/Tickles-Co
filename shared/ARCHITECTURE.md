@@ -381,6 +381,44 @@ tickles grant --agent cody --capability 'write:trade_intent:foxtrot_cfd'
 
 No Python file is ever edited to add a company. That is the test of Phase 5.
 
+### 4.7 Dashboard (Phase L + Dashboard v2, May 2026)
+
+The dashboard is a single aiohttp app at [`shared/dashboard/`](shared/dashboard/) mounted behind Tailscale Serve at `https://vmi3220412.trout-goblin.ts.net/`. It is **read-only** with respect to trading state — no route in this app creates, modifies, or cancels orders. Mutations are restricted to operator actions on the manage panel (Phase 5) and are CSRF + rate-limited.
+
+**Module map (post-Dashboard v2):**
+
+| Module | Path | Role |
+|---|---|---|
+| `server` | [`shared/dashboard/server.py`](shared/dashboard/server.py) | aiohttp app, route mounting, snapshot endpoint |
+| `snapshot` | [`shared/dashboard/snapshot.py`](shared/dashboard/snapshot.py) | 10 s TTL cross-company snapshot aggregator |
+| `db_pools` | [`shared/dashboard/db_pools.py`](shared/dashboard/db_pools.py) | LRU-cached per-company DB pool |
+| `anchors` | [`shared/dashboard/anchors.py`](shared/dashboard/anchors.py) | `#sig-/pos-/opn-/pm-/trade-/interp-` deep-link contract |
+| `chart_renderer` | [`shared/dashboard/chart_renderer.py`](shared/dashboard/chart_renderer.py) | Idempotent matplotlib SVG with content-addressed cache |
+| `news_routes` | [`shared/dashboard/news_routes.py`](shared/dashboard/news_routes.py) | Chat-server / news feed routes + `fetch_media_for_news_item()` |
+| `interpretation_drawer_routes` | [`shared/dashboard/interpretation_drawer_routes.py`](shared/dashboard/interpretation_drawer_routes.py) | Cross-tab drawer for any `interp-N` anchor |
+| `config_routes` | [`shared/dashboard/config_routes.py`](shared/dashboard/config_routes.py) | Read-only config tab |
+| **`media_proxy`** *(Dashboard v2)* | [`shared/dashboard/media_proxy.py`](shared/dashboard/media_proxy.py) | `/api/media/proxy` SSRF-guarded image fetch (host allowlist, private-IP block, byte cap, per-session rate limit) |
+| **`price_routes`** *(Dashboard v2)* | [`shared/dashboard/price_routes.py`](shared/dashboard/price_routes.py) | `/api/price` 30 s cached spot-price endpoint |
+| `auth` / `csrf` / `rate_limit` | [`shared/dashboard/auth.py`](shared/dashboard/auth.py), [`csrf.py`](shared/dashboard/csrf.py), [`rate_limit.py`](shared/dashboard/rate_limit.py) | Telegram-OTP, `__Host-session` cookie, default-deny, token-bucket |
+| `ws` | [`shared/dashboard/ws.py`](shared/dashboard/ws.py) | `/ws/queue` 5 s tick |
+
+**Shared helpers feeding the dashboard:**
+
+| Module | Path | Role |
+|---|---|---|
+| **`live_price`** *(Dashboard v2)* | [`shared/market_data/live_price.py`](shared/market_data/live_price.py) | Single source of truth for "what is X trading at right now" — used by both `/api/price` and the interpretation quant track so they cannot disagree |
+| **`surgeon_position_bridge`** *(Dashboard v2)* | [`shared/intelligence/surgeon_position_bridge.py`](shared/intelligence/surgeon_position_bridge.py) | Adapts trader-signal `tracked_positions` rows into Surgeon-readable position objects |
+| **`surgeon_position_reconciler`** *(Dashboard v2)* | [`shared/intelligence/surgeon_position_reconciler.py`](shared/intelligence/surgeon_position_reconciler.py) | Periodic systemd daemon (~60 s) that matches signal-derived shadow positions to real broker fills, closes stale shadows, and deduplicates |
+
+**Boundaries enforced by this module group:**
+
+1. **No direct external image fetches from the browser.** All cross-origin images flow through `/api/media/proxy`. The proxy enforces an allowlist of source hosts (Discord CDN, Twitter, etc.), blocks RFC1918 / loopback / link-local / metadata-service IPs, caps response size, and rate-limits per session.
+2. **One live-price oracle.** Anything that needs a "now" price imports [`shared/market_data/live_price.py`](shared/market_data/live_price.py). The interpretation quant track and the `/api/price` route share the same cache — divergence is impossible by construction.
+3. **Two position sources, one read.** The dashboard's open-positions view unions `positions_current` (real broker fills) with `tracked_positions` (signal-derived shadows). Each row carries its origin so downstream code never confuses advisory exposure with realised exposure. The Surgeon reconciler is the only writer that is allowed to bridge the two.
+4. **Terminal `skipped_*` states.** `skipped_not_chart`, `skipped_unsupported_media`, `skipped_no_content` are end states for `media_items.processing_status` and `news_items.processing_status`. The interpretation daemon does NOT retry them; clearing them is a deliberate operator action.
+
+See [`CLAUDE.md`](../CLAUDE.md) → "Dashboard v2 (May 2026)" for the full slice-by-slice change log.
+
 ---
 
 ## 5. Rule-1 data flow (continuous forward-test, Phase 1D + 6)

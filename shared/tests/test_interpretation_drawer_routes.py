@@ -36,19 +36,38 @@ from shared.dashboard.interpretation_drawer_routes import (
 
 
 class _MockDrawerProvider:
-    """Stand-in for :class:`InterpretationDrawerProvider` recording calls."""
+    """Stand-in for :class:`InterpretationDrawerProvider` recording calls.
+
+    Optionally exposes the two enrichment methods the real provider
+    grew in Slice 1 (``fetch_media_for_news_item`` and
+    ``fetch_news_item_header``). They are only attached when the
+    caller passes a non-``None`` payload, so existing tests that don't
+    care about enrichment continue to exercise the legacy code path
+    where the route uses ``getattr(..., None)`` to skip the optional
+    methods.
+    """
 
     def __init__(
         self,
         by_news_payload: Optional[List[Dict[str, Any]]] = None,
         by_id_payload: Optional[List[Dict[str, Any]]] = None,
         raise_exc: Optional[Exception] = None,
+        media_payload: Optional[List[Dict[str, Any]]] = None,
+        header_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.by_news_payload = by_news_payload if by_news_payload is not None else []
         self.by_id_payload = by_id_payload if by_id_payload is not None else []
         self.raise_exc = raise_exc
         self.news_calls: List[Dict[str, Any]] = []
         self.id_calls: List[Dict[str, Any]] = []
+        self.media_calls: List[Dict[str, Any]] = []
+        self.header_calls: List[Dict[str, Any]] = []
+        self._media_payload = media_payload
+        self._header_payload = header_payload
+        if media_payload is not None:
+            self.fetch_media_for_news_item = self._fetch_media_for_news_item  # type: ignore[assignment]
+        if header_payload is not None:
+            self.fetch_news_item_header = self._fetch_news_item_header  # type: ignore[assignment]
 
     async def fetch_by_news_item(
         self, news_item_id: int, *, limit: Optional[int] = None
@@ -63,6 +82,18 @@ class _MockDrawerProvider:
         if self.raise_exc is not None:
             raise self.raise_exc
         return self.by_id_payload
+
+    async def _fetch_media_for_news_item(
+        self, news_item_id: int
+    ) -> List[Dict[str, Any]]:
+        self.media_calls.append({"news_item_id": news_item_id})
+        return list(self._media_payload or [])
+
+    async def _fetch_news_item_header(
+        self, news_item_id: int
+    ) -> Optional[Dict[str, Any]]:
+        self.header_calls.append({"news_item_id": news_item_id})
+        return self._header_payload
 
 
 def _build_app(provider: Optional[_MockDrawerProvider] = None) -> web.Application:
@@ -462,3 +493,107 @@ async def test_drawer_empty_rows_round_trip(make_client) -> None:
         "limit": DRAWER_DEFAULT_LIMIT,
         "rows": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 §3.5 — empty-rows enrichment with news_item_header.
+#
+# Regression coverage for the P0 found in the first review:
+# ``fetch_news_item_header`` returns ``Optional[Dict]`` (a single dict
+# or ``None``), but the route used to treat the result as a list and
+# unpack ``header_list[0]``, which crashed with ``KeyError: 0`` on a
+# real provider response. The test below uses a mock provider whose
+# ``fetch_news_item_header`` returns a real dict and asserts the route
+# produces a 200 with the dict surfaced under ``news_item``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drawer_empty_rows_surfaces_news_item_header(make_client) -> None:
+    """Empty interpretations + provider header → 200 with ``news_item`` dict.
+
+    This test would have caught the P0 (``header_list[0]`` on a dict
+    raised an unhandled ``KeyError`` and bubbled up as a 500).
+    """
+    header = {
+        "id": 99,
+        "headline": "BTC breaks 70k",
+        "author": "alice",
+        "source": "discord",
+        "channel_name": "alpha-room",
+        "collected_at": datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+        "published_at": None,
+        "has_media": True,
+        "media_count": 2,
+    }
+    prov = _MockDrawerProvider(
+        by_news_payload=[],
+        media_payload=[],
+        header_payload=header,
+    )
+    client = await make_client(provider=prov)
+    resp = await client.get("/api/interpretations/drawer?news_item_id=99")
+    assert resp.status == 200, await resp.text()
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["rows"] == []
+    assert "news_item" in body, "news_item must surface when rows are empty"
+    assert body["news_item"]["id"] == 99
+    assert body["news_item"]["headline"] == "BTC breaks 70k"
+    assert body["news_item"]["author"] == "alice"
+    assert body["news_item"]["channel_name"] == "alpha-room"
+    assert body["news_item"]["has_media"] is True
+    assert body["news_item"]["media_count"] == 2
+    # The datetime should round-trip through _jsonify.
+    assert body["news_item"]["collected_at"] == "2026-05-01T12:00:00+00:00"
+    assert prov.header_calls == [{"news_item_id": 99}]
+
+
+@pytest.mark.asyncio
+async def test_drawer_news_item_header_omitted_when_rows_present(make_client) -> None:
+    """When rows exist the news_item header is NOT surfaced.
+
+    Slice 1 §3.5 only renders the header for the empty-drawer case;
+    when interpretations exist the frontend reads ``rows[0].news``.
+    """
+    header = {"id": 5, "headline": "ignored", "media_count": 0}
+    prov = _MockDrawerProvider(
+        by_news_payload=[{"id": 1, "news_item_id": 5}],
+        media_payload=[],
+        header_payload=header,
+    )
+    client = await make_client(provider=prov)
+    resp = await client.get("/api/interpretations/drawer?news_item_id=5")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["rows"] == [{"id": 1, "news_item_id": 5}]
+    assert "news_item" not in body
+
+
+@pytest.mark.asyncio
+async def test_drawer_header_provider_failure_does_not_break_response(make_client) -> None:
+    """A failing header provider degrades gracefully (no 500).
+
+    The rows fetch is the only required call; gallery / header are
+    best-effort and may legitimately raise. The handler must drop the
+    failed enrichment and still return 200.
+    """
+
+    class _BoomProvider(_MockDrawerProvider):
+        async def _fetch_news_item_header(
+            self, news_item_id: int
+        ) -> Optional[Dict[str, Any]]:
+            raise RuntimeError("header query exploded")
+
+    prov = _BoomProvider(
+        by_news_payload=[],
+        media_payload=[],
+        header_payload={"id": 1},  # triggers attribute attachment
+    )
+    client = await make_client(provider=prov)
+    resp = await client.get("/api/interpretations/drawer?news_item_id=1")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["rows"] == []
+    assert "news_item" not in body

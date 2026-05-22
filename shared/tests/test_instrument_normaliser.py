@@ -57,6 +57,17 @@ def test_normalise_instrument(raw_symbol, raw_exchange, expected):
         ("BTCUSDT.P", "BTC/USDT-P"),
         ("", ""),
         (None, ""),
+        # 2026-05-22 — CCXT perp / swap forms must round-trip back to the
+        # spot slash form (BTC/USDT), not the buggy ``BTCUSDT/USDT`` that
+        # the original implementation produced when collapsing separators
+        # before splitting base/quote.
+        ("BTC/USDT:USDT", "BTC/USDT"),
+        ("1000PEPE/USDT:USDT", "1000PEPE/USDT"),
+        ("RSR/USDT:USDT", "RSR/USDT"),
+        # Inverse perp on Bybit — settle currency differs from quote.
+        ("XLM/USD:XLM", "XLM/USD"),
+        # CCXT-style dated futures / options (``-yymmdd-strike-side``).
+        ("BTC/USDT:USDT-260626-90000-C", "BTC/USDT"),
     ],
 )
 def test_to_canonical_symbol(raw_symbol, expected):

@@ -200,3 +200,72 @@ async def test_env_override_allows_null_for_backfill() -> None:
     assert result == 42
     # And the INSERT was actually attempted.
     assert any("INSERT INTO public.tracked_positions" in sql for sql, _ in pool.calls)
+
+
+@pytest.mark.asyncio
+async def test_already_in_play_guard() -> None:
+    """Already-In-Play / Play-Out Guard must reject already completed/played-out trades."""
+    pool = _FakePool(returning_id=999)
+
+    # 1. Test LONG already stopped out (live price 57000.0 <= stop loss 58000.0)
+    with patch("shared.intelligence.interpretation_service._ccxt_live_price") as mock_live:
+        mock_live.return_value = (57000.0, "BTC/USDT", 1700000000000)
+        result = await create_tracked_position_from_interpretation(
+            shared_pool=pool,
+            signal_interpretation_id=1,
+            news_item_id=10,
+            media_item_id=None,
+            trader_profile_id=2,
+            instrument_symbol="BTC/USDT",
+            instrument_exchange="bybit",
+            direction="long",
+            entry_price=60000.0,
+            stop_loss=58000.0,
+            take_profit_1=70000.0,
+            detection_method="llm_vision",
+            detection_confidence=0.5,
+            raw_signal_text="already dead long",
+        )
+    assert result is None
+
+    # 2. Test LONG already hit target (live price 71000.0 >= take profit 70000.0)
+    with patch("shared.intelligence.interpretation_service._ccxt_live_price") as mock_live:
+        mock_live.return_value = (71000.0, "BTC/USDT", 1700000000000)
+        result = await create_tracked_position_from_interpretation(
+            shared_pool=pool,
+            signal_interpretation_id=1,
+            news_item_id=10,
+            media_item_id=None,
+            trader_profile_id=2,
+            instrument_symbol="BTC/USDT",
+            instrument_exchange="bybit",
+            direction="long",
+            entry_price=60000.0,
+            stop_loss=58000.0,
+            take_profit_1=70000.0,
+            detection_method="llm_vision",
+            detection_confidence=0.5,
+            raw_signal_text="already played long",
+        )
+    assert result is None
+
+    # 3. Test LONG valid/fresh (live price 61000.0, between SL 58000.0 and TP 70000.0)
+    with patch("shared.intelligence.interpretation_service._ccxt_live_price") as mock_live:
+        mock_live.return_value = (61000.0, "BTC/USDT", 1700000000000)
+        result = await create_tracked_position_from_interpretation(
+            shared_pool=pool,
+            signal_interpretation_id=1,
+            news_item_id=10,
+            media_item_id=None,
+            trader_profile_id=2,
+            instrument_symbol="BTC/USDT",
+            instrument_exchange="bybit",
+            direction="long",
+            entry_price=60000.0,
+            stop_loss=58000.0,
+            take_profit_1=70000.0,
+            detection_method="llm_vision",
+            detection_confidence=0.5,
+            raw_signal_text="valid fresh long",
+        )
+    assert result == 999

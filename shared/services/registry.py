@@ -571,6 +571,21 @@ def _seed_known_services() -> None:
         )
     )
 
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
+            name="schema-drift",
+            kind="auditor",
+            module="shared.scripts.schema_diff",
+            description=(
+                "Phase R Schema Drift Detector. Compares live database schema "
+                "against canonical snapshots. Runs daily via systemd timer."
+            ),
+            systemd_unit="tickles-schema-drift.timer",
+            enabled_on_vps=False,
+            tags={"phase": "R"},
+        )
+    )
+
 def register_builtin_services() -> None:
     """Idempotent registration of the built-in services."""
     if len(SERVICE_REGISTRY) == 0:

@@ -125,7 +125,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 10 Surgeon2 migration driver")
     parser.add_argument("--company", default="rubicon", help="Company slug")
     parser.add_argument("--dry-run", action="store_true", default=True, help="Print counts without executing")
-    parser.add_argument("--execute", action="store_true", dest="dry_run", help="Actually run the migration")
+    parser.add_argument("--execute", action="store_false", dest="dry_run", help="Actually run the migration")
     args = parser.parse_args()
 
     run_migration(args.company, dry_run=args.dry_run)

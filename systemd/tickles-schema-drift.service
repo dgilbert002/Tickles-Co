@@ -1,0 +1,9 @@
+[Unit]
+Description=Tickles schema drift detector
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/tickles/.env
+ExecStart=/usr/bin/python3 /opt/tickles/shared/scripts/schema_diff.py --dsn ${TICKLES_SHARED_DSN} --snapshot tickles_shared
+StandardOutput=append:/var/log/tickles/schema_drift.log
+StandardError=append:/var/log/tickles/schema_drift.log

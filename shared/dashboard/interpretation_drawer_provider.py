@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 from shared.utils.db import get_shared_pool
 
@@ -76,6 +77,7 @@ _INTERP_COLUMNS: str = (
     "si.instrument_symbol, "
     "si.instrument_exchange, "
     "si.instrument_symbol_normalised, "
+    "si.instrument_resolved_from, "
     "si.timeframe, "
     "si.exchange, "
     "si.chart_analysis, "
@@ -98,7 +100,14 @@ _INTERP_COLUMNS: str = (
     "si.quant_cost_usd, "
     "si.correlation_id, "
     "si.created_at, "
-    "si.updated_at"
+    "si.updated_at, "
+    "si.prefilter_provider, "
+    "si.prefilter_model, "
+    "si.prefilter_result, "
+    "si.prefilter_cost_usd, "
+    "si.vision_provider, "
+    "si.vision_model_requested, "
+    "si.vision_model_resolved"
 )
 
 
@@ -261,6 +270,164 @@ class InterpretationDrawerProvider:
             _do_fetch, label="by_id", fallback=[]
         )
 
+    async def fetch_memories_for_symbol(
+        self,
+        symbol: Optional[str],
+        *,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Return chart_hacker's relevant past memories for ``symbol``.
+
+        Best-effort, never raises. The mem0 client lives in
+        :mod:`shared.utils.mem0_config`; if it cannot be imported (e.g.
+        missing dependency in a minimal test env) we return ``[]`` and
+        log at DEBUG level. The whole call is wrapped in
+        :data:`DRAWER_PROVIDER_TIMEOUT_S` so a slow vector-store probe
+        never blows the drawer's 250ms budget.
+
+        Args:
+            symbol: Trading pair to query for. ``None``/empty/``UNKNOWN``
+                short-circuits to ``[]``.
+            limit: Maximum memories to return. Clamped to ``[1, 20]``.
+
+        Returns:
+            List of ``{"text": str, "score": Optional[float]}`` dicts,
+            best-match first. Empty list on miss, timeout, or any error.
+        """
+        if not symbol:
+            return []
+        sym = str(symbol).strip().upper()
+        if not sym or sym == "UNKNOWN":
+            return []
+        try:
+            cap = max(1, min(20, int(limit)))
+        except (TypeError, ValueError):
+            cap = 5
+
+        async def _do_fetch() -> List[Dict[str, Any]]:
+            return await self._search_mem0_for_symbol(sym, cap)
+
+        return await _run_with_budget(
+            _do_fetch, label="memories_for_symbol", fallback=[]
+        )
+
+    @staticmethod
+    async def _search_mem0_for_symbol(
+        symbol: str, limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Run the mem0 search in a worker thread.
+
+        ``mem.search`` is synchronous in ``mem0ai>=0.1`` and may hit a
+        hosted vector store, so we offload to :func:`asyncio.to_thread`
+        to avoid blocking the event loop for the 250ms drawer budget.
+
+        Args:
+            symbol: Upper-cased trading pair.
+            limit: Maximum results.
+
+        Returns:
+            List of ``{"text": str, "score": Optional[float]}`` dicts.
+        """
+        try:
+            from shared.utils.mem0_config import get_memory
+        except Exception as exc:
+            logger.debug(
+                "drawer mem0 unavailable (import): %s", exc,
+            )
+            return []
+
+        def _do_search() -> List[Dict[str, Any]]:
+            try:
+                mem = get_memory("chart_hacker", "chart_hacker")
+            except Exception as exc:
+                logger.debug("drawer mem0 unavailable (init): %s", exc)
+                return []
+            try:
+                hits = mem.search(
+                    query=f"trading lessons for {symbol}",
+                    user_id="chart_hacker",
+                    limit=limit,
+                )
+            except Exception as exc:
+                logger.debug("drawer mem0 search failed for %s: %s", symbol, exc)
+                return []
+            return _normalise_mem0_hits(hits, limit)
+
+        try:
+            return await asyncio.to_thread(_do_search)
+        except Exception as exc:
+            logger.debug("drawer mem0 to_thread failed for %s: %s", symbol, exc)
+            return []
+
+    async def fetch_media_for_news_item(
+        self, news_item_id: int
+    ) -> List[Dict[str, Any]]:
+        """Return all media rows attached to one news item.
+
+        Used by the drawer's gallery section so a news_item with N
+        charts shows all N tiles regardless of how many
+        ``signal_interpretations`` rows exist. Result is capped at
+        24 rows (anything beyond that is unusable in the gallery
+        and almost certainly a bug or attack).
+
+        Args:
+            news_item_id: Primary key of ``public.news_items``. Must
+                be a positive integer.
+
+        Returns:
+            List of dict rows with keys ``id``, ``url``, ``local_path``,
+            ``thumbnail_path``, ``source_url``, ``media_type``,
+            ``mime_type``, ``processing_status``, ``width``, ``height``,
+            ``created_at``. Empty list on validation failure / DB
+            error / timeout.
+        """
+        try:
+            nid = _validate_id(news_item_id, label="news_item_id")
+        except ValueError as exc:
+            logger.warning("InterpretationDrawerProvider: %s", exc)
+            return []
+
+        async def _do_fetch() -> List[Dict[str, Any]]:
+            return await self._query_media_for_news_item(nid)
+
+        return await _run_with_budget(
+            _do_fetch, label="media_for_news_item", fallback=[]
+        )
+
+    async def fetch_news_item_header(
+        self, news_item_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return a small metadata header for one news item.
+
+        Only emitted by the route layer when ``rows`` is empty (the
+        chart-only post case). When interpretations exist, the
+        frontend reads the same fields off ``rows[0].news`` and
+        this method is not called.
+
+        Args:
+            news_item_id: Primary key of ``public.news_items``. Must
+                be a positive integer.
+
+        Returns:
+            Dict with keys ``id``, ``headline``, ``author``,
+            ``source``, ``channel_name``, ``collected_at``,
+            ``published_at``, ``has_media``, ``media_count``; or
+            ``None`` on miss / validation failure / DB error /
+            timeout.
+        """
+        try:
+            nid = _validate_id(news_item_id, label="news_item_id")
+        except ValueError as exc:
+            logger.warning("InterpretationDrawerProvider: %s", exc)
+            return None
+
+        async def _do_fetch() -> Optional[Dict[str, Any]]:
+            return await self._query_news_item_header(nid)
+
+        return await _run_with_budget(
+            _do_fetch, label="news_item_header", fallback=None
+        )
+
     async def _query_by_news_item(
         self, news_item_id: int, limit: int
     ) -> List[Dict[str, Any]]:
@@ -292,6 +459,132 @@ class InterpretationDrawerProvider:
             )
             return []
         return [self._row_to_dict(r) for r in records]
+
+    async def _query_media_for_news_item(
+        self, news_item_id: int
+    ) -> List[Dict[str, Any]]:
+        """Run the parameterised SELECT for ``fetch_media_for_news_item``.
+
+        Args:
+            news_item_id: Validated positive integer.
+
+        Returns:
+            List of dict rows. Never raises.
+        """
+        try:
+            pool = await get_shared_pool()
+        except Exception as exc:
+            logger.warning(
+                "InterpretationDrawerProvider: get_shared_pool failed: %s",
+                exc,
+            )
+            return []
+
+        sql = (
+            "SELECT id, local_path, thumbnail_path, source_url, "
+            "       media_type, mime_type, processing_status, "
+            "       width, height, created_at "
+            "FROM media_items "
+            "WHERE news_item_id = $1 "
+            "ORDER BY id ASC "
+            "LIMIT 24"
+        )
+        try:
+            async with pool.acquire() as conn:
+                records = await conn.fetch(sql, news_item_id)
+        except Exception as exc:
+            logger.warning(
+                "InterpretationDrawerProvider: media_for_news_item query "
+                "failed: %s",
+                exc,
+            )
+            return []
+        return [self._media_row_to_dict(r) for r in records]
+
+    async def _query_news_item_header(
+        self, news_item_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Run the parameterised SELECT for ``fetch_news_item_header``.
+
+        Args:
+            news_item_id: Validated positive integer.
+
+        Returns:
+            Dict on hit, ``None`` on miss / DB error.
+        """
+        try:
+            pool = await get_shared_pool()
+        except Exception as exc:
+            logger.warning(
+                "InterpretationDrawerProvider: get_shared_pool failed: %s",
+                exc,
+            )
+            return None
+
+        sql = (
+            "SELECT id, headline, author, source, channel_name, "
+            "       collected_at, published_at, has_media, media_count "
+            "FROM news_items "
+            "WHERE id = $1 "
+            "LIMIT 1"
+        )
+        try:
+            async with pool.acquire() as conn:
+                rec = await conn.fetchrow(sql, news_item_id)
+        except Exception as exc:
+            logger.warning(
+                "InterpretationDrawerProvider: news_item_header query "
+                "failed: %s",
+                exc,
+            )
+            return None
+        if rec is None:
+            return None
+        return {
+            "id": _opt_int(rec["id"]),
+            "headline": rec["headline"],
+            "author": rec["author"],
+            "source": rec["source"],
+            "channel_name": rec["channel_name"],
+            "collected_at": _opt_iso(rec["collected_at"]),
+            "published_at": _opt_iso(rec["published_at"]),
+            "has_media": (
+                bool(rec["has_media"])
+                if rec["has_media"] is not None
+                else None
+            ),
+            "media_count": _opt_int(rec["media_count"]),
+        }
+
+    @staticmethod
+    def _media_row_to_dict(rec: Any) -> Dict[str, Any]:
+        """Convert one ``media_items`` row to the gallery dict shape.
+
+        Args:
+            rec: asyncpg.Record (or dict-like) from the media SELECT.
+
+        Returns:
+            JSON-friendly dict matching the documented gallery payload.
+        """
+        media_id = _opt_int(rec["id"])
+        url = (
+            f"api/media/{media_id}"
+            if media_id is not None and rec["local_path"]
+            else None
+        )
+        return {
+            "id": media_id,
+            "url": url,
+            "local_path": rec["local_path"],
+            "thumbnail_path": rec["thumbnail_path"],
+            "source_url": rec["source_url"],
+            "media_type": rec["media_type"],
+            "mime_type": rec["mime_type"],
+            "processing_status": rec["processing_status"],
+            "width": _opt_int(rec["width"]),
+            "height": _opt_int(rec["height"]),
+            "created_at": _opt_iso(rec["created_at"]),
+        }
 
     async def _query_by_id(self, interp_id: int) -> List[Dict[str, Any]]:
         """Run the parameterised SELECT for ``fetch_by_id``.
@@ -327,18 +620,30 @@ class InterpretationDrawerProvider:
         return (
             f"SELECT {_INTERP_COLUMNS}, "
             "       ni.headline       AS news_headline, "
+            "       ni.content        AS news_content, "
             "       ni.source         AS news_source, "
             "       ni.collected_at   AS news_collected_at, "
             "       ni.published_at   AS news_published_at, "
             "       ni.channel_name   AS news_channel_name, "
             "       ni.author         AS news_author, "
+            "       ni.metadata       AS news_metadata, "
+            "       ni.has_media      AS news_has_media, "
+            "       ni.media_count    AS news_media_count, "
+            "       mi.id             AS media_id, "
             "       mi.local_path     AS media_local_path, "
             "       mi.thumbnail_path AS media_thumbnail_path, "
             "       mi.source_url     AS media_source_url, "
-            "       mi.media_type     AS media_type "
+            "       mi.media_type     AS media_type, "
+            "       mi.mime_type      AS media_mime_type, "
+            "       tp.handle_raw     AS trader_handle_raw, "
+            "       tp.handle_normalized AS trader_handle_normalized, "
+            "       tp.display_name   AS trader_display_name, "
+            "       tp.platform       AS trader_platform, "
+            "       tp.trader_type    AS trader_type "
             "FROM signal_interpretations si "
-            "LEFT JOIN news_items  ni ON ni.id = si.news_item_id "
-            "LEFT JOIN media_items mi ON mi.id = si.media_item_id "
+            "LEFT JOIN news_items     ni ON ni.id = si.news_item_id "
+            "LEFT JOIN media_items    mi ON mi.id = si.media_item_id "
+            "LEFT JOIN trader_profiles tp ON tp.id = si.trader_profile_id "
         )
 
     def _build_query_by_news_item(self) -> str:
@@ -382,6 +687,13 @@ class InterpretationDrawerProvider:
             dicts. JSONB columns are passed through unchanged for the
             route's ``_jsonify`` to walk.
         """
+        media_id = _opt_int(rec["media_id"]) if "media_id" in rec.keys() else None
+        if media_id is not None and rec["media_local_path"]:
+            media_url = f"api/media/{media_id}"
+        elif rec.get("media_source_url"):
+            media_url = f"api/media/proxy?url={quote(rec['media_source_url'], safe='')}"
+        else:
+            media_url = None
         return {
             "id": int(rec["id"]),
             "news_item_id": _opt_int(rec["news_item_id"]),
@@ -409,6 +721,7 @@ class InterpretationDrawerProvider:
                 "symbol_normalised": rec["instrument_symbol_normalised"],
                 "exchange": rec["instrument_exchange"] or rec["exchange"],
                 "timeframe": rec["timeframe"],
+                "resolved_from": rec["instrument_resolved_from"],
             },
             "chart_hacker": {
                 "chart_analysis": rec["chart_analysis"],
@@ -430,6 +743,25 @@ class InterpretationDrawerProvider:
                     rec["reason_agreement_score"]
                 ),
             },
+            "prefilter": {
+                "provider": rec["prefilter_provider"],
+                "model": rec["prefilter_model"],
+                "result": rec["prefilter_result"],
+                "cost_usd": _opt_decimal(rec["prefilter_cost_usd"]),
+            },
+            "vision": {
+                "provider": rec["vision_provider"],
+                "model_requested": rec["vision_model_requested"],
+                "model_resolved": rec["vision_model_resolved"],
+            },
+            "actor": {
+                "trader_profile_id": _opt_int(rec["trader_profile_id"]),
+                "handle_raw": rec["trader_handle_raw"],
+                "handle_normalized": rec["trader_handle_normalized"],
+                "display_name": rec["trader_display_name"],
+                "platform": rec["trader_platform"],
+                "trader_type": rec["trader_type"],
+            },
             "prompt_version": rec["prompt_version"],
             "model_version": rec["model_version"],
             "market_data_at": _opt_iso(rec["market_data_at"]),
@@ -443,18 +775,38 @@ class InterpretationDrawerProvider:
             "updated_at": _opt_iso(rec["updated_at"]),
             "news": {
                 "headline": rec["news_headline"],
+                "content": rec["news_content"],
                 "source": rec["news_source"],
                 "channel_name": rec["news_channel_name"],
                 "author": rec["news_author"],
+                "metadata": rec["news_metadata"],
+                "has_media": (
+                    bool(rec["news_has_media"])
+                    if rec["news_has_media"] is not None
+                    else None
+                ),
+                "media_count": _opt_int(rec["news_media_count"]),
                 "collected_at": _opt_iso(rec["news_collected_at"]),
                 "published_at": _opt_iso(rec["news_published_at"]),
             },
             "media": {
+                "id": media_id,
+                "url": media_url,
                 "local_path": rec["media_local_path"],
                 "thumbnail_path": rec["media_thumbnail_path"],
                 "source_url": rec["media_source_url"],
                 "media_type": rec["media_type"],
+                "mime_type": (
+                    rec["media_mime_type"]
+                    if "media_mime_type" in rec.keys()
+                    else None
+                ),
             },
+            # Slice 2 §H — coalesced levels for the live-market panel.
+            # Extracted from llm_levels JSONB so the client-side
+            # ``_firstNumeric`` can prefer dedicated columns when
+            # available (snapshot path) and fall back to JSONB here.
+            "levels": _coalesce_levels_from_jsonb(rec.get("llm_levels")),
         }
 
 
@@ -507,6 +859,114 @@ def _opt_iso(value: Any) -> Optional[str]:
     if callable(isoformat):
         return isoformat()
     return str(value)
+
+
+def _coalesce_levels_from_jsonb(llm_levels: Any) -> Dict[str, Optional[float]]:
+    """Extract numeric levels from the ``llm_levels`` JSONB column.
+
+    Mirrors the logic in :func:`shared.dashboard.snapshot._coalesce_signal_levels`
+    but only uses the JSONB fallback (the drawer SELECT does not include the
+    dedicated NUMERIC columns ``entry_price``, ``stop_loss``, etc.).
+
+    Args:
+        llm_levels: Raw JSONB value (dict, str, or None).
+
+    Returns:
+        Dict with keys ``entry``, ``stop_loss``, ``take_profit_1`` through
+        ``take_profit_6``. Values are ``float`` or ``None``.
+    """
+    parsed: Dict[str, Any] = {}
+    if isinstance(llm_levels, dict):
+        parsed = llm_levels
+    elif isinstance(llm_levels, str):
+        import json
+        try:
+            parsed = json.loads(llm_levels)
+        except (json.JSONDecodeError, TypeError):
+            parsed = {}
+
+    def _coerce(v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v) if v == v else None  # NaN guard
+        if isinstance(v, str):
+            cleaned = v.replace(",", "").replace(" ", "")
+            try:
+                return float(cleaned)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    out: Dict[str, Optional[float]] = {
+        "entry": _coerce(parsed.get("entry")),
+        "stop_loss": _coerce(parsed.get("stop_loss")),
+    }
+    for n in range(1, 7):
+        key = f"take_profit_{n}"
+        out[key] = _coerce(parsed.get(key))
+    return out
+
+
+def _normalise_mem0_hits(hits: Any, limit: int) -> List[Dict[str, Any]]:
+    """Coerce a heterogeneous mem0 search result into a stable shape.
+
+    The ``mem0ai`` client has changed its return shape across versions:
+    sometimes it returns a list of dicts, sometimes a dict with a
+    ``"results"`` key containing the list. Each entry may carry the
+    text under ``text``, ``memory``, or ``content``, and an optional
+    numeric score under ``score``.
+
+    Args:
+        hits: Raw return value from ``mem.search``.
+        limit: Maximum entries to return; non-positive falls back to 5.
+
+    Returns:
+        List of ``{"text": str, "score": Optional[float]}`` dicts,
+        capped at ``limit`` entries. Entries with no usable text are
+        dropped silently.
+    """
+    try:
+        cap = max(1, int(limit))
+    except (TypeError, ValueError):
+        cap = 5
+
+    items: List[Any]
+    if hits is None:
+        return []
+    if isinstance(hits, dict):
+        raw = hits.get("results")
+        items = list(raw) if isinstance(raw, list) else []
+    elif isinstance(hits, list):
+        items = hits
+    else:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        text_val = (
+            entry.get("text")
+            or entry.get("memory")
+            or entry.get("content")
+        )
+        if not text_val:
+            continue
+        text_str = str(text_val).strip()
+        if not text_str:
+            continue
+        score: Optional[float] = None
+        raw_score = entry.get("score")
+        if raw_score is not None:
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = None
+        out.append({"text": text_str, "score": score})
+        if len(out) >= cap:
+            break
+    return out
 
 
 __all__ = [

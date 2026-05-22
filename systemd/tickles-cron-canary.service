@@ -1,0 +1,15 @@
+[Unit]
+Description=Tickles Cron Canary Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=/opt/tickles/.env
+ExecStart=/usr/bin/python3 -m shared.intelligence.cron_canary
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

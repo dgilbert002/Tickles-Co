@@ -271,7 +271,7 @@ async def _handle_demo_async(args: argparse.Namespace) -> int:
 
     print()
     print("[demo] snapshot summary:")
-    print(f"  services registered : {data['services_total']}")
+    print(f"  services registered : {data['services_total_count']}")
     print(f"  submissions active  : {data['submissions_active']}")
     print(f"  latest intents      : {len(data['latest_intents'])}")
     print(f"  notes               : {data['notes']}")

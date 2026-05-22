@@ -78,8 +78,13 @@ def _scan(content: str) -> Iterable[Tuple[str, str]]:
     Yields:
         (operation, table) tuples.
     """
+    skip_next = False
     for line in content.splitlines():
-        if SKIP_MARKER in line:
+        if SKIP_MARKER in line or "writer-registry: skip" in line:
+            skip_next = True
+            continue
+        if skip_next:
+            skip_next = False
             continue
         for m in INSERT_RE.finditer(line):
             yield ("INSERT", m.group(1))

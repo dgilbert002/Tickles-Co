@@ -1,0 +1,26 @@
+# Don't index reference legacy code
+shared/reference/**
+_archive/**
+
+# Don't index backups
+backups/**
+*.bak
+*.bak-*
+*.m3_backup
+*.new
+
+# Don't index generated artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+*.log
+
+# Don't index data files
+data/telegram_sessions/
+var/audit/
+var/features/
+
+# Don't index OpenClaw/Paperclip workspaces
+~/.openclaw/**
+~/.paperclip/**

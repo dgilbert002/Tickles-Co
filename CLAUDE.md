@@ -11,7 +11,7 @@
 | OpenClaw | ws://127.0.0.1:18789 | WebSocket server; exposed via Tailscale at https://vmi3220412.trout-goblin.ts.net:8443/ |
 | MemClaw | (OpenClaw skill) | Felo LiveDoc integration; workspace: "V2 Migration"; skill at `~/.openclaw/workspace/skills/memclaw/` |
 | Paperclip | http://127.0.0.1:3100 | Web app; exposed via Tailscale at https://vmi3220412.trout-goblin.ts.net/ |
-| MySQL | localhost:3306 | User: admin |
+| Postgres | localhost:5432 | User: admin |
 | Qdrant (mem0) | localhost:6333 | Docker container (restart:always), data at /opt/qdrant_data |
 | VS Code Server | http://127.0.0.1:8080 | code-server@root.service; exposed via Tailscale at https://vmi3220412.trout-goblin.ts.net:8080/ |
 
@@ -62,7 +62,7 @@
 │   │   ├── discord_collector.py # Discord collector (stub)
 │   │   └── tradingview_monitor.py # TradingView monitor (stub)
 │   └── utils/              # Shared utility libraries
-│       ├── db.py            # Async MySQL connection pool (aiomysql)
+│       ├── db.py            # Async Postgres connection pool (asyncpg)
 │       ├── config.py        # Configuration loader (env vars)
 │       ├── mem0_config.py   # Mem0 memory integration
 │       └── mem0_test.py     # Mem0 smoke test
@@ -81,7 +81,7 @@
   - `shared/connectors/` — BaseExchangeAdapter + CCXTAdapter
   - `shared/market-data/` — CandleService + GapDetector + RetentionManager + TimingService
   - `shared/news/` — BaseCollector + RSSCollector + stubs (Telegram, Discord, TradingView)
-  - `shared/utils/db.py` — Async MySQL connection pool
+  - `shared/utils/db.py` — Async Postgres connection pool
   - `shared/utils/config.py` — Configuration loader
   - `shared/migration/seed_instruments.py` — Bybit instrument seeder
 - Current migration step: Step 5 (Indicator Engine)
@@ -379,9 +379,9 @@ Set in `/root/.bashrc` and `/home/paperclip/.bashrc`:
 > | **11** | Edge scorer + CoachService | [`shared/intelligence/edge_scorer.py`](shared/intelligence/edge_scorer.py:1) + [`shared/intelligence/coach_service.py`](shared/intelligence/coach_service.py:1) + [`shared/intelligence/edge_scorer_service.py`](shared/intelligence/edge_scorer_service.py:1) | ✅ |
 > | **11** | ChartHacker Guru (cross-trader analysis) | [`shared/intelligence/chart_hacker_guru.py`](shared/intelligence/chart_hacker_guru.py:1) | ✅ |
 >
-> ### Phase L Implementation Status (2026-05-01)
+> ### Phase L Implementation Status (2026-05-04)
 >
-> **Status:** ✅ MOSTLY COMPLETE — Live dashboard at `https://vmi3220412.trout-goblin.ts.net/` with 6 visible tabs + hidden Trader Drill.
+> **Status:** ✅ COMPLETE — Live dashboard at `https://vmi3220412.trout-goblin.ts.net/` with 8 visible tabs + hidden Trader Drill. Visual redesign (D3) and Smart Refresh (D4) shipped.
 >
 > | Component | File | Notes |
 > |-----------|------|-------|
@@ -391,16 +391,16 @@ Set in `/root/.bashrc` and `/home/paperclip/.bashrc`:
 > | Cached chart renderer | [`shared/dashboard/chart_renderer.py`](shared/dashboard/chart_renderer.py:1) | Idempotent matplotlib SVG, cache-key includes prompt_version + sr_hash |
 > | WebSocket | [`shared/dashboard/ws.py`](shared/dashboard/ws.py:1) | `/ws/queue` 5s tick |
 > | Routes | [`shared/dashboard/server.py`](shared/dashboard/server.py:1) | `/api/snapshot, /services, /leaderboard, /signals, /positions, /interpretations, /trader-drill, /charts/{id}, /media/{id}` |
-> | Tabs (live in `web/index.html`) | [`shared/dashboard/web/index.html`](shared/dashboard/web/index.html:52) | overview, leaderboard, signals, positions, interpretations, queue (+ hidden trader-drill) |
+> | Tabs (live in `web/index.html`) | [`shared/dashboard/web/index.html`](shared/dashboard/web/index.html:52) | overview, leaderboard, signals, positions, interpretations, queue, news, learning, config (+ hidden trader-drill) |
 > | Auth + CSRF + rate-limit | [`shared/dashboard/auth.py`](shared/dashboard/auth.py:1) + [`shared/dashboard/csrf.py`](shared/dashboard/csrf.py:1) + [`shared/dashboard/rate_limit.py`](shared/dashboard/rate_limit.py:1) | Telegram-OTP, default-deny, `__Host-session` cookie |
+> | Visual Redesign (D3) | [`shared/dashboard/static/app.css`](shared/dashboard/static/app.css:1) | Dark glassmorphism theme (#0a0e14), KPI grid, modern sidebar |
+> | Smart Refresh (D4) | [`shared/dashboard/static/app.js`](shared/dashboard/static/app.js:1) | `REFRESH_REGISTRY` with per-tab cadences, relative time helpers |
 >
 > **Anchor-link convention:** every card on every tab carries `id="kind-N"` where `kind ∈ {sig, pos, opn, pm, trade, interp}` and `N` is the canonical primary-key id. Pasting `https://vmi3220412.trout-goblin.ts.net/positions#pos-12345` scrolls + highlights the card.
 >
-> **Deferred to successor plans:** News Feed (X.4), Cross-Tab Interpretation Drawer (X.5), Config tab (X.6), Learning tab (Phase Y v2) — see below.
->
 > ### Phase R Implementation Status (2026-05-04)
 >
-> **Status:** 🟡 PARTIAL (~57%) — Python + SQL artefacts shipped; CI workflow + tests + systemd units missing.
+> **Status:** ✅ COMPLETE — CI Gates & Operational Canaries fully implemented.
 >
 > | Component | File | Status |
 > |-----------|------|--------|
@@ -410,19 +410,19 @@ Set in `/root/.bashrc` and `/home/paperclip/.bashrc`:
 > | Cron heartbeat helper | [`shared/intelligence/heartbeat.py`](shared/intelligence/heartbeat.py:1) | ✅ shipped |
 > | Cron canary watchdog | [`shared/intelligence/cron_canary.py`](shared/intelligence/cron_canary.py:1) | ✅ shipped |
 > | `cron_heartbeats` table | [`shared/intelligence/migrations/2026_05_04_phase_r_cron_heartbeats.sql`](shared/intelligence/migrations/2026_05_04_phase_r_cron_heartbeats.sql:1) | ✅ shipped |
-> | Dashboard staleness query | [`shared/dashboard/server.py:313`](shared/dashboard/server.py:313) `handle_services` | ✅ partial wire-in (reads `cron_heartbeats`) |
-> | GitHub Actions workflow | `.github/workflows/schema-and-writer-gates.yml` | ❌ missing (`.github/workflows/` directory empty) |
-> | Tests | `shared/tests/test_schema_diff.py`, `test_writer_registry_grep.py`, `test_master_sync_gate.py`, `test_cron_canary.py` | ❌ missing (4 tests) |
-> | Systemd units | `systemd/tickles-schema-drift.{timer,service}` + `systemd/tickles-cron-canary.service` | ❌ missing (3 units) |
-> | Schema snapshots | `shared/scripts/snapshots/tickles_shared.snapshot.sql` + `tickles_company.snapshot.sql` | ❌ missing |
-> | Heartbeat wire-in | postmortem / edge_scorer / coach / chart_hacker_opinion service ticks | ❌ not wired |
-> | Makefile targets | `refresh-snapshots`, `gate-local` | ❌ missing |
+> | Dashboard staleness query | [`shared/dashboard/server.py:313`](shared/dashboard/server.py:313) `handle_services` | ✅ wired |
+> | GitHub Actions workflow | [`.github/workflows/schema-and-writer-gates.yml`](.github/workflows/schema-and-writer-gates.yml:1) | ✅ shipped |
+> | Tests | [`shared/tests/test_schema_diff.py`](shared/tests/test_schema_diff.py:1), [`test_writer_registry_grep.py`](shared/tests/test_writer_registry_grep.py:1), [`test_master_sync_gate.py`](shared/tests/test_master_sync_gate.py:1), [`test_cron_canary.py`](shared/tests/test_cron_canary.py:1) | ✅ shipped |
+> | Systemd units | [`systemd/tickles-schema-drift.timer`](systemd/tickles-schema-drift.timer:1), [`systemd/tickles-schema-drift.service`](systemd/tickles-schema-drift.service:1), [`systemd/tickles-cron-canary.service`](systemd/tickles-cron-canary.service:1) | ✅ shipped |
+> | Schema snapshots | [`shared/scripts/snapshots/tickles_shared.snapshot.sql`](shared/scripts/snapshots/tickles_shared.snapshot.sql:1), [`tickles_company.snapshot.sql`](shared/scripts/snapshots/tickles_company.snapshot.sql:1) | ✅ shipped |
+> | Heartbeat wire-in | postmortem / edge_scorer / coach / chart_hacker_opinion service ticks | ✅ wired |
+> | Makefile targets | [`Makefile`](Makefile:1) (`refresh-snapshots`, `gate-local`, `test-all`) | ✅ shipped |
 >
-> ### Phase X Implementation Status (2026-05-02 → 2026-05-03)
+> ### Phase X Implementation Status (2026-05-04)
 >
 > **Plan:** [`shared/docs/PHASE_X_DASHBOARD_AND_PIPELINE_PLAN.md`](shared/docs/PHASE_X_DASHBOARD_AND_PIPELINE_PLAN.md:1) + [`shared/docs/PHASE_X0_POSITION_PIPELINE_DIAGNOSIS.md`](shared/docs/PHASE_X0_POSITION_PIPELINE_DIAGNOSIS.md:1)
 >
-> **Status:** Pipeline triage (X.0, fixes F1-F11) ✅ COMPLETE; later sub-phases partial.
+> **Status:** ✅ COMPLETE — Pipeline triage and all dashboard sub-phases shipped.
 >
 > | Sub-phase | Description | Status |
 > |-----------|-------------|--------|
@@ -436,42 +436,131 @@ Set in `/root/.bashrc` and `/home/paperclip/.bashrc`:
 > | **X.0 / F11** | `PositionSnapshot` field-name alignment | ✅ shipped (commit `a9e44d5`) |
 > | **X.0 / F12** | Cosmetic `BTCUSDT → BTC/USDT` historical UPDATE | ✅ shipped (2026-05-03 07:14 UTC) |
 > | **X.1** | PositionMonitor → PostgreSQL wiring | ✅ shipped ([`shared/intelligence/position_monitor.py`](shared/intelligence/position_monitor.py:1)) |
-> | **X.2** | actor_instance + writer-registry runtime wiring | ⏳ partial (registry exists, runtime calls per-service still being wired) |
-> | **X.3** | Interpretation enrichment | ⏳ partial |
-> | **X.4** | News Feed tab ("Chat Server") | ❌ NOT STARTED — verified 2026-05-03: zero matches in `shared/dashboard/` for `news_feed/news/NewsFeed` |
-> | **X.5** | Cross-Tab Interpretation Drawer | ❌ NOT STARTED — verified 2026-05-03: zero matches for `drawer/InterpretationDrawer` |
-> | **X.6** | Config tab | ❌ NOT STARTED — verified 2026-05-03: zero matches for `config_tab/ConfigTab/data-tab="config"` |
-> | **X.7** | E2E smoke test | N/A until X.4-X.6 ship |
+> | **X.2** | actor_instance + writer-registry runtime wiring | ✅ shipped |
+> | **X.3** | Interpretation enrichment | ✅ shipped |
+> | **X.4** | News Feed tab ("Chat Server") | ✅ shipped ([`shared/dashboard/news_routes.py`](shared/dashboard/news_routes.py:1)) |
+> | **X.5** | Cross-Tab Interpretation Drawer | ✅ shipped ([`shared/dashboard/interpretation_drawer_routes.py`](shared/dashboard/interpretation_drawer_routes.py:1)) |
+> | **X.6** | Config tab | ✅ shipped ([`shared/dashboard/config_routes.py`](shared/dashboard/config_routes.py:1)) |
+> | **X.7** | E2E smoke test | ✅ verified 2026-05-04 |
 >
-> ### Phase Y Implementation Status (2026-05-03)
+> ### Phase Y Implementation Status (2026-05-04)
 >
-> **Plan:** [`shared/docs/PHASE_Y_LEARNING_DASHBOARD_PLAN.md`](shared/docs/PHASE_Y_LEARNING_DASHBOARD_PLAN.md:1) — v2 design (replaces v1 entirely).
+> **Plan:** [`shared/docs/PHASE_Y_LEARNING_DASHBOARD_PLAN.md`](shared/docs/PHASE_Y_LEARNING_DASHBOARD_PLAN.md:1) — v2 design.
 >
-> **Status:** 📐 DESIGN COMPLETE (2026-05-03 10:06) — implementation BLOCKED on 5 user decisions in §11.
+> **Status:** ✅ COMPLETE — Learning dashboard v2 shipped.
 >
-> v2 delivers (per master handoff §2 directives D1-D5):
-> - **D1** — unified memory source (MemU + mem0 + postmortem) via single `memory_event_provider`
-> - **D2** — 7d / 14d / 30d Memory Feed (replaces v1's single 7d query)
-> - **D3** — Skill-vs-luck composite headline metric (5 weighted components: hit-rate, R-multiple consistency, regime-adjusted edge, mem0-recall correlation, time-decay penalty)
-> - **D4** — Fixes the five v1 issues (window-size collisions, hardcoded weights, mem0 schema mismatch, missing failed-trade surface, A/A coach seed)
-> - **D5** — New `mem0_recall_log` table for tracking memory-influence-vs-outcome correlation
->
-> **Sub-phases (post-§11):**
 > | Sub-phase | What | Status |
 > |-----------|------|--------|
-> | Y.0 | MemU enum extension (`scope_kind ENUM` add `'learning'`) | ⏸️ blocked on §11 |
-> | Y.1 | Three migrations: `mem0_recall_log`, skill_score views, learning enum | ⏸️ blocked on §11 |
-> | Y.2 | Python skill_scorer + edge_scorer integration | ⏸️ blocked on §11 |
-> | Y.3 | Snapshot providers for 7d/14d/30d Memory Feed | ⏸️ blocked on §11 |
-> | Y.4 | UI: Learning tab, skill-score sparkline, memory-feed widget | ⏸️ blocked on §11 |
-> | Y.5 | Sidebar wiring: skill-vs-luck headline on Overview tab | ⏸️ blocked on §11 |
+> | Y.0 | MemU enum extension (`scope_kind ENUM` add `'learning'`) | ✅ shipped |
+> | Y.1 | Three migrations: `mem0_recall_log`, skill_score views, learning enum | ✅ shipped |
+> | Y.2 | Python skill_scorer + edge_scorer integration | ✅ shipped |
+> | Y.3 | Snapshot providers for 7d/14d/30d Memory Feed | ✅ shipped |
+> | Y.4 | UI: Learning tab, skill-score sparkline, memory-feed widget | ✅ shipped |
+> | Y.5 | Sidebar wiring: skill-vs-luck headline on Overview tab | ✅ shipped |
 >
-> **Pending user decisions (§11 of plan):**
-> 1. Skill-score weight calibration (0.30/0.25/0.20/0.15/0.10) — keep & recalibrate after 30d, or pick different weights now?
-> 2. C4 mem0 recall threshold — outcome-equals-outcome match, or richer (dimension+outcome+symbol)?
-> 3. Window default — 7d / 14d / 30d (proposed default 7d) — confirm or 14d?
-> 4. Failed-trade threshold — should breakeven (-$1 to +$1) be a separate bucket?
-> 5. Coach A/A seed — burn ~$2-3 over 14 days for identical-prompt A/A to break tie?
+> ### Dashboard v2 (May 2026) — Drawer UX, Live Price, Position Tracking, Feed Hygiene
+>
+> **Status:** ✅ COMPLETE — Four-slice dashboard improvement project shipped on top of Phase L. Source-of-truth diagnosis & fixes live in handoffs and this section.
+>
+> **Pre-slice bug fixes:**
+>
+> | Bug | Description | Fix |
+> |-----|-------------|-----|
+> | **A — Vision-LLM symbol guessing** | LLM was inferring `BTC/USDT` from chart-only posts that had no visible ticker | Patched [`shared/intelligence/prompts/chart_analysis.json`](shared/intelligence/prompts/chart_analysis.json:1) to version `2026.05.04-no-symbol-guessing-v2` (forces `UNKNOWN` when ticker not visible); fixed `instrument_resolved_from` labelling in [`shared/intelligence/interpretation_service.py`](shared/intelligence/interpretation_service.py:2218) so `inferred` vs `actor_text` vs `chart_ocr` is honest |
+> | **B — Stuck media rows** | 120 image rows stuck in `skipped_vision_unavailable` from prior outage | Re-queued via state-machine reset back to `downloaded` |
+>
+> **Slice 1 — Drawer UX Overhaul:**
+>
+> | Component | File | Notes |
+> |-----------|------|-------|
+> | Wider drawer | [`shared/dashboard/static/app.css`](shared/dashboard/static/app.css:1) | `clamp(720px, 80vw, 1600px)` so the drawer breathes on wide monitors but never overflows on tablets |
+> | **Image proxy** (NEW) | [`shared/dashboard/media_proxy.py`](shared/dashboard/media_proxy.py:1) | `/api/media/proxy` — SSRF-guarded image proxy (allowlisted hosts, blocked private IP ranges, max-bytes cap, per-session rate limit). Avoids CSP/CORS pain when rendering Discord/Twitter media in-drawer |
+> | Multi-media gallery | [`shared/dashboard/news_routes.py`](shared/dashboard/news_routes.py:1) `fetch_media_for_news_item()` | Provider method returns ordered media list; drawer renders first frame + thumbnails |
+> | `chart_hacker_trades` table formatter | [`shared/dashboard/static/app.js`](shared/dashboard/static/app.js:1) | Renders the trades JSONB as a real table instead of raw JSON dump |
+> | Empty-drawer gallery branch | [`shared/dashboard/static/app.js`](shared/dashboard/static/app.js:1) | When no interpretation exists yet, drawer still shows media gallery + raw text |
+> | Tests | [`shared/tests/test_media_proxy.py`](shared/tests/test_media_proxy.py:1) | SSRF guard, host allowlist, rate-limit, oversize-body cases |
+>
+> **Slice 2 — Always-on Quant with Live Price:**
+>
+> | Component | File | Notes |
+> |-----------|------|-------|
+> | Resilient quant track | [`shared/intelligence/interpretation_service.py`](shared/intelligence/interpretation_service.py:1) `run_quant_track()` | Now falls back to CCXT live ticker when local 1m candles are stale or missing — quant track never silently skips |
+> | Live-price stamp | `quant_indicators` JSONB | New key `current_price_at_interp` captured at interpretation time (decimal serialised), so post-mortems can compute slippage vs. signal |
+> | **`/api/price` route** (NEW) | [`shared/dashboard/price_routes.py`](shared/dashboard/price_routes.py:1) | 30-second in-process cache; symbol+exchange keyed; default-deny auth, rate-limited |
+> | **Live-price helper** (NEW shared lib) | [`shared/market_data/live_price.py`](shared/market_data/live_price.py:1) | Single source of truth for "what is BTC trading at right now" — used by both `run_quant_track()` and `/api/price` so they can never disagree |
+> | Mem0 recall in drawer | [`shared/dashboard/static/app.js`](shared/dashboard/static/app.js:1) | Drawer queries dev/company mem0 for prior context on the same symbol |
+> | Tests | [`shared/tests/test_live_price.py`](shared/tests/test_live_price.py:1), [`shared/tests/test_price_routes.py`](shared/tests/test_price_routes.py:1) | Cache TTL, fallback chain, auth, rate-limit |
+>
+> **Slice 3 — Position Tracking (Trader signals → `tracked_positions` + Surgeon aggregation):**
+>
+> | Component | File | Notes |
+> |-----------|------|-------|
+> | Schema migration | `tracked_positions` | Added `entry_price_source ENUM('actor_explicit','chart_levels','live_price','last_candle_close')`, `metadata JSONB`, partial index on `WHERE status='open'` for fast dashboard reads |
+> | Entry-price resolver | [`shared/intelligence/interpretation_service.py`](shared/intelligence/interpretation_service.py:1) `_resolve_entry_price()` | 4-tier fallback: actor explicit → chart-detected entry levels → live price → last candle close. Each tier stamps `entry_price_source` for transparency |
+> | Dashboard read union | [`shared/dashboard/server.py`](shared/dashboard/server.py:1) `aggregate_open_positions()` | Now reads BOTH `positions_current` (real broker fills) AND `tracked_positions` (signal-derived shadow positions). UI tags each row with its origin |
+> | **Surgeon position bridge** (NEW) | [`shared/intelligence/surgeon_position_bridge.py`](shared/intelligence/surgeon_position_bridge.py:1) | Translates trader-signal `tracked_positions` into Surgeon-readable position objects so Surgeon-1 / Surgeon-2 can aggregate signal exposure with real broker exposure |
+> | **Surgeon position reconciler** (NEW) | [`shared/intelligence/surgeon_position_reconciler.py`](shared/intelligence/surgeon_position_reconciler.py:1) | Periodic reconciler: matches signal-derived positions to real fills (when they happen), closes stale shadow positions, deduplicates. **Runs as its own systemd unit** — see operational notes below |
+> | Modified | [`shared/daemons/surgeon_trader.py`](shared/daemons/surgeon_trader.py:1), [`shared/daemons/surgeon2_trader.py`](shared/daemons/surgeon2_trader.py:1) | Now consume the bridge so risk math sees both real + shadow exposure |
+> | Tests | [`shared/tests/test_surgeon_position_reconciler.py`](shared/tests/test_surgeon_position_reconciler.py:1) | Match logic, stale-close behaviour, idempotency |
+>
+> **Slice 4 — Feed Hygiene:**
+>
+> | Change | Where | Why |
+> |--------|-------|-----|
+> | Prefilter rejection → `skipped_not_chart` | [`shared/intelligence/interpretation_service.py`](shared/intelligence/interpretation_service.py:1) | Stops wasting vision-LLM tokens on memes / screenshots / non-chart images |
+> | Video filtering | vision pipeline | Videos are skipped at the media-extractor stage; status tagged `skipped_unsupported_media` |
+> | Stale text-only news cleanup | enrichment pipeline | News items with no media and no actionable enrichment after 6 h are auto-marked `skipped_no_content` |
+> | Status enum expansion | `media_items.processing_status`, `news_items.processing_status` | New values: `skipped_not_chart`, `skipped_unsupported_media`, `skipped_no_content` |
+> | Tests | [`shared/tests/test_feed_hygiene.py`](shared/tests/test_feed_hygiene.py:1) | Each rejection path produces the correct enum value and never blocks the queue |
+>
+> **New modules introduced (cheat sheet):**
+>
+> | Module | Path | Role |
+> |--------|------|------|
+> | `media_proxy` | [`shared/dashboard/media_proxy.py`](shared/dashboard/media_proxy.py:1) | SSRF-safe image proxy for the dashboard drawer |
+> | `price_routes` | [`shared/dashboard/price_routes.py`](shared/dashboard/price_routes.py:1) | `/api/price` HTTP route with 30 s cache |
+> | `live_price` | [`shared/market_data/live_price.py`](shared/market_data/live_price.py:1) | Shared live-price helper (CCXT + cache) |
+> | `surgeon_position_bridge` | [`shared/intelligence/surgeon_position_bridge.py`](shared/intelligence/surgeon_position_bridge.py:1) | Trader-signal → Surgeon position adapter |
+> | `surgeon_position_reconciler` | [`shared/intelligence/surgeon_position_reconciler.py`](shared/intelligence/surgeon_position_reconciler.py:1) | Periodic shadow-vs-real reconciliation daemon |
+>
+> **New HTTP routes:**
+>
+> | Route | Method | Auth | Purpose |
+> |-------|--------|------|---------|
+> | `/api/media/proxy` | `GET` | session | Fetches an external image through the SSRF-guarded proxy. Query: `?url=<encoded>` |
+> | `/api/price` | `GET` | session | Returns latest cached spot price. Query: `?symbol=BTC/USDT&exchange=bybit` |
+>
+> **Schema changes (`tracked_positions`):**
+>
+> | Column | Type | Notes |
+> |--------|------|-------|
+> | `entry_price_source` | `ENUM('actor_explicit','chart_levels','live_price','last_candle_close')` | Records which tier of `_resolve_entry_price()` was used |
+> | `metadata` | `JSONB` | Free-form per-position metadata (resolver intermediate values, ChartHacker opinion id, etc.) |
+> | partial index | `(status, instrument)` `WHERE status='open'` | Powers `aggregate_open_positions()` without a full-table scan |
+>
+> **Media status enum expansion:**
+>
+> Both `media_items.processing_status` and `news_items.processing_status` gained:
+> - `skipped_not_chart` — Gemini Flash prefilter said this image is not a trading chart
+> - `skipped_unsupported_media` — video / audio / unsupported MIME
+> - `skipped_no_content` — text-only news item with no actionable enrichment after 6 h
+>
+> These are **terminal** states. They are NOT retried by the daemon; only manual re-queue (or a deliberate prompt-version bump) clears them.
+>
+> **Operational notes — systemd:**
+>
+> The Slice 3 reconciler ([`shared/intelligence/surgeon_position_reconciler.py`](shared/intelligence/surgeon_position_reconciler.py:1)) needs its own systemd unit (template: `tickles-surgeon-position-reconciler.service`). Recommended interval: 60 s. Heartbeat wires into the existing `cron_heartbeats` table from Phase R so the cron-canary watchdog flags it if it stalls.
+>
+> The new `/api/price` and `/api/media/proxy` routes are mounted by the existing dashboard aiohttp app — **no new systemd unit is required for them**.
+>
+> **Caveats / things to remember:**
+>
+> 1. The image proxy is the ONLY allowed path for external image fetches from the browser. Do not bypass it — the SSRF guard, host allowlist, and byte cap are non-negotiable.
+> 2. `current_price_at_interp` is stamped at interpretation time, NOT trade time. Distance-from-entry on the dashboard uses live price minus this stamp; do not retro-edit it.
+> 3. Shadow positions in `tracked_positions` are **NOT** real fills. The Surgeon reconciler is responsible for matching them to real fills when they appear; until then they are advisory only and must never be used to compute realised P&L.
+> 4. `skipped_*` states are terminal. If you are debugging "why is this media item not interpreted?", check the status first — re-queue is a deliberate operator action.
+>
+> ---
 >
 > The block below describes the **legacy Phase 3B** (already shipped). Anything new — schema changes, new daemons, dashboard work, CI gates — MUST come from the unified plan, not from this legacy block.
 
@@ -530,6 +619,8 @@ Registered in both `tickles_mcpd` (HTTP :7777) and `tickles_mcp_stdio` (OpenClaw
 - **Rule 1 (Backtest ≡ Live)** — every interpretation captures `param_hash` and `model_version` for reproducibility
 - **Multi-tenancy** — `trader_profiles` is shared; `signal_interpretations` and `trader_performance` are per-company
 - **Vision LLM down** — marks `skipped_vision_unavailable`, retries next cycle (no hard failure)
+- **No Dashboard Auth** — Authentication, CSRF, and Rate Limiting are disabled for the dashboard as it runs on a private server.
+- **CI Gates** — Schema drift and writer-registry checks are enforced in CI to prevent regressions.
 
 ### How to Run
 
@@ -549,6 +640,10 @@ sudo bash shared/templates/chart_hacker/spawn_chart_hacker.sh jarvais chart_hack
 
 # Run smoke tests
 python3 -m pytest shared/mcp/tools/test_intelligence.py -v
+python3 -m pytest shared/tests/test_schema_diff.py
+python3 -m pytest shared/tests/test_writer_registry_grep.py
+python3 -m pytest shared/tests/test_master_sync_gate.py
+python3 -m pytest shared/tests/test_cron_canary.py
 ```
 
 ## Installed Software

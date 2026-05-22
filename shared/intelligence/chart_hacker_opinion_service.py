@@ -35,6 +35,77 @@ _PRICE_MOVE_THRESHOLD_PCT = float(os.environ.get("OPINION_PRICE_MOVE_THRESHOLD_P
 _ADVISORY_LOCK_KEY = "chart_hacker_opinion"
 
 
+# ---------------------------------------------------------------------------
+# D1 — push critic opinion insight into mem0 (recall surface for interpretation_service)
+# ---------------------------------------------------------------------------
+async def _push_opinion_to_mem0(
+    company: str,
+    row: asyncpg.Record,
+    llm_result: Dict[str, Any],
+) -> None:
+    """Write a chart_hacker critic opinion into the chart_hacker mem0 namespace.
+
+    Best-effort: any failure is logged and swallowed — the agent_opinions row
+    is already in Postgres as the source of truth.  mem0 is the recall surface
+    that interpretation_service queries when processing new signals.
+    """
+    try:
+        from shared.utils.mem0_config import get_memory
+    except Exception as exc:
+        logger.debug("opinion→mem0: mem0_config import failed: %s", exc)
+        return
+
+    memo = str(llm_result.get("memo", "")).strip()
+    if not memo:
+        return
+
+    symbol = row["instrument_symbol"]
+    direction = row["direction"]
+    position_id = int(row["position_id"])
+    confidence = float(llm_result.get("memo_confidence", 0.0))
+    would_take = bool(llm_result.get("would_take_trade"))
+    actor = (row["actor_id"] or "unknown").strip()
+
+    metadata = {
+        "about": f"position:{position_id}",
+        "symbol": symbol,
+        "direction": direction,
+        "confidence": confidence,
+        "would_take_trade": would_take,
+        "suggested_sl": llm_result.get("suggested_sl"),
+        "suggested_tp": llm_result.get("suggested_tp"),
+        "position_id": position_id,
+    }
+
+    try:
+        mem, agent_id = get_memory(company, "chart_hacker")
+    except Exception as exc:
+        logger.warning("opinion→mem0: get_memory failed: %s", exc)
+        return
+
+    text = (
+        f"Opinion on {symbol} {direction} (pos #{position_id}, "
+        f"confidence={confidence:.2f}, would_take={would_take}): {memo}"
+    )
+    try:
+        await asyncio.to_thread(
+            mem.add,
+            text,
+            user_id=company,
+            agent_id=agent_id,
+            metadata=metadata,
+        )
+        logger.info(
+            "opinion→mem0: wrote opinion for position_id=%s symbol=%s confidence=%.2f",
+            position_id, symbol, confidence,
+        )
+    except Exception as exc:
+        logger.warning(
+            "opinion→mem0: mem.add failed (position_id=%s): %s",
+            position_id, exc,
+        )
+
+
 class ChartHackerOpinionService:
     """Daemon that watches open positions and writes critic opinions to agent_opinions."""
 
@@ -301,6 +372,13 @@ class ChartHackerOpinionService:
             "chart_hacker_opinion: wrote opinion for position_id=%s published=%s",
             position_id,
             float(llm_result.get("memo_confidence", 0.0)) >= _MIN_CONFIDENCE,
+        )
+
+        # D1 — push opinion insight into mem0 so interpretation_service can recall it
+        await _push_opinion_to_mem0(
+            company=self.company_id,
+            row=row,
+            llm_result=llm_result,
         )
 
     async def tick(self) -> Dict[str, Any]:

@@ -51,6 +51,9 @@ shared/.backtests_state.json
 shared/data/
 shared/logs/
 
+# --- Reports (runtime artifacts, never commit) ---
+shared/reports/
+
 # --- Logs & dumps ---
 logs/
 *.log

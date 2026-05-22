@@ -73,7 +73,7 @@ async def find_duplicate_position(
             FROM public.tracked_positions tp
             WHERE tp.instrument_symbol = $1
               AND tp.direction = $2
-              AND tp.status IN ('open', 'pending', 'partial_hit')
+              AND tp.status IN ('open', 'pending', 'partial_exit')
               AND tp.created_at >= NOW() - INTERVAL '1 hour' * $3
               AND tp.entry_price IS NOT NULL
               AND tp.entry_price > 0
