@@ -785,14 +785,21 @@ async def _load_prompts_async(
                 version_keys.append(f"{source}-{channel}-v1")
             if source:
                 version_keys.append(f"{source}-v1")
+            # Special: Telegram → Rose prompt
+            if source == "telegram":
+                version_keys.append("telegram-rose-v1")
             version_keys.append("2026.05.24-position-box-required-v2")  # default
 
             for vk in version_keys:
-                row = await conn.fetchrow(
-                    "SELECT system, body, version, prompt_hash FROM prompt_versions "
-                    "WHERE name = 'chart_analysis' AND version = $1 AND source = 'db'",
-                    vk,
-                )
+                try:
+                    row = await conn.fetchrow(
+                        "SELECT system, body, version, prompt_hash FROM prompt_versions "
+                        "WHERE name = 'chart_analysis' AND version = $1 AND source = 'db'",
+                        vk,
+                    )
+                except Exception as fetch_exc:
+                    logger.warning("prompt_versions fetch failed for %s: %s", vk, fetch_exc)
+                    continue
                 if row:
                     logger.info(
                         "Loaded prompt from DB: chart_analysis/%s hash=%s",
