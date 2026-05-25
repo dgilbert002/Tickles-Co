@@ -1985,6 +1985,15 @@ class PositionMonitor:
             price = await fetch_latest_price_by_epic(pool, epic, self.cfg.default_timeframe)
         if price is None:
             price = await fetch_latest_price(pool, symbol, instrument_exchange, self.cfg.default_timeframe)
+        # CCXT fallback — try live exchange ticker if all DB sources failed
+        if price is None:
+            try:
+                from shared.market_data.live_price import fetch_live_price as _ccxt_price
+                result = await _ccxt_price(symbol, instrument_exchange or "bybit", timeout_s=4.0)
+                price = result.price
+                logger.debug("position_monitor CCXT fallback: %s = %.4f", symbol, price)
+            except Exception:
+                pass
 
         if price is None:
             logger.warning("No price data for position %s (symbol=%s, epic=%s)", pos_id, symbol, epic)
