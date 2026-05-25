@@ -83,6 +83,7 @@ INSERT INTO public.position_postmortems (
     trader_thesis_validated, llm_thesis_validated,
     regime_at_entry, regime_at_exit,
     lessons_for_actor, lessons_for_company,
+    what_went_well, what_went_wrong, what_to_do_differently, edge_detected,
     cost_usd, latency_ms, correlation_id
 ) VALUES (
     $1, $2, $3,
@@ -91,7 +92,8 @@ INSERT INTO public.position_postmortems (
     $11, $12,
     $13, $14,
     $15, $16,
-    $17, $18, $19
+    $17, $18, $19, $20,
+    $21, $22, $23
 )
 ON CONFLICT (position_id, postmortem_version, prompt_version) DO NOTHING
 RETURNING id
@@ -413,6 +415,35 @@ class PostMortemService:
             The registered prompt version hash, or ``'fallback'`` when the
             prompt file is missing.
         """
+        """Register the postmortem prompt body in ``prompt_registry``.
+
+        Tries prompt_versions DB table first, falls back to JSON file.
+        Returns:
+            The registered prompt version hash, or ``'fallback'``.
+        """
+        # Try DB first
+        if self._pool:
+            try:
+                async with self._pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT system, body, version, prompt_hash FROM prompt_versions "
+                        "WHERE name = 'postmortem' AND source = 'db' "
+                        "ORDER BY created_at DESC LIMIT 1",
+                    )
+                    if row:
+                        self._prompts = {
+                            "postmortem": {
+                                "version": row["version"],
+                                "system_prompt": row["system"],
+                                "user_prompt_template": row["body"],
+                            }
+                        }
+                        logger.info("postmortem: loaded prompt from DB: %s", row["version"])
+                        return row["prompt_hash"]
+            except Exception as exc:
+                logger.warning("postmortem DB prompt load failed: %s", exc)
+
+        # Fallback to file
         self._prompts = self._load_prompts()
         pm = self._prompts.get("postmortem", {})
         if not pm:
@@ -662,6 +693,10 @@ class PostMortemService:
                 _coerce_regime(parsed.get("regime_at_exit")),
                 _truncate(parsed.get("lessons_for_actor"), 2000),
                 _truncate(parsed.get("lessons_for_company"), 2000),
+                parsed.get("what_went_well", "")[:400] if parsed.get("what_went_well") else None,
+                parsed.get("what_went_wrong", "")[:400] if parsed.get("what_went_wrong") else None,
+                parsed.get("what_to_do_differently", "")[:300] if parsed.get("what_to_do_differently") else None,
+                parsed.get("edge_detected", "")[:200] if parsed.get("edge_detected") else None,
                 Decimal("0"),  # cost_usd populated by api_cost_log; placeholder column value
                 latency_ms,
                 correlation_id[:36],

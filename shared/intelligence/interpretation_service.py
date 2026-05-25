@@ -4471,6 +4471,7 @@ class InterpretationService:
                     fallback_model="dedup",
                     freshness_threshold=self.cfg.freshness_threshold_s,
                     max_age_hours=self.cfg.max_age_hours,
+                    extra="text_" + str(news_item_id) if "news_item_id" in dir() else "",
                 )
                 await write_signal_interpretation(
                     shared_pool=shared_pool,
@@ -4520,6 +4521,7 @@ class InterpretationService:
             fallback_model="",
             freshness_threshold=self.cfg.freshness_threshold_s,
             max_age_hours=self.cfg.max_age_hours,
+            extra="text_" + str(news_item_id) if "news_item_id" in dir() else "",
         )
         # Phase 9: text-only signals resolve from message text
         text_resolved_from = "message"

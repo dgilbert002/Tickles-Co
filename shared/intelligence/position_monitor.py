@@ -802,6 +802,8 @@ async def _find_sl_tp_wick_candle(
                     last_scanned_ts = ensure_utc(rows[-1]["timestamp"])
                     if len(rows) >= 1000:
                         scan_complete = False
+                    else:
+                        scan_complete = True  # got all available candles from CCXT
         except Exception as fallback_exc:
             # Bug F round-3 review fix: CCXT fallback failure means we
             # cannot trust our scan progress at all — keep scan_complete
@@ -1992,7 +1994,7 @@ class PositionMonitor:
                 result = await _ccxt_price(symbol, instrument_exchange or "bybit", timeout_s=4.0)
                 price = result.price
                 logger.debug("position_monitor CCXT fallback: %s = %.4f", symbol, price)
-            except Exception:
+            except Exception as exc:
                 logger.debug("position_monitor CCXT fallback failed: %s", exc)
                 pass
 
