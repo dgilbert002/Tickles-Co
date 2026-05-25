@@ -2283,8 +2283,6 @@ async def write_signal_interpretation(
         "  llm_raw_request_path, llm_raw_response_path, "
         "  correlation_id, "
         "  instrument_resolved_from, "
-        # prompt provenance
-        "  prompt_source, "
         # Phase J — dual-extraction columns
         "  timeframe, chart_analysis, trader_trades, chart_hacker_trades, "
         "  ai_agreement_score, ai_comment, "
@@ -2294,6 +2292,8 @@ async def write_signal_interpretation(
         "  take_profit_4, take_profit_5, take_profit_6, "
         # Bug H8 — denormalised pattern/setup tags from chart_analysis
         "  pattern_tags, setup_tags, "
+        # prompt provenance
+        "  prompt_source, "
         "  created_at"
         ") VALUES ("
         "  $1, $2, $3, $4, $5, $6, "
