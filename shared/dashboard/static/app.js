@@ -593,8 +593,7 @@ function renderSourcesTree(){
       <td><button class="pill-btn" data-prompt-key="${esc(p.key)}" style="padding:4px 12px;font-size:11px">Edit</button></td>
     </tr>`;
   });
-  h+=`</tbody></table></div></div>
-    <div id="prompt-editor" class="panel full hidden" style="margin-top:14px"></div>`;
+  h+=`</tbody></table></div></div>`;
 
   el.innerHTML=h;
 
@@ -604,9 +603,9 @@ function renderSourcesTree(){
   document.querySelectorAll('#sources-tree .media-types').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
   document.querySelectorAll('#sources-tree .prompt-pick').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
   // Prompt editor buttons
-  document.querySelectorAll('#sources-tree [data-prompt-key]').forEach(btn=>btn.onclick=()=>showPromptEditor(btn.dataset.promptKey));
+  document.querySelectorAll('#sources-tree [data-prompt-key]').forEach(btn=>btn.onclick=()=>openPromptModal(btn.dataset.promptKey));
   const newBtn=$('#btn-new-prompt');
-  if(newBtn)newBtn.onclick=()=>showPromptEditor('new');
+  if(newBtn)newBtn.onclick=()=>openPromptModal('new');
 }
 
 async function toggleChannelAll(cb){
@@ -662,66 +661,100 @@ async function updateUserTrack(el){
   }catch(e){console.error('track update failed',e);}
 }
 
-function showPromptEditor(key){
-  const ed=$('#prompt-editor');
-  if(!ed)return;
-  if(key==='new'){
-    ed.classList.remove('hidden');
-    ed.innerHTML=`
-      <div class="panel-head"><h2>New Prompt</h2></div>
-      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
-        <label class="settings-label">Key
-          <input class="input wide" id="prompt-key" placeholder="e.g. discord/charthackers/prompt">
-        </label>
-        <label class="settings-label">System Prompt
-          <textarea class="input wide" id="prompt-system" rows="10" style="font-family:var(--mono);font-size:12px"></textarea>
-        </label>
-        <label class="settings-label">User Prompt Template
-          <textarea class="input wide" id="prompt-user" rows="3" style="font-family:var(--mono);font-size:12px"></textarea>
-        </label>
-        <div style="display:flex;gap:8px">
-          <button class="pill-btn" id="btn-save-prompt">Save</button>
-          <button class="pill-btn" id="btn-cancel-prompt">Cancel</button>
+/* ─── Prompt modal ─── */
+function openPromptModal(key){
+  const isNew=key==='new';
+  const title=isNew?'New Prompt':`Edit Prompt`;
+  const subtitle=isNew?'Create a new ChartHacker prompt':'';
+  const body=isNew
+    ? `<label>Key <input class="input" id="prompt-key" placeholder="e.g. telegram/rose/prompt"></label>
+       <label>System Prompt <textarea class="input" id="prompt-system" rows="12" placeholder="You are ChartHacker..."></textarea></label>
+       <label>User Prompt Template <textarea class="input" id="prompt-user" rows="3" placeholder="Analyze this chart for {symbol}..."></textarea></label>
+       <div class="btn-row"><button class="pill-btn" id="btn-save-prompt">Save</button><button class="pill-btn" id="btn-cancel-prompt">Cancel</button></div>`
+    : `<div class="empty" style="padding:60px">Loading…</div>`;
+
+  // Build modal HTML
+  const modal=document.createElement('div');
+  modal.className='modal-backdrop';
+  modal.id='prompt-modal';
+  modal.innerHTML=`
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2>${esc(title)}${isNew?'':` <span class="mono secondary">${esc(key)}</span>`}</h2>
+          ${subtitle?`<p class="secondary">${esc(subtitle)}</p>`:''}</div>
+        <div class="modal-actions">
+          ${!isNew?`<button class="pill-btn" id="btn-rename-prompt" style="padding:4px 12px;font-size:11px">Rename</button>
+                    <button class="pill-btn" id="btn-delete-prompt" style="padding:4px 12px;font-size:11px;color:var(--red)">Delete</button>`:''}
+          <button class="drawer-close" id="btn-close-modal">×</button>
         </div>
-      </div>`;
-    $('#btn-save-prompt').onclick=()=>savePrompt('new');
-    $('#btn-cancel-prompt').onclick=()=>ed.classList.add('hidden');
-  }else{
+      </div>
+      <div class="modal-body" id="prompt-modal-body">${body}</div>
+    </div>`;
+
+  document.body.appendChild(modal);
+
+  const close=()=>modal.remove();
+  modal.onclick=e=>{if(e.target===modal)close()};
+  modal.querySelector('#btn-close-modal').onclick=close;
+  modal.querySelector('#btn-cancel-prompt')?.addEventListener('click',close);
+
+  if(!isNew){
     api(`/api/settings/prompts/${encodeURIComponent(key)}`,{skipCompany:true}).then(data=>{
-      ed.classList.remove('hidden');
-      ed.innerHTML=`
-        <div class="panel-head"><h2>Edit: <span class="mono">${esc(key)}</span></h2></div>
-        <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
-          <label class="settings-label">System Prompt
-            <textarea class="input wide" id="prompt-system" rows="10" style="font-family:var(--mono);font-size:12px">${esc(data.system_prompt||'')}</textarea>
-          </label>
-          <label class="settings-label">User Prompt Template
-            <textarea class="input wide" id="prompt-user" rows="3" style="font-family:var(--mono);font-size:12px">${esc(data.user_prompt_template||'')}</textarea>
-          </label>
-          <div style="display:flex;gap:8px">
-            <button class="pill-btn" id="btn-save-prompt">Save</button>
-            <button class="pill-btn" id="btn-cancel-prompt">Cancel</button>
-          </div>
-        </div>`;
-      $('#btn-save-prompt').onclick=()=>savePrompt(key);
-      $('#btn-cancel-prompt').onclick=()=>ed.classList.add('hidden');
-    }).catch(e=>{ed.innerHTML=`<div class="panel-head"><h2>Error</h2></div><div class="empty">Failed to load prompt</div>`;});
+      const bodyEl=modal.querySelector('#prompt-modal-body');
+      if(!bodyEl)return;
+      bodyEl.innerHTML=`
+        <label>System Prompt <textarea class="input" id="prompt-system" rows="12">${esc(data.system_prompt||'')}</textarea></label>
+        <label>User Prompt Template <textarea class="input" id="prompt-user" rows="3">${esc(data.user_prompt_template||'')}</textarea></label>
+        <div class="btn-row"><button class="pill-btn" id="btn-save-prompt">Save</button><button class="pill-btn" id="btn-cancel-prompt">Cancel</button></div>`;
+      modal.querySelector('#btn-cancel-prompt')?.addEventListener('click',close);
+      modal.querySelector('#btn-save-prompt').onclick=()=>savePrompt(key,close);
+    }).catch(e=>{modal.querySelector('#prompt-modal-body').innerHTML='<div class="empty">Failed to load prompt</div>';});
+  }else{
+    modal.querySelector('#btn-save-prompt').onclick=()=>savePrompt('new',close);
   }
+
+  // Delete handler
+  modal.querySelector('#btn-delete-prompt')?.addEventListener('click',async()=>{
+    if(!confirm(`Delete prompt "${key}"? This cannot be undone.`))return;
+    try{
+      await _delAPI(`/api/settings/prompts/${encodeURIComponent(key)}`);
+      close();
+      fetchSourcesAndPrompts();
+    }catch(e){alert('Delete failed: '+(e.error||e));}
+  });
+
+  // Rename handler
+  modal.querySelector('#btn-rename-prompt')?.addEventListener('click',()=>{
+    const newKey=prompt('Rename prompt to:',key);
+    if(!newKey||newKey===key)return;
+    _putAPI(`/api/settings/prompts/${encodeURIComponent(key)}/rename`,{new_key:newKey}).then(()=>{
+      close();
+      fetchSourcesAndPrompts();
+    }).catch(e=>alert('Rename failed: '+(e.error||e)));
+  });
 }
 
-async function savePrompt(key){
-  const ed=$('#prompt-editor');
+async function _delAPI(path){
+  const u=new URL(path.replace(/^\//,''),document.baseURI);
+  const r=await fetch(u,{method:'DELETE'});
+  const j=await r.json();
+  if(!r.ok)throw j;
+  return j;
+}
+
+async function savePrompt(key,closeFn){
   const keyInput=$('#prompt-key');
-  const actualKey=key==='new'?keyInput?.value:key;
+  const actualKey=key==='new'?keyInput?.value?.trim():key;
   if(!actualKey){alert('Key is required');return;}
   const sp=$('#prompt-system')?.value||'';
   const ut=$('#prompt-user')?.value||'';
+  if(!sp||!ut){alert('System prompt and user template are required');return;}
   try{
     await _putAPI(`/api/settings/prompts/${encodeURIComponent(actualKey)}`,
       {system_prompt:sp,user_prompt_template:ut});
-    ed.classList.add('hidden');
+    closeFn();
     fetchSourcesAndPrompts();
-  }catch(e){console.error('Save failed',e);}
+  }catch(e){alert('Save failed: '+(e.error||e));}
 }
 
 function renderSettingsPage(){

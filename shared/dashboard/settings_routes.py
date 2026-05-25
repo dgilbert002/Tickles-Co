@@ -615,6 +615,64 @@ async def handle_put_prompt(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# DELETE /api/settings/prompts/{key}
+# ---------------------------------------------------------------------------
+async def handle_delete_prompt(request: web.Request) -> web.Response:
+    key = request.match_info.get("key", "")
+    if not key:
+        return _err("prompt key is required")
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    await pool.execute(
+        "DELETE FROM system_config WHERE namespace = 'chart_prompts' AND config_key = $1",
+        (key,),
+    )
+    return _json_response({"ok": True, "deleted": key})
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/settings/prompts/{key}/rename
+# ---------------------------------------------------------------------------
+async def handle_rename_prompt(request: web.Request) -> web.Response:
+    key = request.match_info.get("key", "")
+    if not key:
+        return _err("prompt key is required")
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+    new_key = (body.get("new_key") or "").strip()
+    if not new_key:
+        return _err("new_key is required")
+    if new_key == key:
+        return _json_response({"ok": True, "renamed": key})
+
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+
+    # Check target doesn't exist
+    existing = await pool.fetch_one(
+        "SELECT 1 FROM system_config WHERE namespace = 'chart_prompts' AND config_key = $1",
+        (new_key,),
+    )
+    if existing:
+        return _err(f"target key {new_key!r} already exists")
+
+    # Copy then delete
+    await pool.execute(
+        "INSERT INTO system_config (namespace, config_key, config_value, is_secret) "
+        "SELECT namespace, $2, config_value, is_secret FROM system_config "
+        "WHERE namespace = 'chart_prompts' AND config_key = $1",
+        (key, new_key),
+    )
+    await pool.execute(
+        "DELETE FROM system_config WHERE namespace = 'chart_prompts' AND config_key = $1",
+        (key,),
+    )
+    return _json_response({"ok": True, "renamed": key, "to": new_key})
+
+
+# ---------------------------------------------------------------------------
 # Mount
 # ---------------------------------------------------------------------------
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
@@ -632,6 +690,8 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(f"{prefix}/api/settings/prompts", handle_get_prompts)
     app.router.add_get(f"{prefix}/api/settings/prompts/{{key}}", handle_get_prompt)
     app.router.add_put(f"{prefix}/api/settings/prompts/{{key}}", handle_put_prompt)
+    app.router.add_delete(f"{prefix}/api/settings/prompts/{{key}}", handle_delete_prompt)
+    app.router.add_put(f"{prefix}/api/settings/prompts/{{key}}/rename", handle_rename_prompt)
     logger.info(
         "settings_routes: mounted GET/POST/PUT endpoints at %s/api/settings/* "
         "(vision-models + dedup + sources + prompts)",
