@@ -435,6 +435,10 @@ async def _resolve_instrument_id_impl(
     Returns:
         instruments.id or None when no resolution is possible.
     """
+
+    # Normalize perp suffixes for instrument lookup
+    symbol = symbol.replace(":USDT", "").replace(":USDC", "").replace(".P", "") if symbol else symbol
+
     canonical_symbol = to_canonical_symbol(raw_symbol)
     canonical_exchange = normalise_venue(raw_exchange) if raw_exchange else ""
 

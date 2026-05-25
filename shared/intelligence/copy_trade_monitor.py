@@ -404,8 +404,8 @@ class LiveCopyTradeMonitor:
                 FROM tracked_positions tp
                 WHERE tp.status = 'open'
                   AND tp.entry_price > 0
-                  AND tp.stop_loss > 0
-                  AND tp.take_profit_1 > 0
+
+
                   AND tp.signal_timestamp >= NOW() - INTERVAL '7 days'
                   AND (tp.actor_id LIKE 'jarvais_trader_%' OR tp.actor_id = 'jarvais_chart_hacker')
                 ORDER BY tp.signal_timestamp DESC
@@ -465,9 +465,13 @@ class LiveCopyTradeMonitor:
         sym = trader_pos["instrument_symbol"]
         entry = float(trader_pos["entry_price"])
         direction = trader_pos["direction"]
-        orig_sl = float(trader_pos["stop_loss"])
-        orig_tp = float(trader_pos["take_profit_1"])
-        sl, tp = get_sl_tp(entry, direction, orig_sl, orig_tp, sym, use_opt)
+        orig_sl = float(trader_pos.get("stop_loss") or 0)
+        orig_tp = float(trader_pos.get("take_profit_1") or 0)
+        # Default SL/TP if not provided by trader
+        if orig_sl <= 0:
+            orig_sl = entry * 0.95 if direction == "long" else entry * 1.05
+        if orig_tp <= 0:
+            orig_tp = entry * 1.05 if direction == "long" else entry * 0.95
 
         # Position sizing by mode
         if "spot_seq" in mode:
@@ -864,7 +868,7 @@ class LiveCopyTradeMonitor:
                     # Rose agent only takes rose_ch positions
                     if is_rose_agent and not is_rose_pos:
                         continue
-                    if pos["stop_loss"] and float(pos["stop_loss"]) > 0:
+                    if pos["entry_price"] and float(pos["entry_price"]) > 0:
                         await self._enter_agent_position(agent_name, pos)
                 except Exception as exc:
                     logger.warning("Agent %s failed to enter pos %s: %s", agent_name, pos.get("id"), exc)

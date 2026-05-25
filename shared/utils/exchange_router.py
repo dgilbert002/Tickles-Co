@@ -177,6 +177,8 @@ _MALFORMED_PATTERNS: Tuple[re.Pattern[str], ...] = (
 _CRYPTO_FIRST_REMAP: Dict[str, str] = {
     # Gold
     "GOLD":     "XAU/USDT",
+    "XAU/USD":  "XAU/USDT",  # gold CFD → perp
+    "BTC/USD":  "BTC/USDT",  # BTC CFD → perp
     "XAU":      "XAU/USDT",
     "XAU/USD":  "XAU/USDT",
     "XAUUSD":   "XAU/USDT",
