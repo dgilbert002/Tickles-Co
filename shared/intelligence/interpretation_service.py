@@ -303,22 +303,45 @@ async def _ccxt_live_price(
     """
     if not symbol:
         return None
+    
+    # Try CCXT first
     try:
         from shared.market_data.live_price import fetch_live_price
-    except Exception as exc:  # noqa: BLE001 - import-time failure
+    except Exception as exc:
         logger.debug("ccxt live-price helper unavailable: %s", exc)
-        return None
+        fetch_live_price = None
+    
+    if fetch_live_price:
+        try:
+            result = await fetch_live_price(
+                symbol, exchange or "bybit", timeout_s=timeout_s,
+            )
+            return result.price, result.symbol, result.ts_ms
+        except Exception as exc:
+            logger.info("ccxt live-price probe failed for %s@%s: %s", symbol, exchange, exc)
+    
+    # Fallback: try the dashboard snapshot API for current prices
     try:
-        result = await fetch_live_price(
-            symbol, exchange or "bybit", timeout_s=timeout_s,
+        import urllib.request, json
+        req = urllib.request.Request(
+            "http://127.0.0.1:3101/api/snapshot",
+            headers={"Accept": "application/json"},
         )
-    except Exception as exc:  # noqa: BLE001 - probe is best-effort
-        logger.info(
-            "ccxt live-price probe failed for %s@%s: %s",
-            symbol, exchange, exc,
-        )
-        return None
-    return result.price, result.symbol, result.ts_ms
+        data = json.loads(urllib.request.urlopen(req, timeout=3).read())
+        prices = data.get("prices", [])
+        # Match symbol — try exact, then normalize
+        sym_upper = symbol.upper().replace(":USDT", "").replace(".P", "")
+        for p in prices:
+            ps = p.get("symbol", "").upper().replace(":USDT", "").replace(".P", "")
+            if ps == sym_upper or sym_upper in ps or ps in sym_upper:
+                px = p.get("price")
+                if px and px > 0:
+                    logger.info("live-price snapshot fallback: %s = %.4f", p["symbol"], px)
+                    return (float(px), p["symbol"], int(p.get("ts", 0)))
+    except Exception as exc:
+        logger.debug("live-price snapshot fallback failed: %s", exc)
+    
+    return None
 
 
 def _quant_symbol_candidates(symbol: str) -> List[str]:
