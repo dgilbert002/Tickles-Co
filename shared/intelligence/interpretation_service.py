@@ -2216,7 +2216,7 @@ async def write_signal_interpretation(
         "  correlation_id, "
         "  instrument_resolved_from, "
         # prompt provenance
-        "  prompt_source, prompt_hash, "
+        "  prompt_source, "
         # Phase J — dual-extraction columns
         "  timeframe, chart_analysis, trader_trades, chart_hacker_trades, "
         "  ai_agreement_score, ai_comment, "
@@ -2248,8 +2248,8 @@ async def write_signal_interpretation(
         "  $43, $44, $45, "
         # Bug H8 params $46, $47
         "  $46::jsonb, $47::jsonb, "
-        # prompt provenance params $48, $49
-        "  $48, $49, "
+        # prompt provenance param $48
+        "  $48, "
         "  NOW()"
         ")"
         "ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING "
@@ -2307,9 +2307,8 @@ async def write_signal_interpretation(
         # Bug H8 — pattern_tags ($46), setup_tags ($47)
         json.dumps(pattern_tags_list),
         json.dumps(setup_tags_list),
-        # prompt provenance ($48, $49)
+        # prompt provenance ($48)
         prompt_source or "",
-        prompt_hash or "",
     )
     row = await shared_pool.fetch_one(sql, params)
     if row is None:
