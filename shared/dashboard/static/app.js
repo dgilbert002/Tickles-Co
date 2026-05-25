@@ -509,85 +509,104 @@ function renderSourcesTree(){
   if(!el)return;
   const sources=state.sources||[];
   const prompts=state.prompts||[];
-
   if(!sources.length){el.innerHTML='<div class="empty">Loading sources…</div>';return;}
 
-  let h='<div class="sources-header"><h3>Sources & Channels</h3></div>';
+  let h='';
 
   sources.forEach(src=>{
-    h+=`<div class="source-group">
-      <div class="source-title">${esc(src.source.toUpperCase())}</div>`;
+    const srcLabel=src.source.toUpperCase();
+    const srcClass=src.source==='telegram'?'src-telegram':src.source==='discord'?'src-discord':'src-api';
     const channels=Object.values(src.channels||{});
+
     channels.forEach(ch=>{
       const users=ch.users||[];
       const allTracked=users.every(u=>u.is_tracked);
-      const someTracked=users.some(u=>u.is_tracked);
 
-      h+=`<div class="channel-group">
-        <div class="channel-head">
-          <label class="check-row">
-<input type="checkbox" class="channel-all-cb" data-channel="${esc(ch.channel_id)}" data-source="${esc(src.source)}"
-              ${allTracked?'checked':''}>
-            <span class="channel-name">${esc(ch.channel_name)}</span>
-          </label>
-          <span class="channel-meta">${users.length} user${users.length!==1?'s':''}</span>
+      h+=`<div class="panel full" style="margin-top:0">
+        <div class="panel-head">
+          <div>
+            <h2>${esc(ch.channel_name)} <span class="src-tag ${srcClass}">${esc(srcLabel)}</span></h2>
+            <p>${users.length} trader${users.length!==1?'s':''} · 
+              <label class="check-inline">
+                <input type="checkbox" class="channel-all-cb" data-channel="${esc(ch.channel_id)}" 
+                  ${allTracked?'checked':''}> Follow all
+              </label>
+            </p>
+          </div>
         </div>
-        <div class="user-list">`;
+        <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr>
+            <th style="width:40px">On</th>
+            <th>Trader</th>
+            <th>Type</th>
+            <th>Media</th>
+            <th>Prompt</th>
+            <th style="width:60px">Score</th>
+          </tr></thead>
+          <tbody>`;
 
       users.forEach(u=>{
-        const promptOpts=prompts.map(p=>
-          `<option value="${esc(p.key)}" ${u.prompt_id===p.key?'selected':''}>${esc(p.key)}</option>`
-        ).join('');
-        h+=`<div class="user-row" data-trader-id="${u.id}">
-          <label class="check-row">
-            <input type="checkbox" class="user-cb" data-trader-id="${u.id}"
-              ${u.is_tracked?'checked':''}>
-            <span class="user-name">${esc(u.display_name||u.handle)}</span>
-            <span class="user-type badge-sm">${esc(u.trader_type||'')}</span>
-          </label>
-          <div class="user-controls">
-            <select class="select-sm media-types" data-trader-id="${u.id}">
-              <option value="all" ${u.tracked_media_types==='all'?'selected':''}>All</option>
-              <option value="media" ${u.tracked_media_types==='media'?'selected':''}>Media</option>
-              <option value="text" ${u.tracked_media_types==='text'?'selected':''}>Text</option>
-            </select>
-            <select class="select-sm prompt-pick" data-trader-id="${u.id}">
-              <option value="">Channel default</option>
-              ${promptOpts}
-            </select>
-          </div>
-        </div>`;
+        const score=u.accuracy_score!=null&&u.accuracy_samples>0
+          ? `${(u.accuracy_score*100).toFixed(0)}% <span class="secondary">n=${u.accuracy_samples}</span>`
+          : '<span class="secondary">—</span>';
+        const typeBadge=u.trader_type==='pro'?'<span class="badge badge-pro">pro</span>':
+                         u.trader_type==='bot'?'<span class="badge badge-bot">bot</span>':
+                         `<span class="badge neutral">${esc(u.trader_type||'—')}</span>`;
+
+        h+=`<tr class="user-row" data-trader-id="${u.id}">
+          <td><input type="checkbox" class="user-cb" data-trader-id="${u.id}" ${u.is_tracked?'checked':''}></td>
+          <td><span class="primary">${esc(u.display_name||u.handle)}</span>
+            ${u.handle!==u.display_name?`<br><span class="secondary mono">${esc(u.handle)}</span>`:''}</td>
+          <td>${typeBadge}</td>
+          <td><select class="select media-types" data-trader-id="${u.id}" style="width:auto;padding:4px 8px;font-size:12px">
+            <option value="all" ${u.tracked_media_types==='all'?'selected':''}>All</option>
+            <option value="media" ${u.tracked_media_types==='media'?'selected':''}>Media only</option>
+            <option value="text" ${u.tracked_media_types==='text'?'selected':''}>Text only</option>
+          </select></td>
+          <td><select class="select prompt-pick" data-trader-id="${u.id}" style="width:auto;padding:4px 8px;font-size:12px">
+            <option value="">Channel default</option>
+            ${prompts.map(p=>`<option value="${esc(p.key)}" ${u.prompt_id===p.key?'selected':''}>${esc(p.key.replace('/prompt',''))}</option>`).join('')}
+          </select></td>
+          <td>${score}</td>
+        </tr>`;
       });
 
-      h+=`</div></div>`;
+      h+=`</tbody></table></div></div>`;
     });
-    h+=`</div>`;
   });
 
   // Prompt management
-  h+=`<div class="sources-header" style="margin-top:20px"><h3>Prompts</h3>
-    <button class="pill-btn" onclick="showPromptEditor('new')">+ New Prompt</button></div>
-    <div class="prompt-list">`;
+  h+=`<div class="panel full" style="margin-top:14px">
+    <div class="panel-head">
+      <h2>Prompt Library</h2>
+      <button class="pill-btn" id="btn-new-prompt">+ New Prompt</button>
+    </div>
+    <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>Key</th><th>Preview</th><th style="width:80px"></th></tr></thead>
+      <tbody>`;
   prompts.forEach(p=>{
-    h+=`<div class="prompt-row">
-      <span class="prompt-key mono">${esc(p.key)}</span>
-      <span class="prompt-preview">${esc(p.preview||'')}</span>
-      <button class="pill-btn-sm" onclick="showPromptEditor('${esc(p.key)}')">Edit</button>
-    </div>`;
+    h+=`<tr>
+      <td class="mono">${esc(p.key)}</td>
+      <td class="secondary">${esc(p.preview||'')}</td>
+      <td><button class="pill-btn" data-prompt-key="${esc(p.key)}" style="padding:4px 12px;font-size:11px">Edit</button></td>
+    </tr>`;
   });
-  h+=`</div>
-    <div id="prompt-editor" class="prompt-editor hidden"></div>`;
+  h+=`</tbody></table></div></div>
+    <div id="prompt-editor" class="panel full hidden" style="margin-top:14px"></div>`;
 
   el.innerHTML=h;
-  // Wire events after DOM is populated
-  wireSourcesTree();
-}
 
-function wireSourcesTree(){
+  // Wire events
   document.querySelectorAll('#sources-tree .channel-all-cb').forEach(cb=>cb.onchange=()=>toggleChannelAll(cb));
   document.querySelectorAll('#sources-tree .user-cb').forEach(cb=>cb.onchange=()=>toggleUser(cb));
   document.querySelectorAll('#sources-tree .media-types').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
   document.querySelectorAll('#sources-tree .prompt-pick').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
+  // Prompt editor buttons
+  document.querySelectorAll('#sources-tree [data-prompt-key]').forEach(btn=>btn.onclick=()=>showPromptEditor(btn.dataset.promptKey));
+  const newBtn=$('#btn-new-prompt');
+  if(newBtn)newBtn.onclick=()=>showPromptEditor('new');
 }
 
 async function toggleChannelAll(cb){
@@ -649,22 +668,44 @@ function showPromptEditor(key){
   if(key==='new'){
     ed.classList.remove('hidden');
     ed.innerHTML=`
-      <h4>New Prompt</h4>
-      <label>Key: <input class="input wide" id="prompt-key" placeholder="e.g. discord/charthackers/prompt"></label>
-      <label>System Prompt: <textarea class="input wide" id="prompt-system" rows="8"></textarea></label>
-      <label>User Template: <textarea class="input wide" id="prompt-user" rows="3"></textarea></label>
-      <button class="pill-btn" onclick="savePrompt('new')">Save</button>
-      <button class="pill-btn" onclick="ed.classList.add('hidden')">Cancel</button>`;
+      <div class="panel-head"><h2>New Prompt</h2></div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <label class="settings-label">Key
+          <input class="input wide" id="prompt-key" placeholder="e.g. discord/charthackers/prompt">
+        </label>
+        <label class="settings-label">System Prompt
+          <textarea class="input wide" id="prompt-system" rows="10" style="font-family:var(--mono);font-size:12px"></textarea>
+        </label>
+        <label class="settings-label">User Prompt Template
+          <textarea class="input wide" id="prompt-user" rows="3" style="font-family:var(--mono);font-size:12px"></textarea>
+        </label>
+        <div style="display:flex;gap:8px">
+          <button class="pill-btn" id="btn-save-prompt">Save</button>
+          <button class="pill-btn" id="btn-cancel-prompt">Cancel</button>
+        </div>
+      </div>`;
+    $('#btn-save-prompt').onclick=()=>savePrompt('new');
+    $('#btn-cancel-prompt').onclick=()=>ed.classList.add('hidden');
   }else{
     api(`/api/settings/prompts/${encodeURIComponent(key)}`,{skipCompany:true}).then(data=>{
       ed.classList.remove('hidden');
       ed.innerHTML=`
-        <h4>Edit: ${esc(key)}</h4>
-        <label>System Prompt: <textarea class="input wide" id="prompt-system" rows="8">${esc(data.system_prompt||'')}</textarea></label>
-        <label>User Template: <textarea class="input wide" id="prompt-user" rows="3">${esc(data.user_prompt_template||'')}</textarea></label>
-        <button class="pill-btn" onclick="savePrompt('${esc(key)}')">Save</button>
-        <button class="pill-btn" onclick="ed.classList.add('hidden')">Cancel</button>`;
-    }).catch(e=>{ed.innerHTML=`<div class="empty">Failed to load prompt</div>`;});
+        <div class="panel-head"><h2>Edit: <span class="mono">${esc(key)}</span></h2></div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+          <label class="settings-label">System Prompt
+            <textarea class="input wide" id="prompt-system" rows="10" style="font-family:var(--mono);font-size:12px">${esc(data.system_prompt||'')}</textarea>
+          </label>
+          <label class="settings-label">User Prompt Template
+            <textarea class="input wide" id="prompt-user" rows="3" style="font-family:var(--mono);font-size:12px">${esc(data.user_prompt_template||'')}</textarea>
+          </label>
+          <div style="display:flex;gap:8px">
+            <button class="pill-btn" id="btn-save-prompt">Save</button>
+            <button class="pill-btn" id="btn-cancel-prompt">Cancel</button>
+          </div>
+        </div>`;
+      $('#btn-save-prompt').onclick=()=>savePrompt(key);
+      $('#btn-cancel-prompt').onclick=()=>ed.classList.add('hidden');
+    }).catch(e=>{ed.innerHTML=`<div class="panel-head"><h2>Error</h2></div><div class="empty">Failed to load prompt</div>`;});
   }
 }
 
