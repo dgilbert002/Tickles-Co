@@ -759,6 +759,21 @@ def _load_prompts(source: str = "", channel: str = "") -> Dict[str, Any]:
     }
 
 
+def _build_prompt_result(row, source: str, channel: str) -> Dict[str, Any]:
+    """Build the prompt result dict from a prompt_versions row."""
+    return {
+        "chart_analysis": {
+            "system_prompt": row["system"],
+            "user_prompt_template": row["body"],
+        },
+        "_source": source,
+        "_channel": channel,
+        "_prompt_key": f"db:{row['version']}",
+        "_prompt_source": "db",
+        "_prompt_hash": row["prompt_hash"],
+    }
+
+
 async def _load_prompts_async(
     shared_pool, source: str = "", channel: str = ""
 ) -> Dict[str, Any]:
@@ -779,17 +794,16 @@ async def _load_prompts_async(
 
     try:
         async with shared_pool.acquire() as conn:
-            # 1. Try prompt_versions — source-specific then default
+# 1. Try prompt_versions — source-specific then newest default
             version_keys = []
             if source and channel:
                 version_keys.append(f"{source}-{channel}-v1")
             if source:
                 version_keys.append(f"{source}-v1")
-            # Special: Telegram → Rose prompt
-            if source == "telegram":
-                version_keys.append("telegram-rose-v1")
-            version_keys.append("2026.05.24-position-box-required-v2")  # default
+            # Wildcard: find any source-specific prompt for this platform
+            source_wildcard = source  # 'telegram', 'discord', etc.
 
+            # Try exact matches first
             for vk in version_keys:
                 try:
                     row = await conn.fetchrow(
@@ -801,21 +815,40 @@ async def _load_prompts_async(
                     logger.warning("prompt_versions fetch failed for %s: %s", vk, fetch_exc)
                     continue
                 if row:
-                    logger.info(
-                        "Loaded prompt from DB: chart_analysis/%s hash=%s",
-                        row["version"], row["prompt_hash"],
+                    logger.info("Loaded prompt from DB: chart_analysis/%s hash=%s",
+                                row["version"], row["prompt_hash"])
+                    return _build_prompt_result(row, source, channel)
+
+            # No exact match — try ILIKE for platform name in version
+            if source_wildcard:
+                try:
+                    row = await conn.fetchrow(
+                        "SELECT system, body, version, prompt_hash FROM prompt_versions "
+                        "WHERE name = 'chart_analysis' AND source = 'db' "
+                        "AND version ILIKE $1 "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        f"%{source_wildcard}%",
                     )
-                    return {
-                        "chart_analysis": {
-                            "system_prompt": row["system"],
-                            "user_prompt_template": row["body"],
-                        },
-                        "_source": source,
-                        "_channel": channel,
-                        "_prompt_key": f"db:{row['version']}",
-                        "_prompt_source": "db",
-                        "_prompt_hash": row["prompt_hash"],
-                    }
+                except Exception as fetch_exc:
+                    logger.warning("prompt_versions ILIKE failed: %s", fetch_exc)
+                    row = None
+                if row:
+                    logger.info("Loaded source prompt via ILIKE: chart_analysis/%s", row["version"])
+                    return _build_prompt_result(row, source, channel)
+
+            # Fallback: newest chart_analysis entry
+            try:
+                row = await conn.fetchrow(
+                    "SELECT system, body, version, prompt_hash FROM prompt_versions "
+                    "WHERE name = 'chart_analysis' AND source = 'db' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                )
+            except Exception as fetch_exc:
+                logger.warning("prompt_versions newest fetch failed: %s", fetch_exc)
+                row = None
+            if row:
+                logger.info("Loaded newest prompt from DB: chart_analysis/%s", row["version"])
+                return _build_prompt_result(row, source, channel)
 
             # 2. Legacy system_config fallback (will be removed in Phase 4)
             for key in (
