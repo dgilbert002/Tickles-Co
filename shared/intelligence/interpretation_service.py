@@ -3016,7 +3016,11 @@ async def create_tracked_position_from_interpretation(
 
         if existing is not None:
             existing_id = int(existing["id"])
-            existing_entry = float(existing.get("entry_price") or 0)
+            existing_entry = 0.0
+            try:
+                existing_entry = float(existing.get("entry_price") or 0)
+            except (ValueError, TypeError):
+                pass  # non-numeric DB value — treat as unknown, fall through to refresh
 
             # 1% variance rule: >1% diff = different setup (INSERT new).
             # Within 1% = same trade, freshest numbers win (refresh).
@@ -3827,7 +3831,7 @@ class InterpretationService:
             fallback_model=_ph_fallback,
             freshness_threshold=self.cfg.freshness_threshold_s,
             max_age_hours=self.cfg.max_age_hours,
-            extra=str(media_id),  # unique per chart
+            extra=str(media_id) if media_id is not None else "",  # unique per chart
         )
 
         # Candle data hash (simplified: hash of last 10 closes)
