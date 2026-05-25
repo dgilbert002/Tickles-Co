@@ -775,14 +775,16 @@ def _build_prompt_result(row, source: str, channel: str) -> Dict[str, Any]:
 
 
 async def _load_prompts_async(
-    shared_pool, source: str = "", channel: str = ""
+    shared_pool, source: str = "", channel: str = "", trader_profile_id: int = 0
 ) -> Dict[str, Any]:
     """Load chart_analysis prompt from DB (prompt_versions), falling back to file.
 
     Priority:
-      1. prompt_versions.name='chart_analysis', version matching source/channel
-      2. system_config.chart_prompts (legacy — being phased out)
-      3. prompts/chart_analysis.json file (hardcoded fallback)
+      1. trader_profiles.prompt_id → prompt_versions (exact match)
+      2. prompt_versions ILIKE '%{source}%' (source-specific)
+      3. prompt_versions newest chart_analysis entry
+      4. system_config.chart_prompts (legacy — being phased out)
+      5. prompts/chart_analysis.json file (hardcoded fallback)
 
     Returns dict with keys: chart_analysis (system_prompt, user_prompt_template),
     _source, _channel, _prompt_key, _prompt_source ('db'|'file'|'config').
@@ -794,49 +796,53 @@ async def _load_prompts_async(
 
     try:
         async with shared_pool.acquire() as conn:
-# 1. Try prompt_versions — source-specific then newest default
-            version_keys = []
-            if source and channel:
-                version_keys.append(f"{source}-{channel}-v1")
-            if source:
-                version_keys.append(f"{source}-v1")
-            # Wildcard: find any source-specific prompt for this platform
-            source_wildcard = source  # 'telegram', 'discord', etc.
+            # 1. Look up trader's assigned prompt_id
+            prompt_version = None
+            if trader_profile_id:
+                try:
+                    row = await conn.fetchrow(
+                        "SELECT prompt_id FROM trader_profiles WHERE id = $1",
+                        trader_profile_id,
+                    )
+                except Exception:
+                    row = None
+                if row and row["prompt_id"]:
+                    prompt_version = row["prompt_id"]
 
-            # Try exact matches first
-            for vk in version_keys:
+            # 2. Try exact prompt_id lookup
+            if prompt_version:
                 try:
                     row = await conn.fetchrow(
                         "SELECT system, body, version, prompt_hash FROM prompt_versions "
-                        "WHERE name = 'chart_analysis' AND version = $1 AND source = 'db'",
-                        vk,
+                        "WHERE name = 'chart_analysis' AND version = $1",
+                        prompt_version,
                     )
                 except Exception as fetch_exc:
-                    logger.warning("prompt_versions fetch failed for %s: %s", vk, fetch_exc)
-                    continue
+                    logger.warning("prompt_versions fetch for prompt_id=%s failed: %s",
+                                   prompt_version, fetch_exc)
+                    row = None
                 if row:
-                    logger.info("Loaded prompt from DB: chart_analysis/%s hash=%s",
-                                row["version"], row["prompt_hash"])
+                    logger.info("Loaded trader-assigned prompt: chart_analysis/%s", row["version"])
                     return _build_prompt_result(row, source, channel)
 
-            # No exact match — try ILIKE for platform name in version
-            if source_wildcard:
+            # 3. ILIKE match by source platform
+            if source:
                 try:
                     row = await conn.fetchrow(
                         "SELECT system, body, version, prompt_hash FROM prompt_versions "
                         "WHERE name = 'chart_analysis' AND source = 'db' "
                         "AND version ILIKE $1 "
                         "ORDER BY created_at DESC LIMIT 1",
-                        f"%{source_wildcard}%",
+                        f"%{source}%",
                     )
                 except Exception as fetch_exc:
                     logger.warning("prompt_versions ILIKE failed: %s", fetch_exc)
                     row = None
                 if row:
-                    logger.info("Loaded source prompt via ILIKE: chart_analysis/%s", row["version"])
+                    logger.info("Loaded prompt via ILIKE: chart_analysis/%s", row["version"])
                     return _build_prompt_result(row, source, channel)
 
-            # Fallback: newest chart_analysis entry
+            # 4. Fallback: newest chart_analysis entry
             try:
                 row = await conn.fetchrow(
                     "SELECT system, body, version, prompt_hash FROM prompt_versions "
@@ -1046,6 +1052,7 @@ async def run_llm_track(
     recall_context: str = "",
     news_source: str = "",
     channel_name: str = "",
+    trader_profile_id: int = 0,
     shared_pool=None,
 ) -> LlmResult:
     """Run the LLM vision track: encode image, call vision model, parse response.
@@ -1078,7 +1085,9 @@ async def run_llm_track(
     image_b64 = _encode_image_b64(image_path)
     image_mime = _image_mime_type(image_path)
 
-    prompts = (await _load_prompts_async(shared_pool, news_source, channel_name)).get("chart_analysis", {})
+    prompts = (await _load_prompts_async(
+        shared_pool, news_source, channel_name, trader_profile_id
+    )).get("chart_analysis", {})
     system_prompt = prompts.get("system_prompt", "")
     if not system_prompt:
         system_prompt = (
@@ -3848,6 +3857,7 @@ class InterpretationService:
                 correlation_id=cid,
                 news_source=news_source,
                 channel_name=media_row.get("channel_name", ""),
+                trader_profile_id=media_row.get("trader_profile_id", 0) or 0,
                 shared_pool=shared_pool,
             )
             self._rate_limiter.report_success()
