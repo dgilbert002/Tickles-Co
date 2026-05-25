@@ -649,6 +649,7 @@ def _param_hash(
     fallback_model: str,
     freshness_threshold: float,
     max_age_hours: float,
+    extra: str = "",
 ) -> str:
     """Deterministic hash of the interpretation parameters for reproducibility."""
     payload = json.dumps(
@@ -658,6 +659,7 @@ def _param_hash(
             "fallback_model": fallback_model,
             "freshness_threshold": freshness_threshold,
             "max_age_hours": max_age_hours,
+            "extra": extra,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -3014,17 +3016,32 @@ async def create_tracked_position_from_interpretation(
 
         if existing is not None:
             existing_id = int(existing["id"])
-            try:
-                # In-place refresh: pull freshest entry/SL/TPs/reasons onto
-                # the existing pending row, advance signal_interpretation_id
-                # so the drawer points at the newest interpretation, stamp
-                # deduped_at for the dashboard KPI. raw_signal_text is only
-                # overwritten when the incoming text is non-empty (preserve
-                # the most-detailed prior wording on terse follow-ups).
-                await shared_pool.execute(
+            existing_entry = float(existing.get("entry_price") or 0)
+
+            # 1% variance rule: >1% diff = different setup (INSERT new).
+            # Within 1% = same trade, freshest numbers win (refresh).
+            if existing_entry > 0 and entry_price is not None and entry_price > 0:
+                pct_diff = abs(existing_entry - float(entry_price)) / existing_entry
+                if pct_diff > 0.01:
+                    logger.info(
+                        "per-trader dedup: entry variance %.2f%% > 1%% for trader=%s symbol=%s — "
+                        "keeping both (different setups)",
+                        pct_diff * 100, trader_profile_id, instrument_symbol,
+                    )
+                    existing = None  # fall through to INSERT new row
+
+            if existing is not None:
+                try:
+                    # In-place refresh: pull freshest entry/SL/TPs/reasons onto
+                    # the existing pending row, advance signal_interpretation_id
+                    # so the drawer points at the newest interpretation, stamp
+                    # deduped_at for the dashboard KPI. raw_signal_text is only
+                    # overwritten when the incoming text is non-empty (preserve
+                    # the most-detailed prior wording on terse follow-ups).
+                    await shared_pool.execute(
                     """
-                    UPDATE public.tracked_positions
-                    SET entry_price             = $1,
+                        UPDATE public.tracked_positions
+                        SET entry_price             = $1,
                         stop_loss               = COALESCE($2, stop_loss),
                         take_profit_1           = COALESCE($3, take_profit_1),
                         take_profit_2           = COALESCE($4, take_profit_2),
@@ -3041,10 +3058,10 @@ async def create_tracked_position_from_interpretation(
                         signal_timestamp        = $15,
                         deduped_at              = NOW(),
                         updated_at              = NOW()
-                    WHERE id = $16
-                      AND status = 'pending'
-                    """,
-                    (
+                        WHERE id = $16
+                        AND status = 'pending'
+                """,
+                (
                         float(entry_price),
                         float(stop_loss) if stop_loss is not None else None,
                         float(take_profit_1) if take_profit_1 is not None else None,
@@ -3062,22 +3079,22 @@ async def create_tracked_position_from_interpretation(
                         now,
                         existing_id,
                     ),
-                )
-                logger.info(
-                    "per_trader_dedup_refresh news_item_id=%s trader=%s symbol=%s dir=%s "
-                    "entry=%.6f -> refreshed pid=%s (was entry=%s)",
-                    news_item_id, trader_profile_id, instrument_symbol, direction,
-                    float(entry_price), existing_id, existing.get("entry_price"),
-                )
-            except Exception as exc:
-                # If the UPDATE fails we still return the existing id so the
-                # caller doesn't accidentally create a duplicate via the
-                # INSERT below. The pending row keeps its previous values
+)
+                    logger.info(
+                        "per_trader_dedup_refresh news_item_id=%s trader=%s symbol=%s dir=%s "
+                        "entry=%.6f -> refreshed pid=%s (was entry=%s)",
+                        news_item_id, trader_profile_id, instrument_symbol, direction,
+                        float(entry_price), existing_id, existing.get("entry_price"),
+                    )
+                except Exception as exc:
+                    # If the UPDATE fails we still return the existing id so the
+                    # caller doesn't accidentally create a duplicate via the
+                    # INSERT below. The pending row keeps its previous values
                 # — operator can re-trigger by toggling the news item.
-                logger.warning(
-                    "per_trader_dedup UPDATE failed for pid=%s (%s) — returning "
-                    "existing id without refresh; operator should re-poll",
-                    existing_id, exc,
+                    logger.warning(
+                        "per_trader_dedup UPDATE failed for pid=%s (%s) — returning "
+                        "existing id without refresh; operator should re-poll",
+                        existing_id, exc,
                 )
             return existing_id
 
@@ -3810,6 +3827,7 @@ class InterpretationService:
             fallback_model=_ph_fallback,
             freshness_threshold=self.cfg.freshness_threshold_s,
             max_age_hours=self.cfg.max_age_hours,
+            extra=str(media_id),  # unique per chart
         )
 
         # Candle data hash (simplified: hash of last 10 closes)
