@@ -729,9 +729,9 @@ async def handle_save_prompt_version(request: web.Request) -> web.Response:
     pool = await get_shared_pool()
     await pool.execute(
         "INSERT INTO prompt_versions (name, version, prompt_hash, system, body, source, created_by) "
-        "VALUES ('chart_analysis', $1, $2, $3, $4, $5, 'dashboard') "
+        "VALUES ('chart_analysis', $1, $2, $3, $4, 'db', 'dashboard') "
         "ON CONFLICT (name, version) DO UPDATE SET "
-        "  prompt_hash = $2, system = $3, body = $4, source = $5",
+        "  prompt_hash = $2, system = $3, body = $4, source = 'db'",
         (version, prompt_hash, sp, ut, source),
     )
     return _json_response({"ok": True, "saved": version, "hash": prompt_hash})
@@ -804,11 +804,15 @@ async def handle_rename_prompt_version(request: web.Request) -> web.Response:
     if existing:
         return _err(f"version {new_ver!r} already exists")
 
-    await pool.execute(
+    result = await pool.execute(
         "UPDATE prompt_versions SET version = $2 "
         "WHERE name = 'chart_analysis' AND version = $1",
         (old_ver, new_ver),
     )
+    # Check if the rename actually affected a row
+    affected = int(result.split()[-1]) if result else 0
+    if affected == 0:
+        return _err(f"version {old_ver!r} not found", status=404)
     return _json_response({"ok": True, "from": old_ver, "to": new_ver})
 
 
