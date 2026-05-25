@@ -700,6 +700,93 @@ async def handle_get_prompt_versions(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# PUT /api/settings/prompts/versions/save — write to prompt_versions
+# ---------------------------------------------------------------------------
+async def handle_save_prompt_version(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+
+    version = (body.get("version") or "").strip()
+    sp = (body.get("system_prompt") or "").strip()
+    ut = (body.get("user_prompt_template") or "").strip()
+    source = (body.get("source") or "manual").strip()
+
+    if not version or not sp or not ut:
+        return _err("version, system_prompt, and user_prompt_template are required")
+
+    import hashlib
+    h = hashlib.sha256()
+    h.update(sp.encode())
+    h.update(b"\x1f")
+    h.update(ut.encode())
+    h.update(b"\x1f")
+    h.update(b"")  # no taxonomy_rule
+    prompt_hash = h.hexdigest()[:16]
+
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    await pool.execute(
+        "INSERT INTO prompt_versions (name, version, prompt_hash, system, body, source, created_by) "
+        "VALUES ('chart_analysis', $1, $2, $3, $4, $5, 'dashboard') "
+        "ON CONFLICT (name, version) DO UPDATE SET "
+        "  prompt_hash = $2, system = $3, body = $4, source = $5",
+        (version, prompt_hash, sp, ut, source),
+    )
+    return _json_response({"ok": True, "saved": version, "hash": prompt_hash})
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/settings/prompts/versions/{version}
+# ---------------------------------------------------------------------------
+async def handle_delete_prompt_version(request: web.Request) -> web.Response:
+    version = request.match_info.get("version", "")
+    if not version:
+        return _err("version is required")
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    await pool.execute(
+        "DELETE FROM prompt_versions WHERE name = 'chart_analysis' AND version = $1",
+        (version,),
+    )
+    return _json_response({"ok": True, "deleted": version})
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/settings/prompts/versions/rename
+# ---------------------------------------------------------------------------
+async def handle_rename_prompt_version(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+    old_ver = (body.get("old_version") or "").strip()
+    new_ver = (body.get("new_version") or "").strip()
+    if not old_ver or not new_ver:
+        return _err("old_version and new_version are required")
+    if old_ver == new_ver:
+        return _json_response({"ok": True, "from": old_ver, "to": new_ver})
+
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+
+    existing = await pool.fetch_one(
+        "SELECT 1 FROM prompt_versions WHERE name = 'chart_analysis' AND version = $1",
+        (new_ver,),
+    )
+    if existing:
+        return _err(f"version {new_ver!r} already exists")
+
+    await pool.execute(
+        "UPDATE prompt_versions SET version = $2 "
+        "WHERE name = 'chart_analysis' AND version = $1",
+        (old_ver, new_ver),
+    )
+    return _json_response({"ok": True, "from": old_ver, "to": new_ver})
+
+
+# ---------------------------------------------------------------------------
 # Mount
 # ---------------------------------------------------------------------------
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
@@ -715,6 +802,9 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(f"{prefix}/api/settings/sources", handle_get_sources)
     app.router.add_put(f"{prefix}/api/settings/track", handle_put_track)
     app.router.add_get(f"{prefix}/api/settings/prompts/versions", handle_get_prompt_versions)
+    app.router.add_put(f"{prefix}/api/settings/prompts/versions/save", handle_save_prompt_version)
+    app.router.add_delete(f"{prefix}/api/settings/prompts/versions/{{version}}", handle_delete_prompt_version)
+    app.router.add_put(f"{prefix}/api/settings/prompts/versions/rename", handle_rename_prompt_version)
     app.router.add_get(f"{prefix}/api/settings/prompts", handle_get_prompts)
     app.router.add_get(f"{prefix}/api/settings/prompts/{{key}}", handle_get_prompt)
     app.router.add_put(f"{prefix}/api/settings/prompts/{{key}}", handle_put_prompt)

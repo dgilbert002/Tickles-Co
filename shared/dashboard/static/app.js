@@ -717,9 +717,10 @@ function openPromptModal(key){
   modal.querySelector('#btn-delete-prompt')?.addEventListener('click',async()=>{
     if(!confirm(`Delete prompt "${key}"? This cannot be undone.`))return;
     try{
-      await _delAPI(`/api/settings/prompts/${encodeURIComponent(key)}`);
+      await _delAPI(`/api/settings/prompts/versions/${encodeURIComponent(key)}`);
       close();
       fetchSourcesAndPrompts();
+      loadPromptsTab();
     }catch(e){alert('Delete failed: '+(e.error||e));}
   });
 
@@ -727,9 +728,10 @@ function openPromptModal(key){
   modal.querySelector('#btn-rename-prompt')?.addEventListener('click',()=>{
     const newKey=prompt('Rename prompt to:',key);
     if(!newKey||newKey===key)return;
-    _putAPI(`/api/settings/prompts/${encodeURIComponent(key)}/rename`,{new_key:newKey}).then(()=>{
+    _putAPI(`/api/settings/prompts/versions/rename`,{old_version:key,new_version:newKey}).then(()=>{
       close();
       fetchSourcesAndPrompts();
+      loadPromptsTab();
     }).catch(e=>alert('Rename failed: '+(e.error||e)));
   });
 }
@@ -750,10 +752,16 @@ async function savePrompt(key,closeFn){
   const ut=$('#prompt-user')?.value||'';
   if(!sp||!ut){alert('System prompt and user template are required');return;}
   try{
-    await _putAPI(`/api/settings/prompts/${encodeURIComponent(actualKey)}`,
-      {system_prompt:sp,user_prompt_template:ut});
+    // Save to prompt_versions with computed hash
+    await _putAPI('/api/settings/prompts/versions/save',{
+      version:actualKey,
+      system_prompt:sp,
+      user_prompt_template:ut,
+      source:'manual'
+    });
     closeFn();
     fetchSourcesAndPrompts();
+    loadPromptsTab();
   }catch(e){alert('Save failed: '+(e.error||e));}
 }
 
