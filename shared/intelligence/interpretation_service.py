@@ -2947,17 +2947,40 @@ async def create_tracked_position_from_interpretation(
         _routed_epic_code = routed.epic_code  # may be None for crypto
         _routed_perp_symbol = routed.ccxt_perp_symbol  # informational
     else:
-        # Symbol can't be routed. Skip the rest of the heavy machinery
-        # (CCXT pre-flights, dedup) and persist a cancelled row so the
-        # operator sees the rejection once, not 20,000 times.
-        cancelled_reason = _unsupported_reason_r12(routed, now.isoformat())
-        logger.info(
-            "Round 12 routing: symbol=%r unsupported (reason=%s) — inserting "
-            "cancelled tracked_position news_item_id=%s",
-            instrument_symbol, routed.unsupported_reason, news_item_id,
-        )
-        try:
-            row_unsup = await shared_pool.fetch_one(
+        # Symbol can't be routed directly. Check the symbol_mappings table
+        # (populated by the 12-hourly symbol_learner cron). If the LLM has
+        # previously mapped this symbol, use the mapping. Otherwise register
+        # it as unknown so the next cron run can resolve it.
+        from shared.utils.symbol_learner import lookup_mapping, register_unknown
+        _mapped = await lookup_mapping(shared_pool, instrument_symbol)
+        if _mapped:
+            logger.info(
+                "symbol_mappings hit: %s -> %s/%s (%s)",
+                instrument_symbol,
+                _mapped["resolved_exchange"],
+                _mapped["resolved_symbol"],
+                _mapped["asset_type"],
+            )
+            instrument_symbol = _mapped["resolved_symbol"]
+            instrument_exchange = _mapped["resolved_exchange"]
+            # Re-route: set variables and fall through to supported path below.
+            # We exit the rejection block by NOT running the cancelled INSERT.
+        else:
+            # Register for future resolution — never seen before
+            cleaned_base = instrument_symbol.split("/")[0] if "/" in (instrument_symbol or "") else (instrument_symbol or "")
+            await register_unknown(shared_pool, instrument_symbol, cleaned_base)
+
+            # Symbol can't be routed. Skip the rest of the heavy machinery
+            # (CCXT pre-flights, dedup) and persist a cancelled row so the
+            # operator sees the rejection once, not 20,000 times.
+            cancelled_reason = _unsupported_reason_r12(routed, now.isoformat())
+            logger.info(
+                "Round 12 routing: symbol=%r unsupported (reason=%s) — inserting "
+                "cancelled tracked_position news_item_id=%s",
+                instrument_symbol, routed.unsupported_reason, news_item_id,
+            )
+            try:
+                row_unsup = await shared_pool.fetch_one(
                 """
                 INSERT INTO public.tracked_positions (
                     news_item_id, media_item_id, trader_profile_id,
@@ -3007,15 +3030,15 @@ async def create_tracked_position_from_interpretation(
                     signal_source, actor_type, actor_id,
                     now,
                 ),
-            )
-            return int(row_unsup["id"]) if row_unsup else None
-        except Exception as exc:
-            logger.warning(
-                "Round 12 routing: failed to write cancelled row "
-                "for symbol=%r news_item_id=%s: %s",
-                instrument_symbol, news_item_id, exc,
-            )
-            return None
+                )
+                return int(row_unsup["id"]) if row_unsup else None
+            except Exception as exc:
+                logger.warning(
+                    "Round 12 routing: failed to write cancelled row "
+                    "for symbol=%r news_item_id=%s: %s",
+                    instrument_symbol, news_item_id, exc,
+                )
+                return None
 
     # Phase 6: normalise instrument symbol for cross-venue lookups.
     # Round 12 (2026-05-24): instrument_exchange is now post-router, so
