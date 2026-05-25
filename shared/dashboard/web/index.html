@@ -141,6 +141,13 @@
     <section id="tab-ops" class="tab"><div class="floor-grid two"><section class="panel"><div class="panel-head"><h2>Cost envelope</h2></div><div id="cost-chart" class="chart"></div></section><section class="panel"><div class="panel-head"><h2>Service health</h2></div><div id="services-grid" class="service-grid"></div></section></div></section>
 
     <section id="tab-settings" class="tab">
+      <div class="settings-subtabs">
+        <button class="pill-btn subtab active" data-subtab="models">AI Models</button>
+        <button class="pill-btn subtab" data-subtab="sources">Sources & Tracking</button>
+        <button class="pill-btn subtab" data-subtab="prompts">Prompts</button>
+        <button class="pill-btn subtab" data-subtab="config">App Config</button>
+      </div>
+      <div id="subtab-models" class="subtab-panel active">
       <div class="panel full">
         <div class="panel-head">
           <div><h2>Vision-model settings</h2><p>Choose which OpenRouter vision model the InterpretationService uses for chart reading. Changes take effect within 60 seconds — no service restart required.</p></div>
@@ -149,14 +156,35 @@
       </div>
       <div class="panel full">
         <div class="panel-head">
-          <div><h2>Duplicate-call guard</h2><p>Per-trader uniqueness is enforced automatically: each trader (chart_hacker AND each Discord trader) can have at most one long and one short pending per coin. New signals from the same trader on the same coin/direction refresh the existing row in place. Cross-trader confluence is preserved (different traders on the same coin show as separate cards). No tuning required.</p></div>
+          <div><h2>Duplicate-call guard</h2><p>Per-trader uniqueness is enforced automatically: each trader can have at most one long and one short pending per coin. New signals from the same trader on the same coin/direction refresh the existing row in place.</p></div>
         </div>
       </div>
       <div class="panel full">
         <div class="panel-head"><h2>Recent model changes</h2><p>Audit trail of every model swap, newest first.</p></div>
         <div id="settings-history" class="table-wrap"></div>
       </div>
+      </div>
+      <div id="subtab-sources" class="subtab-panel">
       <div id="sources-tree"></div>
+      </div>
+      <div id="subtab-prompts" class="subtab-panel">
+      <div class="panel full">
+        <div class="panel-head">
+          <h2>Prompt Library</h2>
+          <button class="pill-btn" id="btn-new-prompt-prompts">+ New Prompt</button>
+        </div>
+        <div class="table-wrap"><table class="data-table" id="prompts-table">
+          <thead><tr><th>Name</th><th>Version</th><th>Source</th><th>Used</th><th>Hash</th><th></th></tr></thead>
+          <tbody id="prompts-tbody"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+        </table></div>
+      </div>
+      </div>
+      <div id="subtab-config" class="subtab-panel">
+      <div class="panel full">
+        <div class="panel-head"><h2>Dedup settings</h2></div>
+        <div class="table-wrap"><div id="dedup-knobs">Loading…</div></div>
+      </div>
+      </div>
     </section>
   </main>
 

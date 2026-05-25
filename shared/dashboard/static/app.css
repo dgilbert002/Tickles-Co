@@ -164,6 +164,14 @@ select.filter-input{cursor:pointer}
 .modal-body textarea.input{font-family:var(--mono);font-size:12px;resize:vertical}
 .modal-body .btn-row{display:flex;gap:8px;align-items:center}
 .hidden{display:none!important}
+
+/* Settings sub-tabs */
+.settings-subtabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.settings-subtabs .subtab{opacity:.6;transition:opacity .15s}
+.settings-subtabs .subtab.active,.settings-subtabs .subtab:hover{opacity:1}
+.subtab-panel{display:none}
+.subtab-panel.active{display:block}
+
 /* 2026-05-22 — draggable resizer on the LEFT edge of the drawer.
    Drag LEFT to widen the drawer, RIGHT to shrink. Width persists to
    localStorage under key 'tickles.drawer.width'. Touch-supported. */

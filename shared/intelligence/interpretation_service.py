@@ -168,6 +168,7 @@ class LlmResult:
     response_path: str = ""
     prompt_version: str = ""
     prompt_hash: str = ""
+    prompt_source: str = ""  # 'db', 'config', or 'file'
 
 
 @dataclass
@@ -761,17 +762,55 @@ def _load_prompts(source: str = "", channel: str = "") -> Dict[str, Any]:
 async def _load_prompts_async(
     shared_pool, source: str = "", channel: str = ""
 ) -> Dict[str, Any]:
-    """Async version — checks system_config for source-specific prompt override.
+    """Load chart_analysis prompt from DB (prompt_versions), falling back to file.
 
-    Call this from within a running tick when shared_pool is available.
-    Falls back to _load_prompts() if no override found or on any error.
+    Priority:
+      1. prompt_versions.name='chart_analysis', version matching source/channel
+      2. system_config.chart_prompts (legacy — being phased out)
+      3. prompts/chart_analysis.json file (hardcoded fallback)
+
+    Returns dict with keys: chart_analysis (system_prompt, user_prompt_template),
+    _source, _channel, _prompt_key, _prompt_source ('db'|'file'|'config').
     """
-    if not source or not shared_pool:
-        return _load_prompts(source, channel)
+    if not shared_pool:
+        result = _load_prompts(source, channel)
+        result["_prompt_source"] = "file"
+        return result
 
     try:
         async with shared_pool.acquire() as conn:
-            # Try source/channel/prompt first, then source/prompt, then source
+            # 1. Try prompt_versions — source-specific then default
+            version_keys = []
+            if source and channel:
+                version_keys.append(f"{source}-{channel}-v1")
+            if source:
+                version_keys.append(f"{source}-v1")
+            version_keys.append("2026.05.24-position-box-required-v2")  # default
+
+            for vk in version_keys:
+                row = await conn.fetchrow(
+                    "SELECT system, body, version, prompt_hash FROM prompt_versions "
+                    "WHERE name = 'chart_analysis' AND version = $1 AND source = 'db'",
+                    vk,
+                )
+                if row:
+                    logger.info(
+                        "Loaded prompt from DB: chart_analysis/%s hash=%s",
+                        row["version"], row["prompt_hash"],
+                    )
+                    return {
+                        "chart_analysis": {
+                            "system_prompt": row["system"],
+                            "user_prompt_template": row["body"],
+                        },
+                        "_source": source,
+                        "_channel": channel,
+                        "_prompt_key": f"db:{row['version']}",
+                        "_prompt_source": "db",
+                        "_prompt_hash": row["prompt_hash"],
+                    }
+
+            # 2. Legacy system_config fallback (will be removed in Phase 4)
             for key in (
                 f"{source}/{channel}/prompt" if channel else None,
                 f"{source}/prompt",
@@ -790,10 +829,7 @@ async def _load_prompts_async(
                     sp = cfg.get("system_prompt", "")
                     ut = cfg.get("user_prompt_template", "")
                     if sp and ut:
-                        logger.info(
-                            "Loaded source-specific prompt: %s for source=%s",
-                            key, source,
-                        )
+                        logger.info("Loaded prompt from system_config: %s", key)
                         return {
                             "chart_analysis": {
                                 "system_prompt": sp,
@@ -802,11 +838,16 @@ async def _load_prompts_async(
                             "_source": source,
                             "_channel": channel,
                             "_prompt_key": key,
+                            "_prompt_source": "config",
                         }
     except Exception as exc:
-        logger.warning("Failed to load prompt from system_config: %s", exc)
+        logger.warning("Failed to load prompt from DB: %s", exc)
 
-    return _load_prompts(source, channel)
+    # 3. JSON file fallback
+    result = _load_prompts(source, channel)
+    result["_prompt_source"] = "file"
+    logger.info("Using file prompt fallback (no DB prompt found for source=%s)", source)
+    return result
 
 
 
@@ -1183,6 +1224,7 @@ async def run_llm_track(
                     response_path=resp_path,
                     prompt_version=prompt_version,
                     prompt_hash=prompt_hash,
+                    prompt_source=prompts.get("_prompt_source", ""),
                 )
             except Exception as exc:
                 last_exc = exc
@@ -2090,6 +2132,8 @@ async def write_signal_interpretation(
     market_data_at: datetime,
     correlation_id: str = "",
     instrument_resolved_from: str = "unknown",
+    prompt_source: str = "",
+    prompt_hash: str = "",
 ) -> Optional[int]:
     """Write a signal_interpretation row to the shared database.
 
@@ -2164,6 +2208,8 @@ async def write_signal_interpretation(
         "  llm_raw_request_path, llm_raw_response_path, "
         "  correlation_id, "
         "  instrument_resolved_from, "
+        # prompt provenance
+        "  prompt_source, prompt_hash, "
         # Phase J — dual-extraction columns
         "  timeframe, chart_analysis, trader_trades, chart_hacker_trades, "
         "  ai_agreement_score, ai_comment, "
@@ -2195,6 +2241,8 @@ async def write_signal_interpretation(
         "  $43, $44, $45, "
         # Bug H8 params $46, $47
         "  $46::jsonb, $47::jsonb, "
+        # prompt provenance params $48, $49
+        "  $48, $49, "
         "  NOW()"
         ")"
         "ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING "
@@ -2252,6 +2300,9 @@ async def write_signal_interpretation(
         # Bug H8 — pattern_tags ($46), setup_tags ($47)
         json.dumps(pattern_tags_list),
         json.dumps(setup_tags_list),
+        # prompt provenance ($48, $49)
+        prompt_source or "",
+        prompt_hash or "",
     )
     row = await shared_pool.fetch_one(sql, params)
     if row is None:
@@ -3951,6 +4002,8 @@ class InterpretationService:
             market_data_at=market_data_at,
             correlation_id=cid,
             instrument_resolved_from=resolved_from,
+            prompt_source=llm_result.prompt_source,
+            prompt_hash=llm_result.prompt_hash,
         )
 
         # --- Wire to tracked_positions — Phase J dual write ---

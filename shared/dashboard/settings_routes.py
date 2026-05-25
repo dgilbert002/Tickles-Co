@@ -673,6 +673,33 @@ async def handle_rename_prompt(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/settings/prompts/versions — prompt_versions table
+# ---------------------------------------------------------------------------
+async def handle_get_prompt_versions(request: web.Request) -> web.Response:
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    rows = await pool.fetch_all("""
+        SELECT name, version, prompt_hash, source, times_used, success_rate, created_at
+        FROM prompt_versions
+        WHERE name = 'chart_analysis'
+        ORDER BY created_at DESC
+        LIMIT 50
+    """)
+    versions = []
+    for r in rows:
+        versions.append({
+            "name": r["name"],
+            "version": r["version"],
+            "prompt_hash": r["prompt_hash"],
+            "source": r["source"],
+            "times_used": r["times_used"] or 0,
+            "success_rate": float(r["success_rate"]) if r["success_rate"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+    return _json_response({"ok": True, "versions": versions})
+
+
+# ---------------------------------------------------------------------------
 # Mount
 # ---------------------------------------------------------------------------
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
@@ -687,6 +714,7 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     # Prompt library + source tracking
     app.router.add_get(f"{prefix}/api/settings/sources", handle_get_sources)
     app.router.add_put(f"{prefix}/api/settings/track", handle_put_track)
+    app.router.add_get(f"{prefix}/api/settings/prompts/versions", handle_get_prompt_versions)
     app.router.add_get(f"{prefix}/api/settings/prompts", handle_get_prompts)
     app.router.add_get(f"{prefix}/api/settings/prompts/{{key}}", handle_get_prompt)
     app.router.add_put(f"{prefix}/api/settings/prompts/{{key}}", handle_put_prompt)

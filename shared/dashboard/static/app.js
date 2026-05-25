@@ -1477,6 +1477,38 @@ function wire(){
   ['traders-filter','traders-sort'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderTradersPage()});
   ['news-filter','news-media'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderNewsPage()});
   ['telegram-filter','telegram-media','telegram-channel'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderTelegramPage()});
+  // Settings sub-tabs
+  $$('#tab-settings .subtab').forEach(b=>b.onclick=()=>{
+    $$('#tab-settings .subtab').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    $$('#tab-settings .subtab-panel').forEach(p=>p.classList.remove('active'));
+    const panel=document.getElementById('subtab-'+b.dataset.subtab);
+    if(panel){panel.classList.add('active');
+      if(b.dataset.subtab==='prompts')loadPromptsTab();
+    }
+  });
+  $('#btn-new-prompt-prompts')?.addEventListener('click',()=>openPromptModal('new'));
+}
+
+async function loadPromptsTab(){
+  try{
+    const r=await fetch('/api/settings/prompts/versions');
+    if(!r.ok)return;
+    const data=await r.json();
+    const rows=data.versions||[];
+    const tbody=$('#prompts-tbody');
+    if(!tbody)return;
+    if(!rows.length){tbody.innerHTML='<tr><td colspan="6" class="empty">No prompts found</td></tr>';return;}
+    tbody.innerHTML=rows.map(p=>`<tr>
+      <td class="primary">${esc(p.name)}</td>
+      <td class="mono">${esc(p.version)}</td>
+      <td><span class="badge ${p.source==='db'?'badge-pro':'neutral'}">${esc(p.source)}</span></td>
+      <td class="secondary">${p.times_used||0}</td>
+      <td class="mono small">${esc(p.prompt_hash||'—')}</td>
+      <td><button class="pill-btn" data-prompt-version="${esc(p.version)}" style="padding:4px 12px;font-size:11px">Edit</button></td>
+    </tr>`).join('');
+    tbody.querySelectorAll('[data-prompt-version]').forEach(btn=>btn.onclick=()=>openPromptModal(btn.dataset.promptVersion));
+  }catch(e){console.error('loadPromptsTab',e);}
 }
 window.addEventListener('DOMContentLoaded',()=>{loadDrawerWidth();wire();attachDrawerResizer();load();state.timer=setInterval(()=>{const ts=new Date();$('#updated-at').textContent=`${ts.toLocaleTimeString()}`; if(['floor','radar','signals','positions','competition'].includes(state.tab)) load()},30000)});
 })();
