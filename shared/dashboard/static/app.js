@@ -699,7 +699,7 @@ function openPromptModal(key){
   modal.querySelector('#btn-cancel-prompt')?.addEventListener('click',close);
 
   if(!isNew){
-    api(`/api/settings/prompts/${encodeURIComponent(key)}`,{skipCompany:true}).then(data=>{
+    api(`/api/settings/prompts/versions/${encodeURIComponent(key)}`,{skipCompany:true}).then(data=>{
       const bodyEl=modal.querySelector('#prompt-modal-body');
       if(!bodyEl)return;
       bodyEl.innerHTML=`

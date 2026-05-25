@@ -738,6 +738,32 @@ async def handle_save_prompt_version(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/settings/prompts/versions/{version} — single prompt
+# ---------------------------------------------------------------------------
+async def handle_get_prompt_version(request: web.Request) -> web.Response:
+    version = request.match_info.get("version", "")
+    if not version:
+        return _err("version is required")
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    row = await pool.fetch_one(
+        "SELECT system, body, prompt_hash, source, version FROM prompt_versions "
+        "WHERE name = 'chart_analysis' AND version = $1",
+        (version,),
+    )
+    if not row:
+        return _err(f"version {version!r} not found", status=404)
+    return _json_response({
+        "ok": True,
+        "version": row["version"],
+        "system_prompt": row["system"],
+        "user_prompt_template": row["body"],
+        "prompt_hash": row["prompt_hash"],
+        "source": row["source"],
+    })
+
+
+# ---------------------------------------------------------------------------
 # DELETE /api/settings/prompts/versions/{version}
 # ---------------------------------------------------------------------------
 async def handle_delete_prompt_version(request: web.Request) -> web.Response:
@@ -802,6 +828,7 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(f"{prefix}/api/settings/sources", handle_get_sources)
     app.router.add_put(f"{prefix}/api/settings/track", handle_put_track)
     app.router.add_get(f"{prefix}/api/settings/prompts/versions", handle_get_prompt_versions)
+    app.router.add_get(f"{prefix}/api/settings/prompts/versions/{{version}}", handle_get_prompt_version)
     app.router.add_put(f"{prefix}/api/settings/prompts/versions/save", handle_save_prompt_version)
     app.router.add_delete(f"{prefix}/api/settings/prompts/versions/{{version}}", handle_delete_prompt_version)
     app.router.add_put(f"{prefix}/api/settings/prompts/versions/rename", handle_rename_prompt_version)
