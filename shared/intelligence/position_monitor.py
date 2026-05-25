@@ -1993,6 +1993,7 @@ class PositionMonitor:
                 price = result.price
                 logger.debug("position_monitor CCXT fallback: %s = %.4f", symbol, price)
             except Exception:
+                logger.debug("position_monitor CCXT fallback failed: %s", exc)
                 pass
 
         if price is None:

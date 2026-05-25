@@ -327,13 +327,14 @@ async def _ccxt_live_price(
             "http://127.0.0.1:3101/api/snapshot",
             headers={"Accept": "application/json"},
         )
-        data = json.loads(urllib.request.urlopen(req, timeout=3).read())
+        loop = asyncio.get_event_loop()
+        data = json.loads(await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=3).read()))
         prices = data.get("prices", [])
         # Match symbol — try exact, then normalize
         sym_upper = symbol.upper().replace(":USDT", "").replace(".P", "")
         for p in prices:
             ps = p.get("symbol", "").upper().replace(":USDT", "").replace(".P", "")
-            if ps == sym_upper or sym_upper in ps or ps in sym_upper:
+            if ps == sym_upper or (len(sym_upper) >= 4 and sym_upper == ps.split("/")[0]):
                 px = p.get("price")
                 if px and px > 0:
                     logger.info("live-price snapshot fallback: %s = %.4f", p["symbol"], px)
@@ -1108,9 +1109,11 @@ async def run_llm_track(
     image_b64 = _encode_image_b64(image_path)
     image_mime = _image_mime_type(image_path)
 
-    prompts = (await _load_prompts_async(
+    prompts_full = await _load_prompts_async(
         shared_pool, news_source, channel_name, trader_profile_id
-    )).get("chart_analysis", {})
+    )
+    prompts = prompts_full.get("chart_analysis", {})
+    _prompt_source = prompts_full.get("_prompt_source", "")
     system_prompt = prompts.get("system_prompt", "")
     if not system_prompt:
         system_prompt = (
@@ -1296,7 +1299,7 @@ async def run_llm_track(
                     response_path=resp_path,
                     prompt_version=prompt_version,
                     prompt_hash=prompt_hash,
-                    prompt_source=prompts.get("_prompt_source", ""),
+                    prompt_source=_prompt_source,
                 )
             except Exception as exc:
                 last_exc = exc
