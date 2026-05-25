@@ -421,7 +421,7 @@ async def _download_media_for_messages(
                     )
                 continue
 
-            media_type = "photo"
+            media_type = "image"
 
             ext = os.path.splitext(filename)[1] or ".bin"
             timestamp = msg.get("date", datetime.now(timezone.utc))
