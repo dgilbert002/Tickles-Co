@@ -26,6 +26,7 @@ from ..tools import (
     meta,
     provisioning,
     routing,
+    symbols,
     trading,
 )
 from ..transports.stdio import run_stdio
@@ -58,6 +59,7 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     contest.register(reg, ctx)
     intelligence.register(reg, ctx)
     routing.register(reg, ctx)
+    symbols.register(reg, ctx)
     register_builtin_providers(reg, LOG)
     return reg
 

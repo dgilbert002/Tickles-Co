@@ -42,8 +42,8 @@ from ..registry import (
 from ..server import McpServer
 from ..store import InvocationStore
 from ..transports.http import run_http
-from ..tools import ToolContext
 from ..tools import (
+    ToolContext,
     backtest,
     contest,
     data,
@@ -53,6 +53,7 @@ from ..tools import (
     meta,
     provisioning,
     routing,
+    symbols,
     trading,
 )
 
@@ -96,6 +97,7 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     contest.register(reg, ctx)
     intelligence.register(reg, ctx)
     routing.register(reg, ctx)
+    symbols.register(reg, ctx)
     register_builtin_providers(reg, LOG)
 
     LOG.info("[build_registry] registered tools=%d", len(reg.list_tools()))
