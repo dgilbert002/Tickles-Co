@@ -4,7 +4,7 @@ Run as: python3 -m shared.scripts.expire_stale_pending [--dry-run]
 
 Expires pending signals where:
   - current_price is NULL (no price data available)
-  - signal_timestamp > 12 hours ago (stale)
+  - signal_timestamp older than 12 hours (stale)
   - Never hit their entry (status still 'pending')
 
 These are typically :USDT perp-suffixed symbols that the position_monitor

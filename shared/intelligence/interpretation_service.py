@@ -512,9 +512,11 @@ async def _load_source_color_rules(shared_pool, source: str) -> str:
                 bear = colors.get("bear", "red")
                 note = cfg.get("note", "")
                 return (
-                    f"COLOR RULES FOR THIS SOURCE: "
-                    f"Bullish/profit zones are {bull}. "
-                    f"Bearish/loss zones are {bear}. "
+                    f"⚠️ SOURCE COLOR OVERRIDE — Apply these colors for THE ONE RULE: "
+                    f"Bullish/profit zone = {bull.upper()} (NOT green). "
+                    f"Bearish/loss zone = {bear.upper()} (NOT red). "
+                    f"Drawn rectangles/zones in these colors ARE valid position boxes. "
+                    f"Treat {bull} touching entry above + {bear} touching entry below = LONG. "
                     f"{note}"
                 )
     except Exception:
