@@ -1492,9 +1492,7 @@ function wire(){
 
 async function loadPromptsTab(){
   try{
-    const r=await fetch('/api/settings/prompts/versions');
-    if(!r.ok)return;
-    const data=await r.json();
+    const data=await api('/api/settings/prompts/versions',{skipCompany:true});
     const rows=data.versions||[];
     const tbody=$('#prompts-tbody');
     if(!tbody)return;
