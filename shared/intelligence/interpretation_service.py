@@ -3949,16 +3949,56 @@ class InterpretationService:
         if symbol_from_llm and llm_result and llm_result.instrument:
             llm_instrument = llm_result.instrument.strip().upper()
             if llm_instrument and llm_instrument != "UNKNOWN":
-                # Normalise: ensure slash form
-                if "/" not in llm_instrument and len(llm_instrument) > 3:
-                    # Try to split: BTCUSDT -> BTC/USDT
-                    for quote in ("USDT", "USD", "BUSD", "USDC"):
-                        if llm_instrument.endswith(quote):
-                            llm_instrument = llm_instrument[:-len(quote)] + "/" + quote
+                # --- Clean -> bare base token ---------------------------------
+                # Strip EVERYTHING that isn't a ticker. Exchange prefixes,
+                # quote currencies, perp markers, futures codes. What remains
+                # should be a base currency that unified_instruments can match.
+                import re as _re
+                s = llm_instrument
+                # Exchange prefix: "BYBIT:BTCUSDT.P" -> "BTCUSDT.P"
+                s = _re.sub(r"^[A-Z]+:", "", s)
+                # Perp/futures suffixes: .P, /P, :USDT, :USDC, 1!, USDT.P
+                s = _re.sub(r"[.:/]P$", "", s)
+                s = _re.sub(r":USDT$|:USDC$", "", s)
+                s = _re.sub(r"[12]!$", "", s)
+                # Slash form: "BITTENSOR/USDT" or "YB/TETHERUS"
+                if "/" in s:
+                    parts = s.split("/", 1)
+                    base = parts[0]
+                    quote = parts[1]
+                    # Remap non-USDT quotes -> USDT
+                    if quote in ("USD", "USDC", "BUSD", "TETHERUS"):
+                        s = f"{base}/USDT"
+                    # Apply crypto-first remap for slash form too
+                    # (handles BITTENSOR/USDT->TAO/USDT, ZCASH/USDT->ZEC/USDT etc.)
+                    from shared.utils.exchange_router import _apply_crypto_first_remap as _remap
+                    s = _remap(s)
+                else:
+                    # No slash: "BTCUSDT" or "BTC" or "HUSDT" or "GOLD"
+                    # Try stripping trailing known quotes
+                    for q in ("USDT", "USDC", "USD", "BUSD"):
+                        if s.endswith(q) and len(s) > len(q):
+                            s = s[:-len(q)]
                             break
-                symbol = llm_instrument
-                # Normalize perp suffixes — position_monitor needs spot form
-                symbol = symbol.replace(":USDT", "").replace(":USDC", "").replace(".P", "")
+                    # Apply crypto-first remap (handles GOLD->XAU/USDT, NQ->QQQ/USDT,
+                    # BITTENSOR/USDT->TAO/USDT etc.). This may introduce a slash.
+                    from shared.utils.exchange_router import _apply_crypto_first_remap as _remap
+                    s = _remap(s)
+                    # Add /USDT for bare base (only if remap didn't add a slash)
+                    if s and "/" not in s:
+                        s = f"{s}/USDT"
+                # Strip leading digits for contract-multiplier tickers:
+                # "1000PEPE" / "10000SATS" etc. DB lists the bare ticker.
+                # Guard: only strip when remaining chars are 3+ letters
+                # (protects real tickers like "2Z", "1INCH" which must stay
+                # as-is in the DB). "2Z/USDT" stays "2Z/USDT".
+                while s and s[0].isdigit():
+                    stripped = s[1:]
+                    if len(stripped) >= 3 and stripped.isalpha():
+                        s = stripped
+                    else:
+                        break
+                symbol = s
                 logger.info(
                     "media_id=%s: LLM identified instrument as %s",
                     media_id, symbol,

@@ -198,6 +198,15 @@ _CRYPTO_FIRST_REMAP: Dict[str, str] = {
     "NQ":       "QQQ/USDT",
     "US100":    "QQQ/USDT",
     "QQQ":      "QQQ/USDT",
+    # Crypto aliases — TradingView/full-name → exchange ticker
+    "BITTENSOR/USDT": "TAO/USDT",
+    "ZCASH/USDT":     "ZEC/USDT",
+    "BEAMX/USDT":     "BEAM/USDT",
+    # Index remaps — also with /USDT suffix produced by the cleanup block
+    "NQ/USDT":         "QQQ/USDT",
+    "NAS100/USDT":     "QQQ/USDT",
+    "US100/USDT":      "QQQ/USDT",
+    "US30/USDT":       "DXY/USDT",
     # Tokenised stocks (NVDA, MSTR, TSLA, AAPL etc.) reach the resolver
     # by their bare ticker via the bare-crypto-base path. Aliases here
     # are reserved for cross-asset-class translations.
@@ -613,33 +622,10 @@ async def resolve_market(
         )
         return result
 
-    # ---- 10. last-resort: crypto-perp synthesis ----------------------
-    # Symbol cleanly matches ``BASE/USDT`` but has no unified_instruments
-    # row (could be too new to have synced, or spot was delisted but perp
-    # is alive). Synthesise a Bybit linear-perp routing — CCXT will be
-    # the final arbiter when PositionMonitor actually fetches.
-    crypto_pair = re.match(r"^([A-Z0-9]{1,12})/USDT$", canonical, re.IGNORECASE)
-    if crypto_pair:
-        synthesised = f"{canonical}:USDT"
-        result = RoutedMarket(
-            supported=True,
-            exchange="bybit",
-            exchange_symbol=synthesised,
-            asset_class="crypto",
-            epic_code=None,
-            ccxt_perp_symbol=synthesised,
-            canonical_symbol=synthesised,
-            raw_input=raw,
-        )
-        _cache_put(cache_key, result)
-        logger.info(
-            "resolve_market(symbol=%r) -> bybit/%s (perp synthesis fallback; "
-            "not in unified_instruments)",
-            raw, synthesised,
-        )
-        return result
-
-    # No fallback applies — give up cleanly.
+    # ---- 10. not listed — give up cleanly ------------------------------
+    # Symbol was not in unified_instruments and no aliases matched.
+    # Return NOT_LISTED so the caller marks it unsupported rather than
+    # inventing a fake route that would spam "market not found" errors.
     result = RoutedMarket(
         supported=False,
         unsupported_reason=UNSUPPORTED_REASONS.NOT_LISTED,
