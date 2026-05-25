@@ -732,7 +732,7 @@ async def handle_save_prompt_version(request: web.Request) -> web.Response:
         "VALUES ('chart_analysis', $1, $2, $3, $4, 'db', 'dashboard') "
         "ON CONFLICT (name, version) DO UPDATE SET "
         "  prompt_hash = $2, system = $3, body = $4, source = 'db'",
-        (version, prompt_hash, sp, ut, source),
+        (version, prompt_hash, sp, ut),
     )
     return _json_response({"ok": True, "saved": version, "hash": prompt_hash})
 
