@@ -62,6 +62,7 @@ def _cleanup(raw: str) -> Optional[str]:
     s = raw.strip().upper()
     if s == "UNKNOWN":
         return None
+    s = s.lstrip("$#")                         # social-media prefixes
     s = _re.sub(r"^[A-Z]+:", "", s)           # exchange prefix
     s = _re.sub(r"[.:/]P$", "", s)            # perp suffix
     s = _re.sub(r":USDT$|:USDC$", "", s)      # CCXT perp suffix
@@ -78,16 +79,30 @@ def _cleanup(raw: str) -> Optional[str]:
                 s = s[:-len(q)]
                 break
         s = _REMAP_KEYS.get(s, s)
-        if s and "/" not in s:
-            s = f"{s}/USDT"
-    while s and s[0].isdigit():
-        stripped = s[1:]
-        if len(stripped) >= 3 and stripped.isalpha():
-            s = stripped
-        else:
-            break
+    # Strip contract-multiplier prefixes from BASE.
+    # Only strips when there are 3+ leading digits (1000PEPE, 1000000MOG).
+    # Single/double-digit prefixes are real tickers (1INCH, 2Z).
+    if s and s[0].isdigit():
+        _digits = _re.match(r'^(\d+)', s)
+        if _digits and len(_digits.group(1)) >= 3:
+            if "/" in s:
+                _base, _rest = s.split("/", 1)
+                _clean = _re.sub(r'^\d+', '', _base)
+                if _clean and len(_clean) >= 2:
+                    s = f"{_clean}/{_rest}"
+            else:
+                _clean = _re.sub(r'^\d+', '', s)
+                if _clean and len(_clean) >= 2:
+                    s = _clean
+    # Add /USDT if bare base
+    if s and "/" not in s:
+        s = f"{s}/USDT"
+    # Re-apply remap for slash form after digit strip
     if "/" in s:
         s = _REMAP_KEYS.get(s, s)
+    # Reject dominance metrics (USDT.D, BTC.D, etc.)
+    if s.endswith(".D/USDT"):
+        return None
     return s
 
 

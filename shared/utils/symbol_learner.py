@@ -243,7 +243,7 @@ async def resolve_pending(pool: DatabasePool) -> int:
                 SET status = 'resolved', resolved_at = NOW()
                 WHERE raw_symbol = $1
                 """,
-                raw_symbol,
+                (raw_symbol,),
             )
             resolved_count += 1
             logger.info(
@@ -259,7 +259,7 @@ async def resolve_pending(pool: DatabasePool) -> int:
                     notes = 'LLM could not match to any exchange instrument'
                 WHERE raw_symbol = $1
                 """,
-                raw_symbol,
+                (raw_symbol,),
             )
             logger.info("symbol_learner: %s → UNRESOLVABLE", raw_symbol)
     
@@ -276,7 +276,7 @@ async def lookup_mapping(pool: DatabasePool, raw_symbol: str) -> Optional[dict]:
         ORDER BY priority
         LIMIT 1
         """,
-        raw_symbol.upper().strip(),
+        (raw_symbol.upper().strip(),),
     )
     return dict(row) if row else None
 

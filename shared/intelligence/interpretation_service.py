@@ -3978,6 +3978,8 @@ class InterpretationService:
                 # should be a base currency that unified_instruments can match.
                 import re as _re
                 s = llm_instrument
+                # Social-media prefixes: "$BTC" -> "BTC", "#SOL" -> "SOL"
+                s = s.lstrip("$#")
                 # Exchange prefix: "BYBIT:BTCUSDT.P" -> "BTCUSDT.P"
                 s = _re.sub(r"^[A-Z]+:", "", s)
                 # Perp/futures suffixes: .P, /P, :USDT, :USDC, 1!, USDT.P
@@ -4007,21 +4009,38 @@ class InterpretationService:
                     # BITTENSOR/USDT->TAO/USDT etc.). This may introduce a slash.
                     from shared.utils.exchange_router import _apply_crypto_first_remap as _remap
                     s = _remap(s)
-                    # Add /USDT for bare base (only if remap didn't add a slash)
-                    if s and "/" not in s:
-                        s = f"{s}/USDT"
-                # Strip leading digits for contract-multiplier tickers:
-                # "1000PEPE" / "10000SATS" etc. DB lists the bare ticker.
-                # Guard: only strip when remaining chars are 3+ letters
-                # (protects real tickers like "2Z", "1INCH" which must stay
-                # as-is in the DB). "2Z/USDT" stays "2Z/USDT".
-                while s and s[0].isdigit():
-                    stripped = s[1:]
-                    if len(stripped) >= 3 and stripped.isalpha():
-                        s = stripped
-                    else:
-                        break
+                # Strip contract-multiplier prefixes from BASE.
+                # Only strips when there are 3+ leading digits (1000PEPE,
+                # 1000000MOG). Single/double-digit prefixes are real
+                # tickers (1INCH, 2Z — must NOT be stripped).
+                if s and s[0].isdigit():
+                    _digits = _re.match(r'^(\d+)', s)
+                    if _digits and len(_digits.group(1)) >= 3:
+                        if "/" in s:
+                            _base, _rest = s.split("/", 1)
+                            _clean = _re.sub(r'^\d+', '', _base)
+                            if _clean and len(_clean) >= 2:
+                                s = f"{_clean}/{_rest}"
+                        else:
+                            _clean = _re.sub(r'^\d+', '', s)
+                            if _clean and len(_clean) >= 2:
+                                s = _clean
+                # Add /USDT if we end up with a bare base token
+                if s and "/" not in s:
+                    s = f"{s}/USDT"
                 symbol = s
+                # Reject dominance metrics: USDT.D, BTC.D, TOTAL3 etc.
+                if symbol and symbol.endswith(".D/USDT"):
+                    logger.info(
+                        "media_id=%s: dominance metric %s — skipping (not tradeable)",
+                        media_id, symbol,
+                    )
+                    await update_media_status(
+                        shared_pool, media_id, "skipped_not_chart",
+                        error=f"dominance metric: {symbol}",
+                        expected_processed_at=claim_ts,
+                    )
+                    return {"media_id": media_id, "status": "skipped_dominance"}
                 logger.info(
                     "media_id=%s: LLM identified instrument as %s",
                     media_id, symbol,
