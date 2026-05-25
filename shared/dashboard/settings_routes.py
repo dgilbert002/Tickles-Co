@@ -448,6 +448,173 @@ async def handle_set_dedup(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/settings/sources — tree of sources→channels→users
+# ---------------------------------------------------------------------------
+async def handle_get_sources(request: web.Request) -> web.Response:
+    """Return the full source→channel→user tree for the Settings UI."""
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+
+    rows = await pool.fetch_all("""
+        SELECT tp.id, tp.platform, tp.handle_raw, tp.display_name,
+               tp.trader_type, tp.is_tracked, tp.tracked_media_types,
+               tp.prompt_id, tp.channel_id, tp.accuracy_score,
+               tp.accuracy_samples
+        FROM trader_profiles tp
+        ORDER BY tp.platform, tp.channel_id NULLS FIRST, tp.display_name
+    """)
+
+    sources: Dict[str, Dict] = {}
+    for r in rows:
+        platform = r["platform"] or "unknown"
+        channel_id = r["channel_id"] or "_direct"
+        display_name = r["display_name"] or r["handle_raw"] or "unknown"
+
+        if platform not in sources:
+            sources[platform] = {"source": platform, "channels": {}}
+
+        src = sources[platform]
+        if channel_id not in src["channels"]:
+            # Derive a friendly channel name
+            if "1755624949" in str(channel_id):
+                ch_name = "Rose ⚡"
+            elif channel_id == "_direct":
+                ch_name = "Direct"
+            else:
+                ch_name = channel_id
+            src["channels"][channel_id] = {
+                "channel_id": channel_id,
+                "channel_name": ch_name,
+                "users": [],
+            }
+
+        src["channels"][channel_id]["users"].append({
+            "id": r["id"],
+            "handle": r["handle_raw"],
+            "display_name": display_name,
+            "trader_type": r["trader_type"],
+            "is_tracked": bool(r["is_tracked"]) if r["is_tracked"] is not None else True,
+            "tracked_media_types": r["tracked_media_types"] or "all",
+            "prompt_id": r["prompt_id"],
+            "accuracy_score": float(r["accuracy_score"]) if r["accuracy_score"] else None,
+            "accuracy_samples": r["accuracy_samples"],
+        })
+
+    return _json_response({"ok": True, "sources": list(sources.values())})
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/settings/track — update trader tracking/prompt
+# ---------------------------------------------------------------------------
+async def handle_put_track(request: web.Request) -> web.Response:
+    """Update is_tracked, tracked_media_types, or prompt_id for a trader."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+
+    trader_id = body.get("id")
+    if not trader_id:
+        return _err("id (trader_profile id) is required")
+
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+
+    updates = []
+    params = []
+    n = 1
+    for field in ("is_tracked", "tracked_media_types", "prompt_id"):
+        if field in body:
+            val = body[field]
+            if field == "tracked_media_types" and val not in ("all", "media", "text", None):
+                return _err(f"tracked_media_types must be all/media/text")
+            updates.append(f"{field} = ${n}")
+            params.append(val)
+            n += 1
+    if not updates:
+        return _err("at least one field to update is required")
+
+    params.append(trader_id)
+    sql = f"UPDATE trader_profiles SET {', '.join(updates)} WHERE id = ${n}"
+    await pool.execute(sql, tuple(params))
+    return _json_response({"ok": True, "updated": trader_id})
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/prompts — list prompts
+# ---------------------------------------------------------------------------
+async def handle_get_prompts(request: web.Request) -> web.Response:
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    rows = await pool.fetch_all("""
+        SELECT config_key, config_value FROM system_config
+        WHERE namespace = 'chart_prompts' AND (config_key LIKE '%/prompt' OR config_key = 'default')
+        ORDER BY config_key
+    """)
+    prompts = []
+    for r in rows:
+        cfg = r["config_value"]
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        sp = cfg.get("system_prompt", "")
+        prompts.append({
+            "key": r["config_key"],
+            "preview": sp[:150] + "…" if len(sp) > 150 else sp,
+        })
+    return _json_response({"ok": True, "prompts": prompts})
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/prompts/{key}
+# ---------------------------------------------------------------------------
+async def handle_get_prompt(request: web.Request) -> web.Response:
+    key = request.match_info.get("key", "")
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    row = await pool.fetch_one(
+        "SELECT config_value FROM system_config WHERE namespace = 'chart_prompts' AND config_key = $1",
+        (key,),
+    )
+    if not row:
+        return _err(f"not found: {key}", status=404)
+    cfg = row["config_value"]
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg)
+    return _json_response({
+        "ok": True, "key": key,
+        "system_prompt": cfg.get("system_prompt", ""),
+        "user_prompt_template": cfg.get("user_prompt_template", ""),
+    })
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/settings/prompts/{key}
+# ---------------------------------------------------------------------------
+async def handle_put_prompt(request: web.Request) -> web.Response:
+    key = request.match_info.get("key", "")
+    if not key:
+        return _err("prompt key is required")
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+    sp = body.get("system_prompt", "")
+    ut = body.get("user_prompt_template", "")
+    if not sp or not ut:
+        return _err("system_prompt and user_prompt_template are required")
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+    cfg = json.dumps({"system_prompt": sp, "user_prompt_template": ut})
+    await pool.execute(
+        "INSERT INTO system_config (namespace, config_key, config_value, is_secret) "
+        "VALUES ('chart_prompts', $1, $2, false) "
+        "ON CONFLICT (namespace, config_key) DO UPDATE SET config_value = $2",
+        (key, cfg),
+    )
+    return _json_response({"ok": True, "saved": key})
+
+
+# ---------------------------------------------------------------------------
 # Mount
 # ---------------------------------------------------------------------------
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
@@ -459,8 +626,14 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     # Round 13.5 — dedup knobs
     app.router.add_get(f"{prefix}/api/settings/dedup", handle_get_dedup)
     app.router.add_post(f"{prefix}/api/settings/dedup", handle_set_dedup)
+    # Prompt library + source tracking
+    app.router.add_get(f"{prefix}/api/settings/sources", handle_get_sources)
+    app.router.add_put(f"{prefix}/api/settings/track", handle_put_track)
+    app.router.add_get(f"{prefix}/api/settings/prompts", handle_get_prompts)
+    app.router.add_get(f"{prefix}/api/settings/prompts/{{key}}", handle_get_prompt)
+    app.router.add_put(f"{prefix}/api/settings/prompts/{{key}}", handle_put_prompt)
     logger.info(
-        "settings_routes: mounted GET/POST endpoints at %s/api/settings/* "
-        "(vision-models + dedup)",
+        "settings_routes: mounted GET/POST/PUT endpoints at %s/api/settings/* "
+        "(vision-models + dedup + sources + prompts)",
         prefix or "(root)",
     )

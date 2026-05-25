@@ -482,6 +482,207 @@ function renderTelegramPage(){
   }
 }
 
+async function _putAPI(path,body){
+  const u=new URL(path.replace(/^\//,''),document.baseURI);
+  const r=await fetch(u,{method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)});
+  const j=await r.json();
+  if(!r.ok)throw j;
+  return j;
+}
+
+async function fetchSourcesAndPrompts(){
+  try{
+    const [src,pr]=await Promise.all([
+      api('/api/settings/sources',{skipCompany:true}),
+      api('/api/settings/prompts',{skipCompany:true})
+    ]);
+    state.sources=src.sources||[];
+    state.prompts=pr.prompts||[];
+  }catch(e){console.error('fetchSourcesAndPrompts error',e);state.sources=[];state.prompts=[];}
+  renderSourcesTree();
+}
+
+function renderSourcesTree(){
+  const el=$('#sources-tree');
+  if(!el)return;
+  const sources=state.sources||[];
+  const prompts=state.prompts||[];
+
+  if(!sources.length){el.innerHTML='<div class="empty">Loading sources…</div>';return;}
+
+  let h='<div class="sources-header"><h3>Sources & Channels</h3></div>';
+
+  sources.forEach(src=>{
+    h+=`<div class="source-group">
+      <div class="source-title">${esc(src.source.toUpperCase())}</div>`;
+    const channels=Object.values(src.channels||{});
+    channels.forEach(ch=>{
+      const users=ch.users||[];
+      const allTracked=users.every(u=>u.is_tracked);
+      const someTracked=users.some(u=>u.is_tracked);
+
+      h+=`<div class="channel-group">
+        <div class="channel-head">
+          <label class="check-row">
+<input type="checkbox" class="channel-all-cb" data-channel="${esc(ch.channel_id)}" data-source="${esc(src.source)}"
+              ${allTracked?'checked':''}>
+            <span class="channel-name">${esc(ch.channel_name)}</span>
+          </label>
+          <span class="channel-meta">${users.length} user${users.length!==1?'s':''}</span>
+        </div>
+        <div class="user-list">`;
+
+      users.forEach(u=>{
+        const promptOpts=prompts.map(p=>
+          `<option value="${esc(p.key)}" ${u.prompt_id===p.key?'selected':''}>${esc(p.key)}</option>`
+        ).join('');
+        h+=`<div class="user-row" data-trader-id="${u.id}">
+          <label class="check-row">
+            <input type="checkbox" class="user-cb" data-trader-id="${u.id}"
+              ${u.is_tracked?'checked':''}>
+            <span class="user-name">${esc(u.display_name||u.handle)}</span>
+            <span class="user-type badge-sm">${esc(u.trader_type||'')}</span>
+          </label>
+          <div class="user-controls">
+            <select class="select-sm media-types" data-trader-id="${u.id}">
+              <option value="all" ${u.tracked_media_types==='all'?'selected':''}>All</option>
+              <option value="media" ${u.tracked_media_types==='media'?'selected':''}>Media</option>
+              <option value="text" ${u.tracked_media_types==='text'?'selected':''}>Text</option>
+            </select>
+            <select class="select-sm prompt-pick" data-trader-id="${u.id}">
+              <option value="">Channel default</option>
+              ${promptOpts}
+            </select>
+          </div>
+        </div>`;
+      });
+
+      h+=`</div></div>`;
+    });
+    h+=`</div>`;
+  });
+
+  // Prompt management
+  h+=`<div class="sources-header" style="margin-top:20px"><h3>Prompts</h3>
+    <button class="pill-btn" onclick="showPromptEditor('new')">+ New Prompt</button></div>
+    <div class="prompt-list">`;
+  prompts.forEach(p=>{
+    h+=`<div class="prompt-row">
+      <span class="prompt-key mono">${esc(p.key)}</span>
+      <span class="prompt-preview">${esc(p.preview||'')}</span>
+      <button class="pill-btn-sm" onclick="showPromptEditor('${esc(p.key)}')">Edit</button>
+    </div>`;
+  });
+  h+=`</div>
+    <div id="prompt-editor" class="prompt-editor hidden"></div>`;
+
+  el.innerHTML=h;
+  // Wire events after DOM is populated
+  wireSourcesTree();
+}
+
+function wireSourcesTree(){
+  document.querySelectorAll('#sources-tree .channel-all-cb').forEach(cb=>cb.onchange=()=>toggleChannelAll(cb));
+  document.querySelectorAll('#sources-tree .user-cb').forEach(cb=>cb.onchange=()=>toggleUser(cb));
+  document.querySelectorAll('#sources-tree .media-types').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
+  document.querySelectorAll('#sources-tree .prompt-pick').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
+}
+
+async function toggleChannelAll(cb){
+  const channel=cb.dataset.channel;
+  const source=cb.dataset.source;
+  const checked=cb.checked;
+  // Find all user checkboxes in this channel
+  const rows=document.querySelectorAll(`.user-row`);
+  rows.forEach(row=>{
+    const userCb=row.querySelector('.user-cb');
+    if(!userCb)return;
+    // Match by traversing up to channel-group
+    const chGrp=row.closest('.channel-group');
+    const chAll=chGrp?.querySelector('.channel-all-cb');
+    if(chAll?.dataset.channel===channel){
+      userCb.checked=checked;
+      updateUserTrack(userCb);
+    }
+  });
+}
+
+async function toggleUser(cb){
+  await updateUserTrack(cb);
+  // Update channel all checkbox
+  const row=cb.closest('.user-row');
+  const chGrp=row?.closest('.channel-group');
+  if(chGrp){
+    const allCb=chGrp.querySelector('.channel-all-cb');
+    const userCbs=chGrp.querySelectorAll('.user-cb');
+    const allChecked=Array.from(userCbs).every(c=>c.checked);
+    const someChecked=Array.from(userCbs).some(c=>c.checked);
+    if(allCb){
+      allCb.checked=allChecked;
+      allCb.indeterminate=someChecked&&!allChecked;
+    }
+  }
+}
+
+async function updateUserTrack(el){
+  const traderId=el.dataset.traderId;
+  const row=el.closest('.user-row')||document.querySelector(`.user-row[data-trader-id="${traderId}"]`);
+  const cb=row?.querySelector('.user-cb');
+  const mediaSel=row?.querySelector('.media-types');
+  const promptSel=row?.querySelector('.prompt-pick');
+  const body={
+    id:parseInt(traderId),
+    is_tracked:cb?cb.checked:undefined,
+    tracked_media_types:mediaSel?.value||undefined,
+    prompt_id:promptSel?.value||null
+  };
+  try{
+    await _putAPI('/api/settings/track',body);
+  }catch(e){console.error('track update failed',e);}
+}
+
+function showPromptEditor(key){
+  const ed=$('#prompt-editor');
+  if(!ed)return;
+  if(key==='new'){
+    ed.classList.remove('hidden');
+    ed.innerHTML=`
+      <h4>New Prompt</h4>
+      <label>Key: <input class="input wide" id="prompt-key" placeholder="e.g. discord/charthackers/prompt"></label>
+      <label>System Prompt: <textarea class="input wide" id="prompt-system" rows="8"></textarea></label>
+      <label>User Template: <textarea class="input wide" id="prompt-user" rows="3"></textarea></label>
+      <button class="pill-btn" onclick="savePrompt('new')">Save</button>
+      <button class="pill-btn" onclick="ed.classList.add('hidden')">Cancel</button>`;
+  }else{
+    api(`/api/settings/prompts/${encodeURIComponent(key)}`,{skipCompany:true}).then(data=>{
+      ed.classList.remove('hidden');
+      ed.innerHTML=`
+        <h4>Edit: ${esc(key)}</h4>
+        <label>System Prompt: <textarea class="input wide" id="prompt-system" rows="8">${esc(data.system_prompt||'')}</textarea></label>
+        <label>User Template: <textarea class="input wide" id="prompt-user" rows="3">${esc(data.user_prompt_template||'')}</textarea></label>
+        <button class="pill-btn" onclick="savePrompt('${esc(key)}')">Save</button>
+        <button class="pill-btn" onclick="ed.classList.add('hidden')">Cancel</button>`;
+    }).catch(e=>{ed.innerHTML=`<div class="empty">Failed to load prompt</div>`;});
+  }
+}
+
+async function savePrompt(key){
+  const ed=$('#prompt-editor');
+  const keyInput=$('#prompt-key');
+  const actualKey=key==='new'?keyInput?.value:key;
+  if(!actualKey){alert('Key is required');return;}
+  const sp=$('#prompt-system')?.value||'';
+  const ut=$('#prompt-user')?.value||'';
+  try{
+    await _putAPI(`/api/settings/prompts/${encodeURIComponent(actualKey)}`,
+      {system_prompt:sp,user_prompt_template:ut});
+    ed.classList.add('hidden');
+    fetchSourcesAndPrompts();
+  }catch(e){console.error('Save failed',e);}
+}
+
 function renderSettingsPage(){
   const body=$('#settings-body');
   if(!state.settings){
@@ -514,6 +715,9 @@ function renderSettingsPage(){
     </div>`;
   }).join('');
   body.innerHTML=cards;
+
+  /* Sources & Prompts section */
+  fetchSourcesAndPrompts();
 
   /* History table */
   const histBody=history.length

@@ -713,20 +713,32 @@ def _image_mime_type(path: str) -> str:
 # ---------------------------------------------------------------------------
 # LLM Vision Track
 # ---------------------------------------------------------------------------
-def _load_prompts() -> Dict[str, Any]:
-    """Load chart analysis prompts from external JSON config.
+def _load_prompts(source: str = "", channel: str = "") -> Dict[str, Any]:
+    """Load chart analysis prompts — source-aware with system_config override.
 
-    Falls back to embedded defaults if the config file is missing or invalid.
+    Priority:
+      1. system_config.chart_prompts.{source}/{channel}/prompt
+      2. system_config.chart_prompts.{source}/prompt
+      3. prompts/chart_analysis.json file
+      4. Hardcoded fallback
+
+    Args:
+        source: Platform source (e.g. 'telegram', 'discord')
+        channel: Channel name or ID (e.g. 'rose', '-1001755624949')
     """
+    # Default — load from JSON file (sync, called at startup)
     prompt_path = Path(__file__).with_suffix("").parent / "prompts" / "chart_analysis.json"
+    file_prompts = {}
     if prompt_path.exists():
         try:
             with open(prompt_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                file_prompts = json.load(f)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to load prompts from %s: %s", prompt_path, exc)
-    return {
-        "chart_analysis": {
+
+    default_ca = file_prompts.get("chart_analysis", {}) if file_prompts else {}
+    if not default_ca:
+        default_ca = {
             "system_prompt": (
                 "You are ChartHacker, a crypto chart analyst. Analyze the provided chart image. "
                 "Respond ONLY with a JSON object containing:\n"
@@ -738,7 +750,63 @@ def _load_prompts() -> Dict[str, Any]:
             ),
             "user_prompt_template": "Analyze this chart for {symbol}.\nNews context: {context}",
         }
+
+    return {
+        "chart_analysis": default_ca,
+        "_source": source,
+        "_channel": channel,
     }
+
+
+async def _load_prompts_async(
+    shared_pool, source: str = "", channel: str = ""
+) -> Dict[str, Any]:
+    """Async version — checks system_config for source-specific prompt override.
+
+    Call this from within a running tick when shared_pool is available.
+    Falls back to _load_prompts() if no override found or on any error.
+    """
+    if not source or not shared_pool:
+        return _load_prompts(source, channel)
+
+    try:
+        async with shared_pool.acquire() as conn:
+            # Try source/channel/prompt first, then source/prompt, then source
+            for key in (
+                f"{source}/{channel}/prompt" if channel else None,
+                f"{source}/prompt",
+            ):
+                if key is None:
+                    continue
+                row = await conn.fetchrow(
+                    "SELECT config_value FROM system_config "
+                    "WHERE namespace = 'chart_prompts' AND config_key = $1",
+                    key,
+                )
+                if row:
+                    cfg = row["config_value"]
+                    if isinstance(cfg, str):
+                        cfg = json.loads(cfg)
+                    sp = cfg.get("system_prompt", "")
+                    ut = cfg.get("user_prompt_template", "")
+                    if sp and ut:
+                        logger.info(
+                            "Loaded source-specific prompt: %s for source=%s",
+                            key, source,
+                        )
+                        return {
+                            "chart_analysis": {
+                                "system_prompt": sp,
+                                "user_prompt_template": ut,
+                            },
+                            "_source": source,
+                            "_channel": channel,
+                            "_prompt_key": key,
+                        }
+    except Exception as exc:
+        logger.warning("Failed to load prompt from system_config: %s", exc)
+
+    return _load_prompts(source, channel)
 
 
 
@@ -895,6 +963,9 @@ async def run_llm_track(
     instrument_symbol: str,
     correlation_id: str = "",
     recall_context: str = "",
+    news_source: str = "",
+    channel_name: str = "",
+    shared_pool=None,
 ) -> LlmResult:
     """Run the LLM vision track: encode image, call vision model, parse response.
 
@@ -926,7 +997,7 @@ async def run_llm_track(
     image_b64 = _encode_image_b64(image_path)
     image_mime = _image_mime_type(image_path)
 
-    prompts = _load_prompts().get("chart_analysis", {})
+    prompts = (await _load_prompts_async(shared_pool, news_source, channel_name)).get("chart_analysis", {})
     system_prompt = prompts.get("system_prompt", "")
     if not system_prompt:
         system_prompt = (
@@ -3685,6 +3756,9 @@ class InterpretationService:
                 instrument_symbol=symbol,
                 recall_context=recall_context,
                 correlation_id=cid,
+                news_source=news_source,
+                channel_name=media_row.get("channel_name", ""),
+                shared_pool=shared_pool,
             )
             self._rate_limiter.report_success()
         except RuntimeError as exc:
