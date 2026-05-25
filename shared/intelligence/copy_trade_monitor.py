@@ -472,6 +472,7 @@ class LiveCopyTradeMonitor:
             orig_sl = entry * 0.95 if direction == "long" else entry * 1.05
         if orig_tp <= 0:
             orig_tp = entry * 1.05 if direction == "long" else entry * 0.95
+        sl, tp = get_sl_tp(entry, direction, orig_sl, orig_tp, sym, use_opt)
 
         # Position sizing by mode
         if "spot_seq" in mode:
