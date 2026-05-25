@@ -3957,6 +3957,8 @@ class InterpretationService:
                             llm_instrument = llm_instrument[:-len(quote)] + "/" + quote
                             break
                 symbol = llm_instrument
+                # Normalize perp suffixes — position_monitor needs spot form
+                symbol = symbol.replace(":USDT", "").replace(":USDC", "").replace(".P", "")
                 logger.info(
                     "media_id=%s: LLM identified instrument as %s",
                     media_id, symbol,
@@ -4063,6 +4065,8 @@ class InterpretationService:
             resolved_from = "context"
         else:
             resolved_from = "message"
+            # Normalize symbol — strip perp suffixes for position_monitor compatibility
+            symbol = (symbol or "").replace(":USDT", "").replace(":USDC", "").replace(".P", "")
         sig_id = await write_signal_interpretation(
             shared_pool=shared_pool,
             news_item_id=news_item_id,
