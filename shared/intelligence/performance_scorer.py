@@ -132,6 +132,17 @@ async def fetch_unscored_signals(
       * It's older than lookahead_minutes (market had time to move).
       * No trader_performance row exists for (trader_profile_id, score_period).
       * It was created within the lookback window.
+
+    Round 9 (2026-05-24) — Trader accuracy must NOT include AI-inferred trades.
+    Previously the scorer scored every signal_interpretations row against the
+    original poster's profile, even when the trader had not explicitly called
+    a setup (the LLM had hallucinated a trade from level commentary). That
+    poisoned the leaderboard with positions the trader never made. The new
+    EXISTS clause requires at least one ``tracked_positions`` row tied to
+    this interpretation with ``signal_source='trader'`` — i.e. the trader
+    actually called the setup. ChartHacker's independent inferences live
+    under ``signal_source='chart_hacker'`` and are scored separately under
+    chart_hacker's own trader_profiles row.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     lookahead = datetime.now(timezone.utc) - timedelta(minutes=LOOKAHEAD_MINUTES)
@@ -147,6 +158,11 @@ async def fetch_unscored_signals(
         "WHERE s.market_data_at < $1 "
         "  AND s.created_at > $2 "
         "  AND s.consensus_direction IN ('long', 'short') "
+        "  AND EXISTS ("
+        "    SELECT 1 FROM public.tracked_positions tp "
+        "    WHERE tp.signal_interpretation_id = s.id "
+        "      AND tp.signal_source = 'trader'"
+        "  ) "
         "  AND NOT EXISTS ("
         "    SELECT 1 FROM public.trader_performance p "
         "    WHERE p.trader_profile_id = s.trader_profile_id "

@@ -280,11 +280,238 @@ async def handle_signals(request: web.Request) -> web.Response:
     return _json_response({"signals": data})
 
 
-async def handle_positions(request: web.Request) -> web.Response:
+# Round 12 (2026-05-24): handle_positions for legacy /api/positions removed.
+# Replaced by /api/positions/live + /api/positions/historic — see audit at
+# shared/docs/BUG_HUNT_FIXES_ROADMAP.md (Round 12 §12.4). Snapshot builder
+# now calls aggregate_live_positions directly. The Python function
+# aggregate_open_positions remains in snapshot.py marked deprecated for any
+# out-of-tree consumers; new code MUST use aggregate_live_positions or
+# aggregate_historic_positions.
+
+
+# ---------------------------------------------------------------------------
+# Round 11 (2026-05-24): Live / Historic split
+# ---------------------------------------------------------------------------
+async def handle_positions_live(request: web.Request) -> web.Response:
+    """GET /api/positions/live — currently-LIVE positions only.
+
+    Returns ``open + partial_exit`` tracked_positions plus broker fills
+    from ``positions_current``. No closed/expired/cancelled rows are
+    mixed in — those live on the Historic endpoint. Frontend renders
+    this on the Positions tab "Live" sub-tab with live-tab columns
+    (current price, unrealised P&L, distance to SL/TP, time-in-trade).
+    """
     company = request.query.get("company")
-    from shared.dashboard.snapshot import aggregate_open_positions
-    data = await aggregate_open_positions(company)
-    return _json_response({"positions": data})
+    try:
+        limit = max(1, min(int(request.query.get("limit", "200")), 500))
+    except (TypeError, ValueError):
+        limit = 200
+    from shared.dashboard.snapshot import aggregate_live_positions
+    data = await aggregate_live_positions(company, limit=limit)
+    return _json_response({"positions": data, "count": len(data)})
+
+
+async def handle_positions_historic(request: web.Request) -> web.Response:
+    """GET /api/positions/historic — paginated terminal positions.
+
+    Query params:
+        company       — short_name or "all"
+        since_days    — look-back window (default 30; 0 disables)
+        limit         — page size (default 50, max 200)
+        cursor_at     — ISO timestamp of last row's close_ts (keyset pagination)
+        cursor_id     — id of last row (keyset pagination)
+        status        — single status filter (closed/expired/cancelled/invalidated)
+        outcome       — single outcome filter (tp1_hit/sl_hit/expired)
+
+    Returns ``{rows, next_cursor, has_more, page_size}``. Pass
+    ``next_cursor.closed_at`` and ``next_cursor.id`` back as the new
+    cursor params for the next page.
+    """
+    from datetime import datetime as _dt
+    from shared.dashboard.snapshot import aggregate_historic_positions
+
+    company = request.query.get("company")
+    try:
+        since_days = int(request.query.get("since_days", "30"))
+    except (TypeError, ValueError):
+        since_days = 30
+    try:
+        limit = max(1, min(int(request.query.get("limit", "50")), 200))
+    except (TypeError, ValueError):
+        limit = 50
+
+    cursor_at_raw = request.query.get("cursor_at")
+    cursor_id_raw = request.query.get("cursor_id")
+    cursor_at: Optional[datetime] = None
+    cursor_id: Optional[int] = None
+    if cursor_at_raw and cursor_id_raw:
+        try:
+            cursor_at = _dt.fromisoformat(cursor_at_raw.replace("Z", "+00:00"))
+            cursor_id = int(cursor_id_raw)
+        except (TypeError, ValueError):
+            cursor_at = None
+            cursor_id = None
+
+    status_filter = request.query.get("status") or None
+    outcome_filter = request.query.get("outcome") or None
+
+    data = await aggregate_historic_positions(
+        company_filter=company,
+        since_days=since_days,
+        cursor_closed_at=cursor_at,
+        cursor_id=cursor_id,
+        limit=limit,
+        status_filter=status_filter,
+        outcome_filter=outcome_filter,
+    )
+    return _json_response(data)
+
+
+# ---------------------------------------------------------------------------
+# Round 12 (2026-05-24): Trade journey endpoint.
+#
+# Returns the time-series of price + dist + P&L for a single position so
+# the signal-replay drawer can render a "trade journey" chart from the
+# moment the position was opened to now (or close). Data source is the
+# ``position_updates`` time-series table populated by PositionMonitor on
+# every cycle.
+#
+# Output shape (JSON):
+#   {
+#     "ok": true,
+#     "position_id": 12345,
+#     "samples": 1827,
+#     "first": "2026-05-22T07:12:15Z",
+#     "last":  "2026-05-24T14:23:51Z",
+#     "levels": {
+#       "entry":   65000.0,
+#       "stop":    63000.0,
+#       "tp1":     68000.0,
+#       "tp2":     null
+#     },
+#     "series": [
+#       {"t": "2026-05-22T07:12:15Z", "price": 64950.0, "pnl_pct": -0.07,
+#        "dist_sl": -3.0, "dist_tp1": 4.6, "dist_entry": -0.07,
+#        "minutes": 0},
+#       ...
+#     ]
+#   }
+#
+# All distances are signed percentages relative to entry_price (negative
+# for SL, positive for TP1 going up — same convention as the rest of the
+# dashboard). The frontend renders this as an ECharts area chart with
+# horizontal lines for entry/SL/TP1.
+# ---------------------------------------------------------------------------
+async def handle_position_journey(request: web.Request) -> web.Response:
+    """GET /api/position-journey/{id} — time-series for a single position.
+
+    Args:
+        request: aiohttp request; URL path ``id`` is the tracked_positions.id.
+
+    Returns:
+        JSON response with the journey time-series (see module-level
+        comment for shape). 404 if position doesn't exist; 400 on bad ID.
+    """
+    try:
+        position_id = int(request.match_info["id"])
+    except (ValueError, TypeError):
+        return _err(400, "Invalid position ID")
+
+    from shared.utils.db import get_shared_pool
+    # Round 12 (2026-05-24): get_shared_pool() returns a *cached*
+    # process-wide singleton. Do NOT call pool.close() here — it would
+    # tear down the pool for every other handler. Just use it.
+    pool = await get_shared_pool()
+    # Pull the position itself for level lines; doesn't matter that
+    # the table is in tickles_shared because PositionMonitor writes
+    # both position_updates and tracked_positions to the same DB.
+    pos = await pool.fetch_one(
+        """
+        SELECT id, entry_price, stop_loss,
+               take_profit_1, take_profit_2, take_profit_3,
+               direction, instrument_symbol, status,
+               signal_timestamp, created_at, closed_at
+        FROM public.tracked_positions
+        WHERE id = $1
+        """,
+        (position_id,),
+    )
+    if pos is None:
+        return _err(404, f"Position {position_id} not found")
+
+    # Down-sample for longer trades. The raw rate is one sample per
+    # monitor cycle (60s), so a 2-day-old position has ~2880 rows.
+    # ECharts handles 5k+ points fine but the JSON payload gets bulky;
+    # stride accordingly so we never ship more than ~1500 points.
+    samples_count = await pool.fetch_val(
+        "SELECT COUNT(*) FROM public.position_updates WHERE position_id = $1",
+        (position_id,),
+    )
+    samples_count = int(samples_count or 0)
+    stride = max(1, samples_count // 1500)
+
+    # Use a window function to pick every Nth row deterministically,
+    # ordered ascending so the chart renders left-to-right.
+    rows = await pool.fetch_all(
+        """
+        SELECT "timestamp", price, unrealized_pnl_pct,
+               distance_to_entry_pct, distance_to_sl_pct,
+               distance_to_tp1_pct, time_in_trade_minutes
+        FROM (
+            SELECT "timestamp", price, unrealized_pnl_pct,
+                   distance_to_entry_pct, distance_to_sl_pct,
+                   distance_to_tp1_pct, time_in_trade_minutes,
+                   ROW_NUMBER() OVER (ORDER BY "timestamp" ASC) AS rn
+            FROM public.position_updates
+            WHERE position_id = $1
+        ) t
+        WHERE rn % $2 = 0 OR rn = 1
+        ORDER BY "timestamp" ASC
+        """,
+        (position_id, stride),
+    )
+
+    def _f(v):
+        return None if v is None else float(v)
+
+    series = [
+        {
+            "t": r["timestamp"].isoformat() if r["timestamp"] else None,
+            "price": _f(r["price"]),
+            "pnl_pct": _f(r["unrealized_pnl_pct"]),
+            "dist_entry": _f(r["distance_to_entry_pct"]),
+            "dist_sl": _f(r["distance_to_sl_pct"]),
+            "dist_tp1": _f(r["distance_to_tp1_pct"]),
+            "minutes": int(r["time_in_trade_minutes"] or 0),
+        }
+        for r in rows
+    ]
+
+    levels = {
+        "entry": _f(pos["entry_price"]),
+        "stop":  _f(pos["stop_loss"]),
+        "tp1":   _f(pos["take_profit_1"]),
+        "tp2":   _f(pos["take_profit_2"]),
+        "tp3":   _f(pos["take_profit_3"]),
+    }
+
+    return _json_response({
+        "ok": True,
+        "position_id": position_id,
+        "symbol": pos["instrument_symbol"],
+        "direction": pos["direction"],
+        "status": pos["status"],
+        "samples": len(series),
+        "samples_total": samples_count,
+        "stride": stride,
+        "first": series[0]["t"] if series else None,
+        "last":  series[-1]["t"] if series else None,
+        "signal_timestamp": pos["signal_timestamp"].isoformat() if pos["signal_timestamp"] else None,
+        "created_at": pos["created_at"].isoformat() if pos["created_at"] else None,
+        "closed_at": pos["closed_at"].isoformat() if pos["closed_at"] else None,
+        "levels": levels,
+        "series": series,
+    })
 
 
 async def handle_delete_position(request: web.Request) -> web.Response:
@@ -305,37 +532,37 @@ async def handle_delete_position(request: web.Request) -> web.Response:
         return _err(400, "Invalid position ID")
     from shared.utils.db import get_shared_pool
 
+    # Round 12 (2026-05-24): get_shared_pool() returns a *cached* singleton.
+    # Do NOT call pool.close() here — that would tear down the pool for
+    # every other dashboard handler. Use it but don't own it.
     pool = await get_shared_pool()
-    try:
-        row = await pool.fetch_one(
-            "SELECT id, status FROM public.tracked_positions WHERE id = $1",
-            (position_id,),
-        )
-        if row is None:
-            return _err(404, f"Position {position_id} not found")
+    row = await pool.fetch_one(
+        "SELECT id, status FROM public.tracked_positions WHERE id = $1",
+        (position_id,),
+    )
+    if row is None:
+        return _err(404, f"Position {position_id} not found")
 
-        current_status = row["status"]
-        if current_status not in ("pending", "expired"):
-            return _err(
-                400,
-                f"Cannot delete position with status='{current_status}'. "
-                "Only pending or expired positions can be deleted.",
-            )
-
-        await pool.execute(
-            """
-            UPDATE public.tracked_positions
-            SET status = 'deleted',
-                status_reason = 'manual_delete',
-                updated_at = NOW()
-            WHERE id = $1
-            """,
-            (position_id,),
+    current_status = row["status"]
+    if current_status not in ("pending", "expired"):
+        return _err(
+            400,
+            f"Cannot delete position with status='{current_status}'. "
+            "Only pending or expired positions can be deleted.",
         )
-        LOG.info("Position %s soft-deleted (was %s)", position_id, current_status)
-        return _json_response({"ok": True, "id": position_id, "status": "deleted"})
-    finally:
-        await pool.close()
+
+    await pool.execute(
+        """
+        UPDATE public.tracked_positions
+        SET status = 'deleted',
+            status_reason = 'manual_delete',
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        (position_id,),
+    )
+    LOG.info("Position %s soft-deleted (was %s)", position_id, current_status)
+    return _json_response({"ok": True, "id": position_id, "status": "deleted"})
 
 
 async def handle_interpretations(request: web.Request) -> web.Response:
@@ -478,22 +705,68 @@ async def handle_media(request: web.Request) -> web.Response:
         return _err(400, "media_id must be an integer")
 
     pool = await DatabasePool.get_instance()
+    # Bug H7 fix (Bug Hunter 2 §8.1):
+    #   The legacy collector created two media_items rows per Discord image —
+    #   a `cdn_hosted` row (NULL `local_path`, expiring CDN URL) and an
+    #   `attached` row (downloaded `local_path`). Old `signal_interpretations`
+    #   often link to the `cdn_hosted` row. After the CDN URL expired this
+    #   request 404'd even though the actual file lives on disk under the
+    #   sibling `attached` row.
+    #
+    #   We now look up the requested row, AND if its `local_path` is missing,
+    #   try its sibling rows (same `news_item_id`) for a usable file. The
+    #   404 is only returned when no sibling has a real file either.
     try:
         row = await pool.fetch_one(
-            "SELECT local_path, mime_type FROM media_items WHERE id = $1",
+            "SELECT local_path, mime_type, news_item_id FROM media_items WHERE id = $1",
             (mid,),
         )
     except Exception as exc:
         LOG.error("handle_media DB query failed: %s", exc)
         return _err(500, "media lookup failed")
 
-    if not row or not row.get("local_path"):
+    if not row:
         return _err(404, "media not found")
-    p = Path(row["local_path"])
-    if not p.exists() or not p.is_file():
+
+    candidate_path = (row.get("local_path") or "").strip()
+    p: Optional[Path] = Path(candidate_path) if candidate_path else None
+    if p is None or not p.exists() or not p.is_file():
+        # Try sibling rows — same news_item_id, prefer non-null local_path.
+        nid = row.get("news_item_id")
+        if nid is not None:
+            try:
+                siblings = await pool.fetch_all(
+                    "SELECT local_path, mime_type "
+                    "FROM media_items "
+                    "WHERE news_item_id = $1 AND id <> $2 "
+                    "  AND local_path IS NOT NULL AND local_path <> '' "
+                    "ORDER BY (processing_status = 'analyzed') DESC, id ASC "
+                    "LIMIT 5",
+                    (nid, mid),
+                )
+            except Exception as exc:
+                LOG.warning("handle_media sibling lookup failed for media=%s: %s", mid, exc)
+                siblings = []
+            for sib in siblings or []:
+                sib_path = (sib.get("local_path") or "").strip()
+                if not sib_path:
+                    continue
+                sp = Path(sib_path)
+                if sp.exists() and sp.is_file():
+                    LOG.info(
+                        "handle_media: serving sibling for media_id=%s via news_item_id=%s",
+                        mid, nid,
+                    )
+                    return web.FileResponse(
+                        sp,
+                        headers={"Cache-Control": "public, max-age=3600"},
+                    )
         return _err(404, "media file missing on disk")
-    headers = {"Cache-Control": "public, max-age=3600"}
-    return web.FileResponse(p, headers=headers)
+
+    return web.FileResponse(
+        p,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 async def handle_services(request: web.Request) -> web.Response:
@@ -615,8 +888,14 @@ def build_app(
         app.router.add_get(prefix + "/api/services", handle_services)
         app.router.add_get(prefix + "/api/leaderboard", handle_leaderboard)
         app.router.add_get(prefix + "/api/signals", handle_signals)
-        app.router.add_get(prefix + "/api/positions", handle_positions)
+        # Round 12 (2026-05-24): legacy GET /api/positions retired. Audit
+        # confirmed no production callers. Frontend uses /api/positions/live
+        # for the Positions tab and /api/snapshot for the Floor mini-table.
+        app.router.add_get(prefix + "/api/positions/live", handle_positions_live)
+        app.router.add_get(prefix + "/api/positions/historic", handle_positions_historic)
         app.router.add_delete(prefix + "/api/positions/{id}", handle_delete_position)
+        # Round 12 (2026-05-24): trade-journey endpoint for the drawer.
+        app.router.add_get(prefix + "/api/position-journey/{id}", handle_position_journey)
         app.router.add_get(prefix + "/api/interpretations", handle_interpretations)
         app.router.add_get(prefix + "/api/agent-decisions", handle_agent_decisions)
         app.router.add_get(prefix + "/api/agent-performance", handle_agent_performance)
@@ -680,6 +959,12 @@ def build_app(
             attach_routes as attach_market_routes,
         )
         attach_market_routes(app, prefix=prefix)
+
+        # Round 10 — Settings panel: vision-model picker + audit history.
+        from shared.dashboard.settings_routes import (
+            attach_routes as attach_settings_routes,
+        )
+        attach_settings_routes(app, prefix=prefix)
 
     # Phase 5 — mount /manage/* panel routes
     from shared.intelligence.manage_panel.server_routes import attach_routes

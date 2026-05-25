@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <script src="static/echarts.min.js"></script>
-  <link rel="stylesheet" href="static/app.css">
+  <link rel="stylesheet" href="static/app.css?v=20260524-round13f-noriskbox">
 </head>
 <body>
 <div id="app" class="app-shell">
@@ -27,18 +27,20 @@
       <button class="nav-link" data-tab="positions"><span>◆</span>Positions</button>
       <button class="nav-link" data-tab="traders"><span>@</span>Trader Intel</button>
       <button class="nav-link" data-tab="news"><span>☰</span>Discord Feed</button>
+      <button class="nav-link" data-tab="telegram"><span>✈</span>Telegram Feed</button>
       <button class="nav-link" data-tab="learning"><span>✦</span>AI Learning</button>
       <button class="nav-link" data-tab="ops"><span>$</span>Ops & Cost</button>
+      <button class="nav-link" data-tab="settings"><span>⚙</span>Settings</button>
     </nav>
     <div class="side-status"><i></i><span id="status-text">connecting</span></div>
   </aside>
 
   <main class="main-content">
-    <header class="topbar">
+    <header class="top-bar">
       <div><div id="eyebrow" class="eyebrow">TRADING COMPANY</div><h1 id="page-title">Trading Floor</h1></div>
-      <div class="top-controls">
+      <div class="controls">
         <select id="company-filter" class="select"><option value="all">All companies</option><option value="rubicon">Rubicon</option></select>
-        <button id="refresh-btn" class="pill-btn">Refresh</button>
+        <button id="refresh-btn" class="btn pill-btn">Refresh</button>
         <span id="updated-at" class="updated">—</span>
       </div>
     </header>
@@ -67,9 +69,61 @@
 
     <section id="tab-competition" class="tab"><div class="panel full"><div class="panel-head"><h2>Copy-trade competition</h2><p>Agents, strategy descriptions, equity, return, win rate and open risk.</p></div><div id="competition-body"></div></div></section>
 
-    <section id="tab-signals" class="tab"><div class="panel full"><div class="panel-head"><h2>Signals Watch</h2><div class="filters"><input id="signals-filter" class="input wide" placeholder="symbol / Discord user / status"><select id="signals-status" class="select small"><option value="">All status</option><option value="pending">Pending</option><option value="open">Open</option><option value="closed">Closed</option></select></div></div><div id="signals-table" class="table-wrap"></div></div></section>
+    <section id="tab-signals" class="tab"><div class="panel full"><div class="panel-head"><h2>Signals Watch</h2><div class="filters"><input id="signals-filter" class="input wide" placeholder="symbol / Discord user / status"><select id="signals-status" class="select small"><option value="">All status</option><option value="pending">Pending</option><option value="open">Open</option><option value="partial_exit">Partial exit</option><option value="closed">Closed</option><option value="expired">Expired</option><option value="cancelled">Cancelled</option><option value="invalidated">Invalidated</option></select></div></div><div id="signals-table" class="table-wrap"></div></div></section>
 
-    <section id="tab-positions" class="tab"><div class="panel full"><div class="panel-head"><h2>Positions</h2><div class="filters"><input id="positions-filter" class="input wide" placeholder="symbol / trader / source"><select id="positions-status" class="select small"><option value="">All</option><option value="open" selected>Open</option><option value="pending">Pending</option><option value="closed">Closed</option></select></div></div><div id="positions-table" class="table-wrap"></div></div></section>
+    <section id="tab-positions" class="tab">
+      <div class="panel full">
+        <div class="panel-head">
+          <h2>Positions</h2>
+          <div class="positions-subtabs">
+            <button class="comp-dtab active" data-ptab="live">Live</button>
+            <button class="comp-dtab" data-ptab="historic">Historic</button>
+          </div>
+        </div>
+        <!-- LIVE sub-tab -->
+        <div id="positions-live-panel" class="positions-panel">
+          <div class="filters">
+            <input id="positions-live-filter" class="input wide" placeholder="symbol / trader / source">
+            <select id="positions-live-status" class="select small">
+              <option value="" selected>All live</option>
+              <option value="open">Open only</option>
+              <option value="partial_exit">Partial exit</option>
+            </select>
+          </div>
+          <div id="positions-live-table" class="table-wrap"></div>
+        </div>
+        <!-- HISTORIC sub-tab -->
+        <div id="positions-historic-panel" class="positions-panel hidden">
+          <div class="filters">
+            <input id="positions-historic-filter" class="input wide" placeholder="symbol / trader / outcome">
+            <select id="positions-historic-window" class="select small">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="0">All history</option>
+            </select>
+            <select id="positions-historic-status" class="select small">
+              <option value="">All terminal</option>
+              <option value="closed">Closed</option>
+              <option value="expired">Expired</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="invalidated">Invalidated</option>
+            </select>
+            <select id="positions-historic-outcome" class="select small">
+              <option value="">All outcomes</option>
+              <option value="tp1_hit">TP1 hit</option>
+              <option value="sl_hit">SL hit</option>
+              <option value="expired">Expired</option>
+            </select>
+          </div>
+          <div id="positions-historic-table" class="table-wrap"></div>
+          <div class="historic-pager">
+            <span id="positions-historic-meta" class="secondary">—</span>
+            <button id="positions-historic-more" class="btn pill-btn hidden">Load more</button>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <section id="tab-traders" class="tab">
       <div class="panel full"><div class="panel-head"><h2>Trader intelligence</h2><div class="filters"><input id="traders-filter" class="input wide" placeholder="Discord handle / actor"><select id="traders-sort" class="select small"><option value="success">Success</option><option value="trades">Trades</option><option value="pnl">P&L</option><option value="edge">Edge</option></select></div></div><div id="traders-table" class="table-wrap"></div></div>
@@ -77,17 +131,37 @@
 
     <section id="tab-news" class="tab"><div class="panel full"><div class="panel-head"><h2>Discord message feed</h2><div class="filters"><input id="news-filter" class="input wide" placeholder="user / text / symbol"><select id="news-media" class="select small"><option value="">All</option><option value="media">Has charts</option></select></div></div><div id="news-list" class="discord-list"></div></div></section>
 
+    <section id="tab-telegram" class="tab"><div class="panel full"><div class="panel-head"><h2>Telegram feed</h2><div class="filters"><select id="telegram-channel" class="select small"><option value="">All channels</option></select><input id="telegram-filter" class="input wide" placeholder="user / text / symbol"><select id="telegram-media" class="select small"><option value="">All</option><option value="media">Has charts</option></select></div></div><div id="telegram-list" class="discord-list"></div></div></section>
+
     <section id="tab-learning" class="tab">
       <div class="stats-row"><div class="stat"><label>Memory writes</label><strong id="learn-total">0</strong><span>30 day window</span></div><div class="stat"><label>Actors modelled</label><strong id="learn-actors">0</strong><span>skill summaries</span></div><div class="stat"><label>Active brains</label><strong id="learn-brains">0</strong><span>agent profiles</span></div><div class="stat"><label>Technique focus</label><strong id="learn-focus">—</strong><span>latest recurring theme</span></div></div>
       <div class="floor-grid two"><section class="panel"><div class="panel-head"><h2>Recent lessons</h2></div><div id="learning-lessons" class="lesson-feed"></div></section><section class="panel"><div class="panel-head"><h2>Trader models</h2></div><div id="learning-models" class="table-wrap"></div></section></div>
     </section>
 
     <section id="tab-ops" class="tab"><div class="floor-grid two"><section class="panel"><div class="panel-head"><h2>Cost envelope</h2></div><div id="cost-chart" class="chart"></div></section><section class="panel"><div class="panel-head"><h2>Service health</h2></div><div id="services-grid" class="service-grid"></div></section></div></section>
+
+    <section id="tab-settings" class="tab">
+      <div class="panel full">
+        <div class="panel-head">
+          <div><h2>Vision-model settings</h2><p>Choose which OpenRouter vision model the InterpretationService uses for chart reading. Changes take effect within 60 seconds — no service restart required.</p></div>
+        </div>
+        <div id="settings-body" class="settings-body"></div>
+      </div>
+      <div class="panel full">
+        <div class="panel-head">
+          <div><h2>Duplicate-call guard</h2><p>Per-trader uniqueness is enforced automatically: each trader (chart_hacker AND each Discord trader) can have at most one long and one short pending per coin. New signals from the same trader on the same coin/direction refresh the existing row in place. Cross-trader confluence is preserved (different traders on the same coin show as separate cards). No tuning required.</p></div>
+        </div>
+      </div>
+      <div class="panel full">
+        <div class="panel-head"><h2>Recent model changes</h2><p>Audit trail of every model swap, newest first.</p></div>
+        <div id="settings-history" class="table-wrap"></div>
+      </div>
+    </section>
   </main>
 
   <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
-  <aside id="drawer" class="drawer hidden"><div id="drawer-resizer" title="Drag to resize"></div><div class="drawer-head"><div><div id="drawer-kicker" class="eyebrow">DETAIL</div><h2 id="drawer-title">Signal intelligence</h2></div><button id="drawer-close" class="close">×</button></div><div id="drawer-body" class="drawer-body"></div></aside>
+  <aside id="drawer" class="drawer hidden"><div id="drawer-resizer" title="Drag to resize"></div><div class="drawer-head"><div><div id="drawer-kicker" class="eyebrow">DETAIL</div><h2 id="drawer-title">Signal intelligence</h2></div><button id="drawer-close" class="drawer-close">×</button></div><div id="drawer-body" class="drawer-body"></div></aside>
 </div>
-<script src="static/app.js"></script>
+<script src="static/app.js?v=20260524-round13e-pertrader"></script>
 </body>
 </html>

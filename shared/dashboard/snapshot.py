@@ -89,8 +89,13 @@ class SnapshotBuilder:
                 snap.notes.append(f"Overview stats failed: {e}")
 
         async def task_positions():
+            # Round 12 (2026-05-24): switched from aggregate_open_positions
+            # to aggregate_live_positions. Floor mini-table only renders
+            # open + partial_exit anyway; pulling the 7d closed tail every
+            # snapshot was wasted I/O. Historic context lives on the
+            # /api/positions/historic endpoint, used by the Positions tab.
             try:
-                snap.positions = await aggregate_open_positions(company_filter)
+                snap.positions = await aggregate_live_positions(company_filter, limit=200)
             except Exception as e:
                 LOG.error("Positions aggregation failed: %s", e)
                 snap.notes.append(f"Positions failed: {e}")
@@ -531,6 +536,7 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
         size = _f(d.get("quantity"))
         upnl = _f(d.get("unrealised_pnl_usd"))
         rpnl = _f(d.get("realized_pnl_usd"))
+        rpnl_final = None
         opened_at = d.get("ts")
         closed_at = None
         status = "open"
@@ -542,12 +548,26 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
         trader_profile_id = None
         current_price = None
         pnl_pct = None
+        stop_loss = None
+        take_profit_1 = None
+        take_profit_2 = None
+        take_profit_3 = None
+        distance_to_sl_pct = None
+        distance_to_tp1_pct = None
+        time_in_trade_minutes = None
+        outcome = None
+        exit_price = None
+        exit_reason = None
+        status_reason = None
+        news_item_id = None
+        price_updated_at = None
     else:
         symbol = d.get("instrument_symbol_normalised") or d.get("instrument_symbol")
         entry = _f(d.get("entry_price"))
         size = _f(d.get("position_size") or d.get("quantity"))
         upnl = _f(d.get("unrealized_pnl_usd") or d.get("unrealised_pnl_usd"))
         rpnl = _f(d.get("realized_pnl_usd"))
+        rpnl_final = _f(d.get("realized_pnl_usd_final"))
         opened_at = d.get("signal_timestamp") or d.get("created_at") or d.get("opened_at")
         closed_at = d.get("closed_at")
         status = d.get("status") or ("closed" if closed_at else "open")
@@ -558,7 +578,23 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
         signal_interpretation_id = d.get("signal_interpretation_id")
         trader_profile_id = d.get("trader_profile_id")
         current_price = _f(d.get("current_price"))
-        pnl_pct = _f(d.get("unrealized_pnl_pct"))
+        pnl_pct = _f(d.get("unrealized_pnl_pct")) or _f(d.get("realized_pnl_pct"))
+        # Round 11 (2026-05-24): Live tab needs SL/TP + distances; Historic
+        # tab needs outcome + exit. Expose them all on the canonical row so
+        # the frontend can branch on status without extra API calls.
+        stop_loss = _f(d.get("stop_loss"))
+        take_profit_1 = _f(d.get("take_profit_1"))
+        take_profit_2 = _f(d.get("take_profit_2"))
+        take_profit_3 = _f(d.get("take_profit_3"))
+        distance_to_sl_pct = _f(d.get("distance_to_sl_pct"))
+        distance_to_tp1_pct = _f(d.get("distance_to_tp1_pct"))
+        time_in_trade_minutes = _f(d.get("time_in_trade_minutes"))
+        outcome = d.get("outcome")
+        exit_price = _f(d.get("exit_price"))
+        exit_reason = d.get("exit_reason")
+        status_reason = d.get("status_reason")
+        news_item_id = d.get("news_item_id")
+        price_updated_at = d.get("price_updated_at")
 
     pnl_usd = upnl if upnl is not None else (rpnl if rpnl is not None else 0.0)
 
@@ -571,15 +607,28 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
         "position_size": size,
         "entry_price": entry,
         "current_price": current_price,
+        "stop_loss": stop_loss,
+        "take_profit_1": take_profit_1,
+        "take_profit_2": take_profit_2,
+        "take_profit_3": take_profit_3,
+        "distance_to_sl_pct": distance_to_sl_pct,
+        "distance_to_tp1_pct": distance_to_tp1_pct,
+        "time_in_trade_minutes": time_in_trade_minutes,
+        "exit_price": exit_price,
+        "exit_reason": exit_reason,
+        "outcome": outcome,
         "notional_usd": _f(d.get("notional_usd")),
         "unrealized_pnl_usd": upnl if upnl is not None else 0.0,
         "realized_pnl_usd": rpnl if rpnl is not None else 0.0,
+        "realized_pnl_usd_final": rpnl_final,
         "pnl_usd": pnl_usd if pnl_usd is not None else 0.0,
         "pnl_pct": pnl_pct,
         "leverage": d.get("leverage"),
         "status": status,
+        "status_reason": status_reason,
         "opened_at": opened_at,
         "closed_at": closed_at,
+        "price_updated_at": price_updated_at,
         "signal_timestamp": opened_at,
         "actor_id": actor_id,
         "signal_source": signal_source,
@@ -587,6 +636,7 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
         "entry_price_source": entry_price_source,
         "signal_interpretation_id": signal_interpretation_id,
         "trader_profile_id": trader_profile_id,
+        "news_item_id": news_item_id,
         "actor_display": None,  # populated by aggregate_open_positions after batch lookup
         "actor_handle": None,   # populated by aggregate_open_positions after batch lookup
         "_source": source,
@@ -605,7 +655,18 @@ def _position_dedupe_key(row: Dict[str, Any]) -> Tuple[Any, Any, Any]:
 
 
 async def aggregate_open_positions(company_filter: str | None = None) -> List[dict]:
-    """Read-only fan-out across active companies.
+    """**DEPRECATED (Round 12, 2026-05-24).**
+
+    Use ``aggregate_live_positions`` for live-only data (open + partial_exit +
+    broker fills) or ``aggregate_historic_positions`` for closed/expired/
+    cancelled/invalidated rows with pagination. The legacy mixed payload
+    (live + 7d closed tail) is kept here only for backward compatibility
+    with out-of-tree consumers and unit tests still mocking this name.
+
+    The dashboard snapshot builder (``shared/dashboard/snapshot.py:91``)
+    has been switched to call ``aggregate_live_positions`` directly so
+    the Floor mini-table no longer pays the cost of the closed tail it
+    never showed anyway.
 
     Slice 3 / Change 2 — always queries BOTH ``positions_current`` (live
     exchange ledger) AND ``tracked_positions`` (interpretation + Surgeon
@@ -671,11 +732,15 @@ async def aggregate_open_positions(company_filter: str | None = None) -> List[di
             LOG.warning("tracked_positions open read failed: %s", exc)
 
         # ---- tracked_positions: closed (last 7 days) ------------------
+        # Round 11 (2026-05-24): explicit terminal-status enum instead of the
+        # NOT IN ('open','pending') sieve which was leaking partial_exit rows
+        # into the closed bucket and causing double-listing alongside the
+        # open bucket. partial_exit is a LIVE state and belongs in tp_open_rows.
         try:
             tp_closed_params: List[Any] = []
             tp_closed_sql = (
                 "SELECT * FROM tracked_positions "
-                "WHERE status NOT IN ('open', 'pending') "
+                "WHERE status IN ('closed', 'expired', 'cancelled', 'invalidated') "
                 "  AND COALESCE(closed_at, updated_at, created_at) "
                 "      >= (NOW() AT TIME ZONE 'UTC' - INTERVAL '7 days')"
             )
@@ -769,6 +834,289 @@ async def aggregate_open_positions(company_filter: str | None = None) -> List[di
 
     _SNAPSHOT_CACHE[cache_key] = (now_mono, rows)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Round 11 (2026-05-24): Live / Historic position split
+# ---------------------------------------------------------------------------
+# aggregate_open_positions above is kept for backward compatibility with any
+# existing callers (and the legacy /api/positions endpoint). The new
+# aggregators below produce CLEAN buckets:
+#
+#   aggregate_live_positions      — open + partial_exit + positions_current
+#                                    (broker fills). No historic mix-in.
+#   aggregate_historic_positions  — closed + expired + cancelled +
+#                                    invalidated. Keyset-paginated. Default
+#                                    window 30 days; configurable.
+#
+# Together they replace the all-in-one stream so the dashboard can render
+# Live vs Historic as two distinct sub-tabs with different column logic.
+# ---------------------------------------------------------------------------
+
+# Status enums grouped by lifecycle phase. Single source of truth — keep in
+# sync with shared/migration/tickles_shared_pg.sql.
+LIVE_TRACKED_STATUSES: Tuple[str, ...] = ("open", "partial_exit")
+HISTORIC_TRACKED_STATUSES: Tuple[str, ...] = (
+    "closed", "expired", "cancelled", "invalidated",
+)
+
+
+async def aggregate_live_positions(
+    company_filter: str | None = None,
+    limit: int = 200,
+) -> List[dict]:
+    """Return all currently-LIVE positions (open + partial_exit + broker fills).
+
+    Live = anything actively in market. Pending rows belong on Signals
+    Watch (they have no fill yet); closed/expired/cancelled rows belong
+    on the Historic tab. Broker fills from ``positions_current`` are
+    always included so the user sees real exchange exposure even when
+    we have no upstream signal.
+
+    De-dup logic: ``positions_current`` wins on ``(company, symbol,
+    direction)``; matching ``tracked_positions`` provenance fields are
+    merged in.
+
+    Args:
+        company_filter: ``"all"``/``None`` for cross-company; otherwise
+            short_name like ``"rubicon"``.
+        limit: Total row cap before enrichment. 200 is generous for
+            currently-realistic position counts.
+
+    Returns:
+        List of normalized position dicts sorted by ``opened_at DESC``.
+    """
+    from shared.utils.db import get_shared_pool
+    shared_pool = await get_shared_pool()
+
+    pc_rows: List[Dict[str, Any]] = []
+    tp_open_rows: List[Dict[str, Any]] = []
+
+    async with shared_pool.acquire() as conn:
+        # ---- positions_current ------------------------------------------
+        try:
+            pc_params: List[Any] = []
+            pc_sql = (
+                "SELECT id, company_id, adapter, exchange, account_id_external, "
+                "symbol, direction, quantity, average_entry_price, notional_usd, "
+                "unrealised_pnl_usd, realized_pnl_usd, leverage, ts, source, metadata "
+                "FROM positions_current"
+            )
+            if company_filter and company_filter != "all":
+                pc_sql += " WHERE company_id = $1"
+                pc_params.append(company_filter)
+            pc_sql += " ORDER BY ts DESC LIMIT 200"
+            pc = await conn.fetch(pc_sql, *pc_params)
+            for r in pc:
+                pc_rows.append(_normalise_position_row(dict(r), "positions_current"))
+        except Exception as exc:
+            LOG.warning("[live] positions_current read failed: %s", exc)
+
+        # ---- tracked_positions: open + partial_exit ---------------------
+        try:
+            tp_params: List[Any] = []
+            tp_sql = (
+                "SELECT * FROM tracked_positions "
+                "WHERE status = ANY($1::text[])"
+            )
+            tp_params.append(list(LIVE_TRACKED_STATUSES))
+            if company_filter and company_filter != "all":
+                tp_sql += " AND company_id = $2"
+                tp_params.append(company_filter)
+            tp_sql += " ORDER BY signal_timestamp DESC NULLS LAST LIMIT 200"
+            tpo = await conn.fetch(tp_sql, *tp_params)
+            for r in tpo:
+                tp_open_rows.append(_normalise_position_row(dict(r), "tracked_positions_open"))
+        except Exception as exc:
+            LOG.warning("[live] tracked_positions read failed: %s", exc)
+
+    # De-dupe: positions_current wins on (company, symbol, direction)
+    by_key: Dict[Tuple[Any, Any, Any], Dict[str, Any]] = {}
+    for row in pc_rows:
+        by_key[_position_dedupe_key(row)] = row
+
+    for row in tp_open_rows:
+        key = _position_dedupe_key(row)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = row
+            continue
+        # Merge provenance from the shadow row into the live row so the
+        # broker-fill view still shows trader handle + signal id.
+        for fld in (
+            "signal_interpretation_id", "trader_profile_id", "detection_method",
+            "entry_price_source", "signal_source", "stop_loss", "take_profit_1",
+            "take_profit_2", "take_profit_3", "news_item_id",
+        ):
+            if not existing.get(fld) and row.get(fld) is not None:
+                existing[fld] = row.get(fld)
+
+    rows = list(by_key.values())
+
+    def _opened_key(r: Dict[str, Any]) -> Tuple[int, float]:
+        ts = r.get("opened_at")
+        if isinstance(ts, datetime):
+            try:
+                return (0, -ts.timestamp())
+            except Exception:
+                return (0, 0.0)
+        return (1, 0.0)
+
+    rows.sort(key=_opened_key)
+    rows = rows[:limit]
+
+    # Enrich with trader_profiles
+    tp_ids = [r["trader_profile_id"] for r in rows if r.get("trader_profile_id")]
+    if tp_ids:
+        try:
+            async with shared_pool.acquire() as conn2:
+                profile_rows = await conn2.fetch(
+                    "SELECT id, handle_normalized, display_name "
+                    "FROM trader_profiles WHERE id = ANY($1::bigint[])",
+                    tp_ids,
+                )
+                profiles = {p["id"]: dict(p) for p in profile_rows}
+                for row in rows:
+                    tp_id = row.get("trader_profile_id")
+                    if tp_id and tp_id in profiles:
+                        prof = profiles[tp_id]
+                        row["actor_display"] = prof.get("display_name")
+                        row["actor_handle"] = prof.get("handle_normalized")
+        except Exception as exc:
+            LOG.warning("[live] trader_profiles batch lookup failed: %s", exc)
+
+    return rows
+
+
+async def aggregate_historic_positions(
+    company_filter: str | None = None,
+    since_days: int = 30,
+    cursor_closed_at: Optional[datetime] = None,
+    cursor_id: Optional[int] = None,
+    limit: int = 50,
+    status_filter: Optional[str] = None,
+    outcome_filter: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return one paginated page of historic (terminal) tracked_positions.
+
+    Keyset pagination on ``(close_ts DESC, id DESC)`` for stable infinite
+    scroll. Default window 30 days; pass ``since_days=0`` to disable
+    (return all history).
+
+    Args:
+        company_filter: ``"all"``/``None`` for cross-company.
+        since_days: Look-back window in days. ``0`` disables the filter.
+        cursor_closed_at: Page cursor timestamp; pass the ``next_cursor``
+            from the previous response to fetch the next page.
+        cursor_id: Page cursor id (paired with cursor_closed_at).
+        limit: Page size; capped at 200.
+        status_filter: Optional single-status filter (e.g. ``"closed"``,
+            ``"cancelled"``). When ``None`` all 4 terminal statuses are
+            returned.
+        outcome_filter: Optional outcome filter (``"tp1_hit"``, ``"sl_hit"``,
+            ``"expired"``).
+
+    Returns:
+        ``{"rows": [...], "next_cursor": {"closed_at": str, "id": int}|None,
+          "has_more": bool, "page_size": int}``
+    """
+    from shared.utils.db import get_shared_pool
+
+    page_size = max(1, min(int(limit), 200))
+    fetch_size = page_size + 1  # one extra for has_more detection
+
+    shared_pool = await get_shared_pool()
+
+    where_parts = ["status = ANY($1::text[])"]
+    params: List[Any] = []
+    statuses = (
+        [status_filter] if status_filter and status_filter in HISTORIC_TRACKED_STATUSES
+        else list(HISTORIC_TRACKED_STATUSES)
+    )
+    params.append(statuses)
+    arg_idx = 2
+
+    if company_filter and company_filter != "all":
+        where_parts.append(f"company_id = ${arg_idx}")
+        params.append(company_filter)
+        arg_idx += 1
+
+    if since_days and since_days > 0:
+        where_parts.append(
+            "COALESCE(closed_at, updated_at, created_at) "
+            f">= (NOW() AT TIME ZONE 'UTC' - INTERVAL '{int(since_days)} days')"
+        )
+
+    if cursor_closed_at is not None and cursor_id is not None:
+        where_parts.append(
+            f"(COALESCE(closed_at, updated_at, created_at), id) "
+            f"< (${arg_idx}, ${arg_idx + 1})"
+        )
+        params.extend([cursor_closed_at, int(cursor_id)])
+        arg_idx += 2
+
+    if outcome_filter:
+        where_parts.append(f"outcome = ${arg_idx}")
+        params.append(outcome_filter)
+        arg_idx += 1
+
+    sql = (
+        "SELECT * FROM tracked_positions "
+        f"WHERE {' AND '.join(where_parts)} "
+        "ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC "
+        f"LIMIT {fetch_size}"
+    )
+
+    rows: List[Dict[str, Any]] = []
+    raw: List[Any] = []
+    try:
+        async with shared_pool.acquire() as conn:
+            raw = await conn.fetch(sql, *params)
+    except Exception as exc:
+        LOG.warning("[historic] read failed: %s", exc)
+        return {"rows": [], "next_cursor": None, "has_more": False, "page_size": page_size}
+
+    has_more = len(raw) > page_size
+    raw = raw[:page_size]
+
+    for r in raw:
+        rows.append(_normalise_position_row(dict(r), "tracked_positions_closed"))
+
+    # Enrich with trader_profiles
+    tp_ids = [r["trader_profile_id"] for r in rows if r.get("trader_profile_id")]
+    if tp_ids:
+        try:
+            async with shared_pool.acquire() as conn2:
+                profile_rows = await conn2.fetch(
+                    "SELECT id, handle_normalized, display_name "
+                    "FROM trader_profiles WHERE id = ANY($1::bigint[])",
+                    tp_ids,
+                )
+                profiles = {p["id"]: dict(p) for p in profile_rows}
+                for row in rows:
+                    tp_id = row.get("trader_profile_id")
+                    if tp_id and tp_id in profiles:
+                        prof = profiles[tp_id]
+                        row["actor_display"] = prof.get("display_name")
+                        row["actor_handle"] = prof.get("handle_normalized")
+        except Exception as exc:
+            LOG.warning("[historic] trader_profiles batch lookup failed: %s", exc)
+
+    next_cursor = None
+    if has_more and rows:
+        last = rows[-1]
+        cursor_ts = last.get("closed_at") or last.get("opened_at")
+        next_cursor = {
+            "closed_at": cursor_ts.isoformat() if isinstance(cursor_ts, datetime) else None,
+            "id": last.get("id"),
+        }
+
+    return {
+        "rows": rows,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "page_size": page_size,
+    }
 
 
 def _coerce_signal_level_value(value: Any) -> Optional[float]:
@@ -996,12 +1344,20 @@ async def aggregate_signals(company_filter: str | None = None, limit: int = 50) 
     # interpreted signals (no distance, i.e. NULL → sorted last).
     combined = pending + interpreted
 
+    # Round 11 (2026-05-24): closest-to-entry must use ABSOLUTE distance, not
+    # signed. Previously a short trading 16% above entry sorted ahead of a long
+    # trading 1% below entry because -16 < -1 numerically — opposite of what
+    # "closest" means. Recency tiebreaker switched to signal_timestamp DESC,
+    # then created_at DESC, to match handle_entry_radar.
     def _sort_key(row: dict) -> tuple:
         dist = row.get("distance_to_entry_pct")
         if dist is not None:
-            return (0, float(dist))
-        # Interpreted signals — no distance, sort by created_at DESC
-        ts = row.get("created_at")
+            try:
+                return (0, abs(float(dist)))
+            except (TypeError, ValueError):
+                pass
+        # Interpreted signals (no distance) sort by recency, newest first.
+        ts = row.get("signal_timestamp") or row.get("created_at")
         if isinstance(ts, datetime):
             return (1, -ts.timestamp())
         return (1, 0)
@@ -1151,13 +1507,17 @@ async def _aggregate_pending_positions(
 
                 # Phase 8 — compute distance_to_entry_pct from current_price
                 # (open positions) or batch-fetched candle price (pending positions).
+                # Round 11 (2026-05-24): when we can't compute, leave it None
+                # rather than 0.0. The frontend already shows '—' for null, and
+                # the sort key pushes None rows to the second tier instead of
+                # treating "no data" as "exactly at entry, closest possible".
                 entry_price = d.get("entry_price")
                 current_price = d.get("current_price") or price_map.get(sym)
                 if entry_price and current_price and float(entry_price) != 0:
                     d["distance_to_entry_pct"] = ((float(current_price) - float(entry_price)) / float(entry_price)) * 100
                     d["current_price"] = float(current_price)
                 else:
-                    d["distance_to_entry_pct"] = 0.0
+                    d["distance_to_entry_pct"] = None
 
                 # Ensure created_at exists for sort consistency
                 d["created_at"] = d.get("signal_timestamp") or d.get("created_at")

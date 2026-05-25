@@ -37,7 +37,12 @@ class LanguageDetector(EnrichmentStage):
         return self.name_
 
     def process(self, result: EnrichmentResult) -> None:
-        text = f"{result.headline} {result.content}".strip()
+        # Bug 12 sibling — strip the Discord reply prefix so the parent's
+        # quoted text doesn't skew language detection on the reply itself.
+        from shared.utils.reply_prefix import strip_reply_prefix
+        clean_headline = strip_reply_prefix(result.headline or "")
+        clean_content = strip_reply_prefix(result.content or "")
+        text = f"{clean_headline} {clean_content}".strip()
         if not text:
             result.language = "unknown"
             return

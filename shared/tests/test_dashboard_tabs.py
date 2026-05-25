@@ -19,8 +19,11 @@ async def _run_test(test_fn):
     providers = SnapshotProviders()
     app = build_app(auth, providers)
     
+    # Round 12 (2026-05-24): snapshot builder now calls aggregate_live_positions
+    # (was aggregate_open_positions). Legacy GET /api/positions route retired —
+    # tests below use /api/positions/live instead.
     with patch("shared.dashboard.snapshot.get_overview_stats", new_callable=AsyncMock) as m_stats, \
-         patch("shared.dashboard.snapshot.aggregate_open_positions", new_callable=AsyncMock) as m_pos, \
+         patch("shared.dashboard.snapshot.aggregate_live_positions", new_callable=AsyncMock) as m_pos, \
          patch("shared.dashboard.snapshot.aggregate_leaderboard", new_callable=AsyncMock) as m_lead, \
          patch("shared.dashboard.snapshot.aggregate_signals", new_callable=AsyncMock) as m_sig, \
          patch("shared.dashboard.snapshot.aggregate_interpretations", new_callable=AsyncMock) as m_int:
@@ -64,12 +67,29 @@ def test_api_signals():
         assert len(data["signals"]) == 1
     asyncio.run(_run_test(_test))
 
-def test_api_positions():
+def test_api_positions_live():
+    """Round 12 (2026-05-24): retargeted from legacy /api/positions to
+    /api/positions/live. The legacy route was retired; the live endpoint
+    serves the same use-case (live tracked + broker fills) without the
+    7-day closed tail that nothing was rendering.
+
+    The handler imports ``aggregate_live_positions`` lazily inside the
+    function body to avoid module-load-order coupling, so we patch the
+    canonical name in ``shared.dashboard.snapshot`` (where it's defined)
+    rather than ``server`` (where it's imported on demand)."""
     async def _test(client):
-        resp = await client.get("/api/positions", headers={"Authorization": "Bearer test-token"})
-        assert resp.status == 200
-        data = await resp.json()
-        assert len(data["positions"]) == 1
+        with patch(
+            "shared.dashboard.snapshot.aggregate_live_positions",
+            new_callable=AsyncMock,
+        ) as m_live:
+            m_live.return_value = [{"id": 1, "symbol": "BTC/USDT", "_company": "rubicon"}]
+            resp = await client.get(
+                "/api/positions/live",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert len(data["positions"]) == 1
     asyncio.run(_run_test(_test))
 
 def test_api_interpretations():

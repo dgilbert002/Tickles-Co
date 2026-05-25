@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
 
-from shared.intelligence.gateway_config import call_vision_llm
+from shared.intelligence.gateway_config import GatewayConfig, chat_completion
 from shared.intelligence.opinion_budget import get_opinion_budget
 from shared.intelligence.prompt_registry import register_prompt
 from shared.utils.api_cost_log import log_api_call
@@ -143,7 +144,14 @@ class ChartHackerOpinionService:
         return self.prompt_version
 
     async def _eligible_positions(self, conn: asyncpg.Connection) -> List[asyncpg.Record]:
-        """Fetch open positions eligible for critic opinion."""
+        """Fetch open positions eligible for critic opinion.
+
+        Bug H4 fix (part 1/3): the previous filter was
+        ``actor_type IN ('trader', 'copy_bot', 'self')`` but the live DB only
+        ever stores ``'agent'`` (autonomous bots) and ``'trader_human'``
+        (Discord/Telegram traders). The query returned 0 rows for 2+ weeks,
+        which is why this service had written 0 opinions despite being active.
+        """
         rows = await conn.fetch(
             """
             SELECT
@@ -170,7 +178,7 @@ class ChartHackerOpinionService:
                 ) AS last_bucket
             FROM tracked_positions p
             WHERE p.status = 'open'
-              AND p.actor_type IN ('trader', 'copy_bot', 'self')
+              AND p.actor_type IN ('trader_human', 'agent')
             """
         )
         return rows
@@ -202,10 +210,28 @@ class ChartHackerOpinionService:
     async def _run_vision_opinion(
         self, row: asyncpg.Record
     ) -> Optional[Dict[str, Any]]:
-        """Call vision LLM for a critic opinion on an existing position."""
-        # Build prompt context
+        """Call the LLM for a critic opinion on an existing position.
+
+        Bug H4 fix (parts 2/3 + 3/3):
+          * Part 2: previous code called ``call_vision_llm(system_prompt=...,
+            user_prompt=..., image_path=None, model=None, temperature=...)``,
+            but the real signature requires ``cfg, model, system_prompt,
+            user_text, image_b64, image_mime``. Every call raised TypeError,
+            silently swallowed by the wrapping ``except Exception``. Since the
+            ``_eligible_positions`` filter (part 1) was returning 0 rows the
+            error never surfaced, but it would have crashed every call. We
+            switch to ``chat_completion`` (text-only) — the critic reviews the
+            position context + trader reason, no chart image required.
+          * Part 3: the LLM JSON payload lives inside ``response["content"]``,
+            not at the top level of the response object. Previous code read
+            ``llm_result.get("memo_confidence")`` etc. directly, so every
+            field came back ``None`` and every opinion had NULL SL/TP and an
+            empty memo. We now parse the JSON body and merge usage metadata.
+        """
+        position_id = row["position_id"]
+
         context = {
-            "position_id": row["position_id"],
+            "position_id": position_id,
             "symbol": row["instrument_symbol"],
             "exchange": row["instrument_exchange"],
             "direction": row["direction"],
@@ -215,25 +241,127 @@ class ChartHackerOpinionService:
             "take_profit": float(row["take_profit"]) if row["take_profit"] else None,
             "trader_reason": row["entry_reason_trader"] or "",
         }
-
-        user_prompt = json.dumps(context, separators=(",", ":"))
+        user_text = json.dumps(context, separators=(",", ":"))
+        system_prompt = (
+            "You are a trading critic. Review the position context and the trader's stated reason. "
+            "Reply with STRICT JSON only (no markdown, no preamble): "
+            '{"memo": string (<=500 chars), "memo_confidence": float in [0,1], '
+            '"would_take_trade": bool, "suggested_sl": number|null, "suggested_tp": number|null}'
+        )
 
         try:
-            result = await call_vision_llm(
-                system_prompt=(
-                    "You are a trading critic. Review the position context and trader's reason. "
-                    "Reply with strict JSON: {memo: string, memo_confidence: float [0,1], "
-                    "would_take_trade: bool, suggested_sl: number|null, suggested_tp: number|null}"
-                ),
-                user_prompt=user_prompt,
-                image_path=None,  # Phase 8 §F: chart image fetched separately if available
-                model=None,
-                temperature=0.1,
-            )
-            return result
+            cfg = GatewayConfig.for_service("chart_hacker_opinion")
         except Exception as exc:
-            logger.warning("Vision LLM failed for position_id=%s: %s", row["position_id"], exc)
+            logger.warning(
+                "chart_hacker_opinion: GatewayConfig.for_service failed (pos=%s): %s",
+                position_id,
+                exc,
+            )
             return None
+
+        model = os.environ.get(
+            "OPINION_MODEL",
+            getattr(cfg, "primary_model", None) or "google/gemini-2.0-flash-001",
+        )
+
+        try:
+            response = await chat_completion(
+                cfg=cfg,
+                model=model,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                max_tokens=400,
+                operation="chart_hacker_opinion",
+                company_id=self.company_id,
+                agent_id="chart_hacker",
+            )
+        except Exception as exc:
+            logger.warning(
+                "chart_hacker_opinion: chat_completion failed for pos=%s: %s",
+                position_id,
+                exc,
+            )
+            return None
+
+        # Parse the JSON body inside ``content``.
+        # Bug E fix (2026-05-24 second-round audit): the previous regex used
+        # a GREEDY ``\{[\s\S]*\}`` which matches from the FIRST ``{`` all the
+        # way to the LAST ``}`` in the response. If the LLM emitted preamble
+        # + valid JSON + trailing commentary that happened to contain braces
+        # (e.g. "{note: ...}"), or two JSON blocks in one response, the regex
+        # would slurp everything between them and json.loads would either
+        # crash or — worse — silently parse the wrong object and we'd write
+        # garbage suggested_sl / suggested_tp.
+        #
+        # Strategy: prefer json.loads(content) directly; if that fails (code
+        # fence, preamble, or trailing text), strip ```json fences then walk
+        # candidate JSON objects starting at each ``{`` and return the first
+        # one that parses successfully. Reject anything that isn't a dict.
+        content_str = (response or {}).get("content", "") or ""
+        parsed: Optional[Dict[str, Any]] = None
+        if content_str:
+            cleaned = content_str.strip()
+            # Strip common ```json … ``` fences.
+            fence = re.match(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, re.IGNORECASE)
+            if fence:
+                cleaned = fence.group(1).strip()
+            try:
+                candidate = json.loads(cleaned)
+                if isinstance(candidate, dict):
+                    parsed = candidate
+            except Exception:
+                # Fall back to scanning for the first VALID JSON object.
+                for start in (i for i, ch in enumerate(cleaned) if ch == "{"):
+                    # Find balanced object via incremental brace counting; use
+                    # raw_decode (handles trailing junk gracefully).
+                    try:
+                        candidate, _end = json.JSONDecoder().raw_decode(cleaned[start:])
+                    except Exception:
+                        continue
+                    if isinstance(candidate, dict):
+                        parsed = candidate
+                        break
+            if parsed is None:
+                logger.warning(
+                    "chart_hacker_opinion: JSON parse failed for pos=%s | raw=%r",
+                    position_id,
+                    content_str[:200],
+                )
+                return None
+
+        if parsed is None or not isinstance(parsed, dict):
+            logger.warning(
+                "chart_hacker_opinion: parsed payload is not an object for pos=%s",
+                position_id,
+            )
+            return None
+
+        # Reject empty / placeholder payloads — these used to write a useless
+        # opinion row but still consume the daily opinion budget.
+        memo_text = str(parsed.get("memo", "")).strip()
+        if not memo_text:
+            logger.warning(
+                "chart_hacker_opinion: parsed payload has empty memo for pos=%s",
+                position_id,
+            )
+            return None
+
+        usage = (response or {}).get("usage", {}) or {}
+        merged: Dict[str, Any] = {
+            "memo": str(parsed.get("memo", ""))[:2000],
+            "memo_confidence": float(parsed.get("memo_confidence", 0.0) or 0.0),
+            "would_take_trade": bool(parsed.get("would_take_trade", False)),
+            "suggested_sl": parsed.get("suggested_sl"),
+            "suggested_tp": parsed.get("suggested_tp"),
+            # Pass-through metadata so _process_position can log cost.
+            "model_used": (response or {}).get("model", model),
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "cost_usd": float(usage.get("cost_usd", 0.0) or 0.0),
+            "latency_ms": int(usage.get("latency_ms", 0) or 0),
+            "provider": getattr(cfg, "gateway", "openrouter"),
+        }
+        return merged
 
     async def _write_opinion(
         self,
@@ -333,46 +461,81 @@ class ChartHackerOpinionService:
             return
 
         # [AY] Budget check
+        # Round-6 sweep: try_acquire now returns a token; we use it with
+        # release(token) so we refund the EXACT slot we acquired even under
+        # interleaved acquires (BH2 #3, CA1 #3 follow-up). The new try/finally
+        # below also closes the round-3 review gap (BH2 #4) where an exception
+        # AFTER the LLM call but BEFORE record_cost() left the slot leaked.
         budget = get_opinion_budget()
-        ok, why = await budget.try_acquire(position_id)
+        ok, why, token = await budget.try_acquire(position_id)
         if not ok:
             logger.info("chart_hacker_opinion: skipped position_id=%s reason=%s", position_id, why)
             return
 
-        # [AZ] Vision LLM call
-        llm_result = await self._run_vision_opinion(row)
-        if llm_result is None:
-            logger.warning("chart_hacker_opinion: LLM failed for position_id=%s", position_id)
-            return
-
-        # Record cost in budget
-        await budget.record_cost(float(llm_result.get("cost_usd", 0.0)))
-
-        # Log cost
+        opinion_written = False
         try:
-            await log_api_call(
-                role="chart_hacker_opinion",
-                correlation_id=f"opinion-{position_id}-{datetime.now(timezone.utc).isoformat()}",
-                source_id=position_id,
-                provider=llm_result.get("provider", ""),
-                model=llm_result.get("model_used", ""),
-                tokens_in=llm_result.get("input_tokens", 0),
-                tokens_out=llm_result.get("output_tokens", 0),
-                cost_usd=llm_result.get("cost_usd", 0.0),
-                latency_ms=llm_result.get("latency_ms", 0),
-                operation="chart_hacker_opinion",
-                success=True,
-            )
-        except Exception as exc:
-            logger.warning("Failed to log cost for position_id=%s: %s", position_id, exc)
+            # [AZ] Vision LLM call
+            llm_result = await self._run_vision_opinion(row)
+            if llm_result is None:
+                # Round-3 review fix (BH1 #6, BH2 #3, CA2 P1.5): the slot was
+                # acquired BEFORE the LLM call to prevent over-spend in flight,
+                # but a None result (empty memo, JSON parse failure, gateway
+                # error) means we have nothing to write — refund the slot so a
+                # stream of garbage responses can't drain the 120/h global cap.
+                # USD cap is unaffected: record_cost is also skipped on this
+                # path.
+                logger.warning(
+                    "chart_hacker_opinion: LLM failed for position_id=%s — "
+                    "releasing budget slot (token=%s) to avoid call-rate cap "
+                    "exhaustion.",
+                    position_id, token,
+                )
+                return  # finally-block refund handles it
 
-        # Write opinion row
-        await self._write_opinion(conn, row, llm_result)
-        logger.info(
-            "chart_hacker_opinion: wrote opinion for position_id=%s published=%s",
-            position_id,
-            float(llm_result.get("memo_confidence", 0.0)) >= _MIN_CONFIDENCE,
-        )
+            # Record cost in budget
+            await budget.record_cost(float(llm_result.get("cost_usd", 0.0)))
+
+            # Log cost
+            try:
+                await log_api_call(
+                    role="chart_hacker_opinion",
+                    correlation_id=f"opinion-{position_id}-{datetime.now(timezone.utc).isoformat()}",
+                    source_id=position_id,
+                    provider=llm_result.get("provider", ""),
+                    model=llm_result.get("model_used", ""),
+                    tokens_in=llm_result.get("input_tokens", 0),
+                    tokens_out=llm_result.get("output_tokens", 0),
+                    cost_usd=llm_result.get("cost_usd", 0.0),
+                    latency_ms=llm_result.get("latency_ms", 0),
+                    operation="chart_hacker_opinion",
+                    success=True,
+                )
+            except Exception as exc:
+                logger.warning("Failed to log cost for position_id=%s: %s", position_id, exc)
+
+            # Write opinion row
+            await self._write_opinion(conn, row, llm_result)
+            opinion_written = True
+            logger.info(
+                "chart_hacker_opinion: wrote opinion for position_id=%s published=%s",
+                position_id,
+                float(llm_result.get("memo_confidence", 0.0)) >= _MIN_CONFIDENCE,
+            )
+        finally:
+            # Round-6 sweep (BH2 #4): if anything between try_acquire and the
+            # `_write_opinion` success log raises (gateway timeout, DB write
+            # error, etc.), we must refund the slot — otherwise repeated
+            # crashes silently drain the 120/h global cap with zero rows
+            # written. Only refund when no opinion was actually written.
+            if not opinion_written:
+                try:
+                    await budget.release(position_id, token=token)
+                except Exception as refund_exc:
+                    logger.exception(
+                        "chart_hacker_opinion: budget refund failed for "
+                        "position_id=%s token=%s: %s",
+                        position_id, token, refund_exc,
+                    )
 
         # D1 — push opinion insight into mem0 so interpretation_service can recall it
         await _push_opinion_to_mem0(

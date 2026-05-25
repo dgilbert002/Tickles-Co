@@ -79,6 +79,18 @@ _TICKER_RE = re.compile(r"\$([A-Za-z]{2,6})\b")
 _BARE_WORD_RE = re.compile(r"\b([A-Z]{2,6})\b")
 
 
+def _strip_reply_prefix(text: str) -> str:
+    """Discord reply-prefix stripper — thin alias.
+
+    Kept here as a module-private alias so existing call sites inside this
+    file don't need to change. Implementation is now consolidated in
+    ``shared.utils.reply_prefix`` (lowest layer — safe to import from
+    enrichment without breaking layering).
+    """
+    from shared.utils.reply_prefix import strip_reply_prefix as _impl
+    return _impl(text) or ""
+
+
 class SymbolResolver(EnrichmentStage):
     """Populate ``result.symbols`` with best-effort instrument matches."""
 
@@ -131,7 +143,13 @@ class SymbolResolver(EnrichmentStage):
         )
 
     def process(self, result: EnrichmentResult) -> None:
-        text = f"{result.headline}\n{result.content}"
+        # Strip the `[Reply to @user]: quoted` prefix from each part separately.
+        # If we joined first then stripped, only the very first line would be
+        # cut — but `result.content` can also start with its own reply prefix
+        # in some collector paths.
+        clean_headline = _strip_reply_prefix(result.headline or "")
+        clean_content = _strip_reply_prefix(result.content or "")
+        text = f"{clean_headline}\n{clean_content}"
         if not text.strip():
             return
 

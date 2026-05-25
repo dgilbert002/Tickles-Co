@@ -164,6 +164,23 @@ class TestSharedMasterSchema:
         assert "uniq_tracked_positions_actor" in shared_sql
         assert "actor_type, actor_id, actor_instance, source_position_id" in shared_sql
 
+    # Round-3 / Round-6 assertions: deduped_at column + index must be in the
+    # canonical schema so a fresh provision matches both production and the
+    # signal-merge writer (round-3 Fix B + round-5 Tier-A snapshot refresh).
+    def test_tracked_positions_has_deduped_at(self, shared_sql: str) -> None:
+        assert "deduped_at" in shared_sql, (
+            "Missing deduped_at column in tracked_positions canonical DDL "
+            "(round-3 Fix B). Add `deduped_at TIMESTAMPTZ NULL` to the "
+            "tracked_positions CREATE TABLE block."
+        )
+
+    def test_tracked_positions_has_deduped_at_index(self, shared_sql: str) -> None:
+        assert "idx_tracked_positions_deduped_at" in shared_sql, (
+            "Missing idx_tracked_positions_deduped_at partial index "
+            "(round-3 Fix B). Add the index after the tracked_positions "
+            "CREATE TABLE block; the dashboard 24h-deduped KPI relies on it."
+        )
+
 
 class TestCompanyMasterSchema:
     """Assertions against tickles_company_pg.sql."""

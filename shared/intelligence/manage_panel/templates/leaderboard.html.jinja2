@@ -30,7 +30,7 @@
     {% if long_c > short_c * 1.5 %}{% set bias = 'LONG' %}{% elif short_c > long_c * 1.5 %}{% set bias = 'SHORT' %}{% else %}{% set bias = 'MIXED' %}{% endif %}
     <tr>
       <td>{{ loop.index }}</td>
-      <td><a href="/manage/trader/{{ r.get('trader_id','') }}">{{ r.get('display_name') or r.get('handle_normalized') or 'unknown' }}</a></td>
+      <td><a href="trader/{{ r.get('trader_id','') }}">{{ r.get('display_name') or r.get('handle_normalized') or 'unknown' }}</a></td>
       <td>{{ total }}</td>
       <td class="ok">{{ wins }}</td>
       <td class="warn">{{ losses }}</td>

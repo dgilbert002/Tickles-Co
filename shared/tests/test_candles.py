@@ -190,3 +190,26 @@ def test_parse_window_invalid_raises() -> None:
 def test_parse_window_swapped_raises() -> None:
     with pytest.raises(ValueError):
         parse_window("2026-04-05", "2026-04-01")
+
+
+def test_floor_dt_all_timeframes() -> None:
+    from shared.candles.resample_runner import _floor_dt
+    from shared.candles.schema import Timeframe
+    
+    dt = datetime(2026, 5, 23, 19, 36, 45, tzinfo=timezone.utc)
+    
+    # 5m floor
+    assert _floor_dt(dt, Timeframe.M5) == datetime(2026, 5, 23, 19, 35, 0, tzinfo=timezone.utc)
+    # 15m floor
+    assert _floor_dt(dt, Timeframe.M15) == datetime(2026, 5, 23, 19, 30, 0, tzinfo=timezone.utc)
+    # 30m floor
+    assert _floor_dt(dt, Timeframe.M30) == datetime(2026, 5, 23, 19, 30, 0, tzinfo=timezone.utc)
+    # 1h floor
+    assert _floor_dt(dt, Timeframe.H1) == datetime(2026, 5, 23, 19, 0, 0, tzinfo=timezone.utc)
+    # 4h floor
+    assert _floor_dt(dt, Timeframe.H4) == datetime(2026, 5, 23, 16, 0, 0, tzinfo=timezone.utc)
+    # 1d floor
+    assert _floor_dt(dt, Timeframe.D1) == datetime(2026, 5, 23, 0, 0, 0, tzinfo=timezone.utc)
+    # 1w floor (May 23, 2026 is Saturday. Week starts on Monday, May 18, 2026)
+    assert _floor_dt(dt, Timeframe.W1) == datetime(2026, 5, 18, 0, 0, 0, tzinfo=timezone.utc)
+

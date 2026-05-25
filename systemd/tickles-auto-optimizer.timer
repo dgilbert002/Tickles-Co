@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Tickles auto-optimizer every 6 hours
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+OnCalendar=*-*-* 06:00:00
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 18:00:00
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

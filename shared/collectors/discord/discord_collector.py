@@ -1041,14 +1041,31 @@ class DiscordCollector(BaseCollector):
             if download_media:
                 await _download_media_for_messages(raw_messages, channel_info, self._media_base_dir)
 
-            # Update high-water mark (track in memory first to commit only after successful cycle)
-            max_id = str(max(int(m["id"]) for m in raw_messages))
-            if not hasattr(self, "_pending_hwm"):
-                self._pending_hwm = {}
-            self._pending_hwm[channel_id] = max_id
+            # Bug H11 fix (Code Analyzer 1 #2):
+            #   Previously the HWM was advanced from the RAW pre-filter
+            #   message IDs. If the trading-zone trader filter removed all
+            #   messages because `_known_traders` was momentarily empty
+            #   (transient DB hiccup, race on collector restart, etc.) the
+            #   HWM still advanced past those messages and they were
+            #   permanently lost. We now defer HWM advance until AFTER
+            #   filters and only commit it when we have something to show
+            #   for the cycle (or when the only filter active is the
+            #   permanent user filter).
+            raw_max_id_str = str(max(int(m["id"]) for m in raw_messages))
 
-            # Filter messages by user if configured
+            # Filter messages by user if configured. Track allowlist vs
+            # blocklist separately so the HWM policy below can distinguish:
+            # blocklist filters are deterministic (a blocked user stays blocked),
+            # but allowlist filters are NOT — operators can add a user to the
+            # allowlist later, and we must not have permanently advanced past
+            # their historical messages.
+            user_filter_applied = False
+            allowlist_applied = False
+            blocklist_applied = False
             if self.config and (self.config.allowed_users or self.config.blocked_users):
+                user_filter_applied = True
+                allowlist_applied = bool(self.config.allowed_users)
+                blocklist_applied = bool(self.config.blocked_users)
                 filtered_messages = [m for m in raw_messages if self._should_include_message(m, channel_id)]
                 if len(filtered_messages) != len(raw_messages):
                     logger.debug(
@@ -1060,7 +1077,9 @@ class DiscordCollector(BaseCollector):
                 raw_messages = filtered_messages
 
             # Also apply trading-zone known-trader filter even without explicit allowed_users
+            zone_filter_applied = False
             if channel_id == "1305518197725728788":
+                zone_filter_applied = True
                 await self._refresh_known_traders()
                 filtered_messages = [m for m in raw_messages if self._should_include_message(m, channel_id)]
                 if len(filtered_messages) != len(raw_messages):
@@ -1071,6 +1090,37 @@ class DiscordCollector(BaseCollector):
                         len(filtered_messages),
                     )
                 raw_messages = filtered_messages
+
+            # HWM advance policy (Bug G fix, 2026-05-24 second-round audit):
+            #   * If post-filter list is non-empty → advance to the highest
+            #     post-filter ID (we processed everything <= that).
+            #   * Else if ONLY a deterministic blocklist user filter was
+            #     applied (no allowlist, no zone filter) → advance to raw max.
+            #     Blocked users stay blocked semantically; re-fetching them
+            #     just wastes API budget.
+            #   * Else (allowlist filter, zone filter, or both ate everything)
+            #     → DO NOT advance. Allowlists can change (operator adds a
+            #     trader); zone filters depend on transient `_known_traders`
+            #     state. Either way, the messages might become eligible later
+            #     and we must not have skipped past them permanently.
+            if not hasattr(self, "_pending_hwm"):
+                self._pending_hwm = {}
+            if raw_messages:
+                self._pending_hwm[channel_id] = str(
+                    max(int(m["id"]) for m in raw_messages)
+                )
+            elif (
+                user_filter_applied
+                and blocklist_applied
+                and not allowlist_applied
+                and not zone_filter_applied
+            ):
+                # Pure blocklist case — safe to advance, blocked users will
+                # always be blocked.
+                self._pending_hwm[channel_id] = raw_max_id_str
+            # else: leave HWM untouched; retry next cycle. This trades a
+            # small amount of repeated Discord API traffic for never losing
+            # signals when filter config changes.
 
             if not raw_messages:
                 return []

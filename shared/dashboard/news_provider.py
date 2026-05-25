@@ -493,17 +493,27 @@ class NewsFeedProvider:
         Returns:
             Dict with all primitives JSON-safe.
         """
-        content = rec["content"]
+        # Bug 12 sibling — strip the Discord ``[Reply to @user]: ...`` prefix
+        # so the dashboard News tab doesn't display the parent's quoted text
+        # as if it were the trader's own message. The prefix is harmless on
+        # non-reply rows (returned unchanged).
+        from shared.utils.reply_prefix import strip_reply_prefix
+        content = strip_reply_prefix(rec["content"]) if rec["content"] else rec["content"]
         if content is not None and len(content) > self.PREVIEW_CHARS:
             content = content[: self.PREVIEW_CHARS - 1].rstrip() + "…"
         instruments = rec["instruments"] or []
         if not isinstance(instruments, list):
             # Defensive: jsonb may decode as dict on malformed rows.
             instruments = []
+        # Bug 12 sibling — also strip the headline (Discord clients sometimes
+        # carry the prefix into the headline field).
+        clean_headline = (
+            strip_reply_prefix(rec["headline"]) if rec["headline"] else rec["headline"]
+        )
         return {
             "id": int(rec["id"]),
             "source": rec["source"],
-            "headline": rec["headline"],
+            "headline": clean_headline,
             "content": content,
             "instruments": list(instruments),
             "sentiment": rec["sentiment"],

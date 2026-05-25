@@ -1000,7 +1000,7 @@ async def _handle_positions_open(p: Dict[str, Any]) -> Dict[str, Any]:
     source_slug = str(p.get("sourceSlug", "charthackers_discord"))
     limit = min(int(p.get("limit", 50)), 200)
 
-    conditions: List[str] = ["tp.status IN ('open', 'partial_close')"]
+    conditions: List[str] = ["tp.status IN ('open', 'partial_exit')"]
     args: List[Any] = []
     arg_idx = 1
 

@@ -4186,6 +4186,8 @@ CREATE TABLE public.tracked_positions (
     take_profit_4 numeric(20,8),
     take_profit_5 numeric(20,8),
     take_profit_6 numeric(20,8),
+    deduped_at timestamp with time zone,
+    instrument_symbol_normalised character varying(64),
     CONSTRAINT tracked_positions_detection_method_check CHECK (((detection_method)::text = ANY ((ARRAY['manual'::character varying, 'llm_vision'::character varying, 'text_parser'::character varying, 'quant_pattern'::character varying, 'agent_override'::character varying])::text[]))),
     CONSTRAINT tracked_positions_direction_check CHECK (((direction)::text = ANY ((ARRAY['long'::character varying, 'short'::character varying])::text[]))),
     CONSTRAINT tracked_positions_outcome_check CHECK (((outcome)::text = ANY ((ARRAY['tp1_hit'::character varying, 'tp2_hit'::character varying, 'tp3_hit'::character varying, 'sl_hit'::character varying, 'breakeven'::character varying, 'expired'::character varying, 'manual_close'::character varying, 'invalidated'::character varying])::text[]))),
@@ -8118,6 +8120,27 @@ CREATE INDEX idx_tracked_positions_actor_company ON public.tracked_positions USI
 --
 
 CREATE INDEX idx_tracked_positions_signal_source ON public.tracked_positions USING btree (signal_source);
+
+
+--
+-- Name: idx_tp_symbol_norm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tp_symbol_norm ON public.tracked_positions USING btree (instrument_symbol_normalised) WHERE (instrument_symbol_normalised IS NOT NULL);
+
+
+--
+-- Name: idx_tracked_pos_open_by_company_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tracked_pos_open_by_company_symbol ON public.tracked_positions USING btree (company_id, instrument_symbol_normalised, direction, status) WHERE ((status)::text = 'open'::text);
+
+
+--
+-- Name: idx_tracked_positions_deduped_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tracked_positions_deduped_at ON public.tracked_positions USING btree (deduped_at) WHERE (deduped_at IS NOT NULL);
 
 
 --

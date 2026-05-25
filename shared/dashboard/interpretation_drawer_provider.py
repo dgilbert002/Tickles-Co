@@ -43,8 +43,8 @@ from shared.utils.db import get_shared_pool
 
 logger = logging.getLogger(__name__)
 
-# 250ms hard budget per provider, matching PHASE_Y §4.3.
-DRAWER_PROVIDER_TIMEOUT_S: float = 0.25
+# 2s hard budget per provider — DB needs reasonable time
+DRAWER_PROVIDER_TIMEOUT_S: float = 2.0
 
 # Hard ceiling on per-news_item row count. A single news item rarely
 # yields more than a couple of interpretations (one per model_version
@@ -483,7 +483,7 @@ class InterpretationDrawerProvider:
         sql = (
             "SELECT id, local_path, thumbnail_path, source_url, "
             "       media_type, mime_type, processing_status, "
-            "       width, height, created_at "
+            "       created_at "
             "FROM media_items "
             "WHERE news_item_id = $1 "
             "ORDER BY id ASC "
@@ -581,8 +581,6 @@ class InterpretationDrawerProvider:
             "media_type": rec["media_type"],
             "mime_type": rec["mime_type"],
             "processing_status": rec["processing_status"],
-            "width": _opt_int(rec["width"]),
-            "height": _opt_int(rec["height"]),
             "created_at": _opt_iso(rec["created_at"]),
         }
 

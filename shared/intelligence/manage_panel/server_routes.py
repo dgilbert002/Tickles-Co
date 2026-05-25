@@ -104,8 +104,23 @@ async def _audit_panel_mutation(
 # ---------------------------------------------------------------------------
 
 async def handle_manage_index(request: web.Request) -> web.Response:
-    """Redirect /manage to /manage/sources."""
-    raise web.HTTPFound(location="/manage/sources")
+    """Redirect /manage[/] to the sources view.
+
+    Bug Hunter 2 §9.2 — use a relative redirect so the manage panel can be
+    mounted under any path prefix (Tailscale Serve sub-path, Cloudflare,
+    nginx) without a 404 loop.
+
+    Bug I fix (2026-05-24 second-round audit): the bare relative target
+    ``"sources"`` resolves correctly when the user requests ``/manage/``
+    (trailing slash) — the browser keeps ``/manage/`` as the base. But a
+    request to ``/manage`` (no trailing slash) makes ``sources`` resolve to
+    ``/sources`` per RFC 3986, which 404s. We now build the redirect target
+    by appending to the request path, so it lands under whichever mount
+    prefix the request came in on regardless of trailing-slash state.
+    """
+    base = request.path.rstrip("/")
+    target = f"{base}/sources"
+    raise web.HTTPFound(location=target)
 
 
 async def handle_sources_view(request: web.Request) -> web.Response:

@@ -71,11 +71,25 @@ class ExchangeAdapter:
 
         Returns [[ts,o,h,l,c,v], ...]. Exceptions are caught and logged at
         warning level; callers receive `[]` and will retry after POLL_SECS.
+
+        If the spot form fails (perp-only symbols like XAU/USDT on Bybit),
+        retries with the CCXT perp suffix (XAU/USDT:USDT).
         """
         try:
             return await self.client.fetch_ohlcv(
                 symbol, timeframe="1m", since=since_ms, limit=500)
         except Exception as e:
+            err_msg = str(e).lower()
+            if "does not have market symbol" in err_msg and ":" not in symbol:
+                for suffix in ("USDT", "USDC", "BUSD", "USD"):
+                    perp_sym = f"{symbol}:{suffix}"
+                    try:
+                        result = await self.client.fetch_ohlcv(
+                            perp_sym, timeframe="1m", since=since_ms, limit=500)
+                        log.info("fetch_recent_ohlcv(%s): retry %s OK", symbol, perp_sym)
+                        return result
+                    except Exception:
+                        continue
             log.warning("fetch_recent_ohlcv(%s@%s) error: %s",
                         symbol, self.source, e)
             return []

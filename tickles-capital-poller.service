@@ -1,0 +1,30 @@
+[Unit]
+Description=Tickles Capital.com REST Price Poller Daemon
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/tickles/shared/market_data/capital_price_poller.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tickles-capital-poller
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/tickles /var/log/tickles
+ReadOnlyPaths=/opt/tickles/.env
+
+[Install]
+WantedBy=multi-user.target

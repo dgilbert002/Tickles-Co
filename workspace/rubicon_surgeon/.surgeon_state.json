@@ -1,0 +1,25 @@
+{
+  "starting_balance": 10000.0,
+  "balance": 11617.82917992887,
+  "realized_pnl": 1636.5791799288713,
+  "total_fees": 37.5,
+  "cumulative_turnover": 37500.0,
+  "trade_counter": 1,
+  "positions": [],
+  "closed_trades": [
+    {
+      "ts": "2026-04-24T10:34:28+00:00",
+      "trade_id": 1,
+      "symbol": "BTCUSDT",
+      "side": "LONG",
+      "frac": 1.0,
+      "entry_price": 74321.66136,
+      "exit_price": 77602.37642,
+      "gross_pnl": 1655.3292,
+      "fees": 18.75,
+      "net_pnl": 1636.5792,
+      "reason": "TIME_STOP",
+      "cumulative_net_pnl": 1636.5792
+    }
+  ]
+}

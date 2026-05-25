@@ -32,7 +32,13 @@ class RelevanceScorer(EnrichmentStage):
         return self.name_
 
     def process(self, result: EnrichmentResult) -> None:
-        text = f"{result.headline} {result.content}"
+        # Bug 12 sibling — strip the Discord reply prefix so a quoted parent
+        # message's action words (e.g. "long BTC") can't inflate the reply's
+        # relevance score.
+        from shared.utils.reply_prefix import strip_reply_prefix
+        clean_headline = strip_reply_prefix(result.headline or "")
+        clean_content = strip_reply_prefix(result.content or "")
+        text = f"{clean_headline} {clean_content}"
         if not text.strip():
             result.relevance_score = 0.0
             return

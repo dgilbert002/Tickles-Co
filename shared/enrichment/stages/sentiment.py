@@ -63,7 +63,12 @@ class SentimentScorer(EnrichmentStage):
         return bull_hits, bear_hits
 
     def process(self, result: EnrichmentResult) -> None:
-        text = f"{result.headline} {result.content}".lower()
+        # Bug 12 sibling — strip the Discord reply prefix before scoring so a
+        # quoted parent message can't pollute the reply's sentiment.
+        from shared.utils.reply_prefix import strip_reply_prefix
+        clean_headline = strip_reply_prefix(result.headline or "")
+        clean_content = strip_reply_prefix(result.content or "")
+        text = f"{clean_headline} {clean_content}".lower()
         if not text.strip():
             result.sentiment_label = None
             result.sentiment_score = None

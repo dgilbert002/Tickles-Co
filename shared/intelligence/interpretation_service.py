@@ -68,7 +68,11 @@ from shared.intelligence.llm_rate_limiter import LlmRateLimiter, get_default_lim
 from shared.intelligence.reason_similarity import compute_reason_agreement
 from shared.intelligence.embed import embed
 from shared.intelligence.trade_dedup import find_duplicate_position, is_continuation_text
-from shared.intelligence.text_signal_extractor import extract_signal_from_text, classify_message_type
+from shared.intelligence.text_signal_extractor import (
+    classify_message_type,
+    extract_signal_from_text,
+    strip_reply_prefix,
+)
 from shared.intelligence.payload_store import (
     build_request_payload,
     build_response_payload,
@@ -87,9 +91,25 @@ BATCH_SIZE = int(os.environ.get("INTERPRETATION_BATCH", "10"))
 MAX_AGE_HOURS = float(os.environ.get("INTERPRETATION_MAX_AGE_H", "24"))
 LLM_MAX_RETRIES = int(os.environ.get("INTERPRETATION_LLM_RETRIES", "3"))
 LLM_BACKOFF_BASE = float(os.environ.get("INTERPRETATION_LLM_BACKOFF", "2.0"))
-PRIMARY_MODEL = os.environ.get("CHART_HACKER_MODEL_PRIMARY", "anthropic/claude-sonnet-4")
-FALLBACK_MODEL = os.environ.get("CHART_HACKER_MODEL_FALLBACK", "google/gemini-2.0-flash-001")
-PREFILTER_MODEL = os.environ.get("CHART_HACKER_PREFILTER_MODEL", "google/gemini-2.5-flash")
+# Round 10 (2026-05-24): the three vision-model slots are now resolved at
+# runtime via shared.intelligence.model_config (DB-row > env-var > code-default).
+# These module-level constants stay for backward-compat — they hold the
+# bootstrap (env-or-default) value at process start. The canonical per-cycle
+# lookup is `await get_model(slot)`, which picks up dashboard dropdown changes
+# inside the 60-second cache window. See:
+#   shared/intelligence/model_config.py
+#   shared/intelligence/vision_model_catalogue.json
+from shared.intelligence.model_config import (
+    get_model as _runtime_get_model,
+    get_model_sync as _bootstrap_get_model,
+    SLOT_PRIMARY,
+    SLOT_FALLBACK,
+    SLOT_PREFILTER,
+)
+
+PRIMARY_MODEL = _bootstrap_get_model(SLOT_PRIMARY)
+FALLBACK_MODEL = _bootstrap_get_model(SLOT_FALLBACK)
+PREFILTER_MODEL = _bootstrap_get_model(SLOT_PREFILTER)
 PREFILTER_ENABLED = os.environ.get("CHART_HACKER_PREFILTER_ENABLED", "true").lower() in ("1", "true", "yes")
 FRESHNESS_THRESHOLD_S = float(os.environ.get("INTERPRETATION_FRESHNESS_S", "180"))
 MEDIA_RETENTION_DAYS = float(os.environ.get("MEDIA_RETENTION_DAYS", "7.0"))
@@ -343,6 +363,165 @@ def _quant_symbol_candidates(symbol: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # Phase J — Memory recall before LLM call
 # ---------------------------------------------------------------------------
+async def _build_data_edge_block(symbol: Optional[str]) -> str:
+    """Build a concise data-driven edge snapshot for ChartHacker's recall context.
+
+    Queries recent competition_trades to surface:
+      - Coin-specific win rates (only for the current symbol)
+      - Best/worst time windows across all coins
+      - Direction bias (long vs short)
+
+    Returns a short string or empty string if not enough data.
+    """
+    try:
+        from shared.utils.db import get_shared_pool
+    except Exception:
+        return ""
+
+    pool = await get_shared_pool()
+    lines: List[str] = []
+
+    # Coin-specific edge for current symbol
+    if symbol and symbol.strip():
+        sym = symbol.strip().upper()
+        # Try multiple forms since competition_trades may store perp-suffixed form
+        _perp_re = __import__('re').compile(r":(USDT|USDC|BUSD|USD)$", __import__('re').IGNORECASE)
+        stripped = _perp_re.sub("", sym)
+        candidates = [stripped] if stripped != sym else [sym]
+        if sym not in candidates:
+            candidates.append(sym)
+        try:
+            async with pool.acquire() as conn:
+                for cand in candidates:
+                    row = await conn.fetchrow("""
+                        SELECT COUNT(*) as t, COUNT(*) FILTER (WHERE pnl > 0) as w,
+                               ROUND(SUM(pnl)::numeric, 2) as pnl
+                        FROM competition_trades
+                        WHERE exit_price IS NOT NULL AND UPPER(symbol) = $1
+                    """, cand)
+                    if row and row["t"] >= 3:
+                        wr = round(100.0 * row["w"] / row["t"], 0)
+                        lines.append(
+                            f"COIN EDGE — {cand}: {row['t']} trades, {wr:.0f}% win, "
+                            f"${row['pnl']:.0f} net. "
+                            + (f"PREFER THIS COIN." if wr >= 70 and float(row['pnl']) > 0 else
+                               f"AVOID THIS COIN." if wr <= 30 or float(row['pnl']) < -100 else
+                               "NEUTRAL.")
+                        )
+                        break
+        except Exception:
+            pass
+
+    # Time edge — best and worst hours
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT EXTRACT(HOUR FROM entered_at)::int as h,
+                       COUNT(*) as t,
+                       ROUND(100.0 * COUNT(*) FILTER (WHERE pnl > 0) / COUNT(*), 0) as wr,
+                       ROUND(SUM(pnl)::numeric, 0) as pnl
+                FROM competition_trades
+                WHERE exit_price IS NOT NULL
+                GROUP BY 1 HAVING COUNT(*) >= 4
+                ORDER BY wr DESC
+            """)
+            if len(rows) >= 3:
+                best = rows[0]
+                worst = rows[-1]
+                lines.append(
+                    f"TIME EDGE — BEST: {int(best['h'])}:00 UTC ({int(best['wr'])}% win, ${int(best['pnl'])}). "
+                    f"WORST: {int(worst['h'])}:00 UTC ({int(worst['wr'])}% win, ${int(worst['pnl'])}). "
+                    f"Bias confidence toward BEST hours, skip during WORST hours."
+                )
+    except Exception:
+        pass
+
+    # Direction bias
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                  COUNT(*) FILTER (WHERE direction='long') as l,
+                  COUNT(*) FILTER (WHERE direction='long' AND pnl>0) as lw,
+                  COUNT(*) FILTER (WHERE direction='short') as s,
+                  COUNT(*) FILTER (WHERE direction='short' AND pnl>0) as sw
+                FROM competition_trades WHERE exit_price IS NOT NULL
+            """)
+            if row and row["l"] >= 10 and row["s"] >= 5:
+                lwr = round(100.0 * row["lw"] / row["l"], 0)
+                swr = round(100.0 * row["sw"] / row["s"], 0)
+                better = "SHORTS" if swr > lwr else "LONGS"
+                lines.append(
+                    f"DIRECTION EDGE — Longs: {lwr:.0f}% ({row['l']} trades), "
+                    f"Shorts: {swr:.0f}% ({row['s']} trades). "
+                    f"PREFER {better}."
+                )
+    except Exception:
+        pass
+
+    if not lines:
+        return ""
+
+    return "DATA-DRIVEN MARKET EDGE (from real closed trades, update every cycle):\n" + "\n".join(lines) + "\n"
+
+
+async def _load_source_color_rules(shared_pool, source: str) -> str:
+    """Load source-specific color scheme rules for the vision LLM prompt.
+
+    Looks up chart_prompts in system_config. First tries source-specific
+    key (e.g. 'telegram/rose'), then source-wide ('telegram'), then 'default'.
+    """
+    try:
+        # Build key candidates: source/subsource, source, default
+        keys = []
+        if source:
+            keys.append(source)
+            # Also try source/* — any subsource variant for this platform
+            # (e.g. 'telegram' may have 'telegram/rose' or 'telegram/general')
+        keys.append("default")
+
+        async with shared_pool.acquire() as conn:
+            # First try the most specific key (the source as passed)
+            row = await conn.fetchrow(
+                "SELECT config_value FROM system_config "
+                "WHERE namespace = 'chart_prompts' AND config_key = $1",
+                keys[0],
+            )
+            # If not found, try any key starting with source/
+            if not row and len(keys) > 1:
+                row = await conn.fetchrow(
+                    "SELECT config_value FROM system_config "
+                    "WHERE namespace = 'chart_prompts' "
+                    "AND config_key LIKE $1 || '/%' "
+                    "ORDER BY config_key LIMIT 1",
+                    source,
+                )
+            # Fall back to default
+            if not row:
+                row = await conn.fetchrow(
+                    "SELECT config_value FROM system_config "
+                    "WHERE namespace = 'chart_prompts' AND config_key = 'default'",
+                )
+            if row:
+                cfg = row["config_value"]
+                if isinstance(cfg, str):
+                    import json
+                    cfg = json.loads(cfg)
+                colors = cfg.get("colors", {})
+                bull = colors.get("bull", "green")
+                bear = colors.get("bear", "red")
+                note = cfg.get("note", "")
+                return (
+                    f"COLOR RULES FOR THIS SOURCE: "
+                    f"Bullish/profit zones are {bull}. "
+                    f"Bearish/loss zones are {bear}. "
+                    f"{note}"
+                )
+    except Exception:
+        pass
+    return ""
+
+
 async def _recall_relevant_memories(
     company: str,
     symbol: Optional[str],
@@ -445,6 +624,15 @@ async def _recall_relevant_memories(
 
     if not blocks:
         return ""
+
+    # DATA-DRIVEN MARKET EDGE — coin/time biases from real closed trades.
+    # Updated each call so ChartHacker always sees the latest patterns.
+    try:
+        edge_block = await _build_data_edge_block(symbol)
+        if edge_block:
+            blocks.insert(0, edge_block)
+    except Exception:
+        pass  # best-effort — never block analysis on edge data
 
     return (
         "PAST MEMORIES (use these to inform your analysis — your own past lessons "
@@ -618,7 +806,9 @@ async def run_prefilter(
     from shared.intelligence.gateway_config import GatewayConfig, call_vision_llm
 
     gateway_cfg = GatewayConfig.for_service("interpretation")
-    model = PREFILTER_MODEL
+    # Round 10: per-call resolution, so dropdown changes in the dashboard
+    # take effect at the next prefilter call (within the 60s cache window).
+    model = await _runtime_get_model(SLOT_PREFILTER)
 
     # Phase 3: compute prompt metadata for audit trail
     prompt_version = compute_prompt_version(_load_prompts())
@@ -769,7 +959,11 @@ async def run_llm_track(
     prompt_version = compute_prompt_version(_load_prompts())
     prompt_hash = compute_prompt_hash(system_prompt, user_text)
 
-    models = [cfg.primary_model, cfg.fallback_model]
+    # Round 10: resolve primary/fallback fresh per call so dashboard
+    # dropdown changes propagate within the model_config cache window (60s).
+    runtime_primary = await _runtime_get_model(SLOT_PRIMARY)
+    runtime_fallback = await _runtime_get_model(SLOT_FALLBACK)
+    models = [runtime_primary, runtime_fallback]
     last_exc: Optional[Exception] = None
 
     # Lazy-import gateway to avoid circular deps at module load time
@@ -788,7 +982,7 @@ async def run_llm_track(
                     image_b64=image_b64,
                     image_mime=image_mime,
                     correlation_id=correlation_id,
-                    operation="vision_primary" if model == cfg.primary_model else "vision_fallback",
+                    operation="vision_primary" if model == runtime_primary else "vision_fallback",
                 )
                 parsed = _parse_llm_json(resp["content"])
                 # Cost is now logged automatically by the gateway via api_cost_log.
@@ -836,7 +1030,13 @@ async def run_llm_track(
                     legacy_levels = {
                         "entry":       primary.get("entry"),
                         "stop_loss":   primary.get("stop_loss"),
-                        "take_profit": primary.get("tp1"),
+                        # Bug Hunter 2 §10.2 — accept either the numbered key
+                        # (``tp1``) or the singular fallback (``take_profit``).
+                        # Without this, LLM payloads that emit only
+                        # ``take_profit`` silently lose the level here AND in
+                        # llm_levels, even though the rest of the pipeline
+                        # tolerates singulars.
+                        "take_profit": primary.get("tp1") or primary.get("take_profit"),
                     }
                     legacy_reasoning = str(
                         primary.get("rationale")
@@ -862,13 +1062,13 @@ async def run_llm_track(
                     user_text=user_text,
                     image_b64=image_b64,
                     temperature=gateway_cfg.temperature,
-                    extra={"operation": "vision_primary" if model == cfg.primary_model else "vision_fallback", "correlation_id": correlation_id},
+                    extra={"operation": "vision_primary" if model == runtime_primary else "vision_fallback", "correlation_id": correlation_id},
                 )
                 response_payload = build_response_payload(
                     model_resolved=resp.get("model", model),
                     content=resp.get("content", ""),
                     usage=resp.get("usage"),
-                    extra={"operation": "vision_primary" if model == cfg.primary_model else "vision_fallback", "correlation_id": correlation_id},
+                    extra={"operation": "vision_primary" if model == runtime_primary else "vision_fallback", "correlation_id": correlation_id},
                 )
                 req_path, resp_path = "", ""
                 try:
@@ -1307,8 +1507,38 @@ async def fetch_pending_media(
     # "INVALID_ARGUMENT: Provided image is not valid". Non-image rows are
     # excluded here and handled separately by `cleanup_unsupported_media()`,
     # which transitions them to processing_status='skipped_unsupported_media'.
+    #
+    # Bug C3 fix (atomic claim — Code Analyzer 2 §1.3):
+    #   Previously this function ran a plain SELECT and never marked the chosen
+    #   rows as ``analyzing``. Two concurrent InterpretationService workers
+    #   (or two ticks running on top of each other under back-pressure) could
+    #   both pick the same media_id and both run a paid LLM call against it —
+    #   doubling cost and creating duplicate `tracked_positions`. We now use
+    #   `FOR UPDATE OF m SKIP LOCKED` inside a CTE plus an UPDATE ... RETURNING
+    #   so each candidate row is locked, transitioned to
+    #   ``processing_status='analyzing'``, and returned to exactly one worker.
+    #   A separate sweep (``recover_stale_analyzing``) requeues rows that get
+    #   stuck in ``analyzing`` if a worker dies mid-process.
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     sql = (
+        "WITH claimed AS ("
+        "  SELECT m.id "
+        "  FROM public.media_items m "
+        "  JOIN public.news_items n ON n.id = m.news_item_id "
+        "  WHERE (m.processing_status = 'downloaded' "
+        "         OR (m.processing_status = 'pending' AND m.source_url IS NOT NULL)) "
+        "    AND m.media_type = 'image' "
+        "    AND n.collected_at > $1 "
+        "  ORDER BY n.collected_at ASC "
+        "  LIMIT $2 "
+        "  FOR UPDATE OF m SKIP LOCKED"
+        "), updated AS ("
+        "  UPDATE public.media_items "
+        "  SET processing_status = 'analyzing', "
+        "      processed_at      = NOW() "
+        "  WHERE id IN (SELECT id FROM claimed) "
+        "  RETURNING id, processed_at AS claim_ts"
+        ") "
         "SELECT "
         "  m.id AS media_id, "
         "  m.news_item_id, "
@@ -1317,6 +1547,7 @@ async def fetch_pending_media(
         "  m.mime_type, "
         "  m.media_type, "
         "  m.processing_status, "
+        "  (SELECT claim_ts FROM updated u WHERE u.id = m.id) AS claim_ts, "
         "  n.headline, "
         "  n.content, "
         "  n.source_id, "
@@ -1324,19 +1555,73 @@ async def fetch_pending_media(
         "  n.author, "
         "  n.channel_name, "
         "  n.collected_at, "
+        "  n.source, "
         "  n.context_window "
         "FROM public.media_items m "
         "JOIN public.news_items n ON n.id = m.news_item_id "
-        "WHERE (m.processing_status = 'downloaded' "
-        "       OR (m.processing_status = 'pending' AND m.source_url IS NOT NULL)) "
-        "  AND m.media_type = 'image' "
-        "  AND n.collected_at > $1 "
-        "ORDER BY n.collected_at ASC "
-        "LIMIT $2"
+        "WHERE m.id IN (SELECT id FROM updated) "
+        "ORDER BY n.collected_at ASC"
     )
     async with shared_pool.acquire() as conn:
-        rows = await conn.fetch(sql, cutoff, batch_size)
+        async with conn.transaction():
+            rows = await conn.fetch(sql, cutoff, batch_size)
     return [dict(r) for r in rows]
+
+
+async def recover_stale_analyzing(
+    shared_pool: DatabasePool,
+    stale_minutes: int = 60,
+) -> int:
+    """Reset media rows stuck in ``processing_status='analyzing'`` back to a
+    re-claimable state if no worker has touched them within ``stale_minutes``.
+
+    Bug C3 companion: a worker that crashes mid-process (OOM, sigkill) leaves
+    its claimed rows pinned at ``analyzing`` forever. This sweep guards
+    against silent queue starvation by transitioning rows older than the
+    threshold back to their original state — ``downloaded`` if a local file
+    is present, otherwise ``pending`` (CDN-hosted source_url path).
+
+    Bug H fix (2026-05-24 second-round audit): the previous default of 15
+    minutes was below the p99 latency of vision-LLM calls under load. A
+    healthy worker that took 16 minutes to finish would lose its claim
+    mid-flight, a second worker would re-claim, both would pay the LLM
+    bill (the duplicate-trade write is blocked by DB unique constraints,
+    but cost is doubled). Raised the default to 60 minutes — well above
+    any observed worker latency — so this sweep only fires for genuinely
+    crashed workers.
+
+    Returns the number of rows recovered (0 in the steady-state).
+    """
+    sql = (
+        "UPDATE public.media_items "
+        "SET processing_status = CASE "
+        "      WHEN local_path IS NOT NULL AND local_path <> '' THEN 'downloaded' "
+        "      WHEN source_url IS NOT NULL AND source_url <> ''  THEN 'pending'    "
+        "      ELSE 'failed' "
+        "    END, "
+        "    processing_error = COALESCE(processing_error, '') || "
+        "                       ' [recover_stale_analyzing]', "
+        "    processed_at = NOW() "
+        "WHERE processing_status = 'analyzing' "
+        "  AND processed_at < NOW() - make_interval(mins => $1)"
+    )
+    try:
+        async with shared_pool.acquire() as conn:
+            result = await conn.execute(sql, stale_minutes)
+        try:
+            count = int(str(result).rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            count = 0
+        if count:
+            logger.info(
+                "recover_stale_analyzing: requeued %d media rows stuck in 'analyzing' >%dmin",
+                count,
+                stale_minutes,
+            )
+        return count
+    except Exception as exc:
+        logger.warning("recover_stale_analyzing: query failed: %s", exc)
+        return 0
 
 
 async def cleanup_unsupported_media(
@@ -1699,8 +1984,20 @@ def _flatten_llm_levels(levels: Optional[Dict[str, Any]]) -> Dict[str, Optional[
         return out
     out["entry_price"] = _coerce_level(levels.get("entry"))
     out["stop_loss"] = _coerce_level(levels.get("stop_loss"))
+    # The chart-analysis prompt asks the LLM for a SINGULAR `take_profit`
+    # (see prompts/chart_analysis.json + system_prompt strings). However we
+    # store TP1..TP6 separately in the DB. Map the singular key into TP1
+    # first (so vision-only signals don't silently drop their take-profit),
+    # then allow numbered TP1..TP6 to override / supplement when present.
+    singular_tp = _coerce_level(
+        levels.get("take_profit") if "take_profit" in levels else None
+    )
+    if singular_tp is not None:
+        out["take_profit_1"] = singular_tp
     for n in range(1, 7):
-        out[f"take_profit_{n}"] = _coerce_level(levels.get(f"take_profit_{n}"))
+        numbered = _coerce_level(levels.get(f"take_profit_{n}"))
+        if numbered is not None:
+            out[f"take_profit_{n}"] = numbered
     return out
 
 
@@ -1744,6 +2041,40 @@ async def write_signal_interpretation(
     # JSON on every read. JSONB stays the source of truth for new keys.
     levels_flat = _flatten_llm_levels(llm.levels if llm else None)
 
+    # Bug H8 — derive pattern_tags / setup_tags from chart_analysis JSON.
+    # The vision LLM emits `chart_patterns` (array of strings) and `key_levels`
+    # (array of {type, price, method}) inside `chart_analysis`. Phase J never
+    # surfaced these into dedicated columns, so dashboard chips/queries that
+    # read pattern_tags / setup_tags were always empty even when the LLM had
+    # extracted them. We mirror them here so the data is queryable without a
+    # JSONB scan.
+    chart_analysis_obj = llm.chart_analysis if llm and llm.chart_analysis else {}
+    raw_patterns = chart_analysis_obj.get("chart_patterns") if isinstance(chart_analysis_obj, dict) else None
+    pattern_tags_list: List[str] = []
+    if isinstance(raw_patterns, list):
+        seen_p: set = set()
+        for p in raw_patterns:
+            if not isinstance(p, str):
+                continue
+            tag = p.strip().lower()
+            if tag and tag not in seen_p:
+                seen_p.add(tag)
+                pattern_tags_list.append(tag)
+    raw_levels = chart_analysis_obj.get("key_levels") if isinstance(chart_analysis_obj, dict) else None
+    setup_tags_list: List[str] = []
+    if isinstance(raw_levels, list):
+        seen_s: set = set()
+        for lvl in raw_levels:
+            if not isinstance(lvl, dict):
+                continue
+            tag_type = lvl.get("type")
+            if not isinstance(tag_type, str):
+                continue
+            tag = tag_type.strip().lower()
+            if tag and tag not in seen_s:
+                seen_s.add(tag)
+                setup_tags_list.append(tag)
+
     sql = (
         "INSERT INTO public.signal_interpretations ("
         "  news_item_id, media_item_id, trader_profile_id, "
@@ -1765,6 +2096,8 @@ async def write_signal_interpretation(
         "  entry_price, stop_loss, "
         "  take_profit_1, take_profit_2, take_profit_3, "
         "  take_profit_4, take_profit_5, take_profit_6, "
+        # Bug H8 — denormalised pattern/setup tags from chart_analysis
+        "  pattern_tags, setup_tags, "
         "  created_at"
         ") VALUES ("
         "  $1, $2, $3, $4, $5, $6, "
@@ -1785,6 +2118,8 @@ async def write_signal_interpretation(
         "  $38, $39, "
         "  $40, $41, $42, "
         "  $43, $44, $45, "
+        # Bug H8 params $46, $47
+        "  $46::jsonb, $47::jsonb, "
         "  NOW()"
         ")"
         "ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING "
@@ -1825,7 +2160,7 @@ async def write_signal_interpretation(
         instrument_resolved_from,
         # Phase J — dual-extraction payload
         (llm.timeframe if llm and llm.timeframe else None),
-        json.dumps(llm.chart_analysis if llm and llm.chart_analysis else {}),
+        json.dumps(chart_analysis_obj),
         json.dumps(llm.trader_trades if llm and llm.trader_trades else []),
         json.dumps(llm.chart_hacker_trades if llm and llm.chart_hacker_trades else []),
         round(llm.ai_agreement, 2) if llm and llm.ai_agreement else None,
@@ -1839,6 +2174,9 @@ async def write_signal_interpretation(
         levels_flat["take_profit_4"],
         levels_flat["take_profit_5"],
         levels_flat["take_profit_6"],
+        # Bug H8 — pattern_tags ($46), setup_tags ($47)
+        json.dumps(pattern_tags_list),
+        json.dumps(setup_tags_list),
     )
     row = await shared_pool.fetch_one(sql, params)
     if row is None:
@@ -1965,6 +2303,115 @@ def _extract_symbol_from_text(text: str) -> Optional[str]:
 _PRICE_CLEAN_RE = _re.compile(r"[^\d.\-]")  # keep digits, dots, hyphens
 _RANGE_RE = _re.compile(r"^([\d.]+)\s*[-–—to]+\s*([\d.]+)$")
 _K_SUFFIX_RE = _re.compile(r"^([\d.]+)\s*[kK]$")
+
+
+# ---------------------------------------------------------------------------
+# Round 9 (2026-05-24) — Trader-setup gate.
+#
+# The chart_analysis prompt was previously instructing the LLM to "construct
+# a trade" from drawn zones whenever no explicit setup was present. That
+# pushed every level-commentary post (e.g. "btc must get above here") into
+# `trader_trades`, which then booked a tracked_position falsely attributed
+# to the trader. The new prompt (version >= 2026.05.24-trader-explicit-only-v1)
+# forbids this and instead requires each trader_trade to carry an
+# `explicit_evidence` tag of A1 / A2 / A3 / A4 (see prompt for definitions).
+#
+# This gate is a server-side defence in depth: even if the LLM disobeys, we
+# refuse to book a tracked_position with signal_source='trader' unless we
+# have evidence the trader actually called the setup.
+#
+# Backward-compatible: for prompt versions issued before this gate (anything
+# without "trader-explicit-only" in the version string), we skip the gate
+# and trust the old behaviour, so historical interpretations and any
+# in-flight cached prompts don't suddenly stop producing trades.
+# ---------------------------------------------------------------------------
+_TRADER_GATE_PROMPT_TAG = "trader-explicit-only"
+_DIRECTION_WORDS = (
+    "long", "short", "buy", "sell",
+    "buying", "selling",
+    "entered", "entering", "enter ",
+    "shorting", "longing",
+    "bought", "sold",
+)
+_LEVEL_WORDS = (
+    "entry", "entries",
+    "sl", "stop", "stoploss", "stop-loss", "stop loss",
+    "tp", "tp1", "tp2", "tp3",
+    "target", "targets",
+    "take profit", "takeprofit", "take-profit",
+)
+_VALID_EVIDENCE_CODES = {"A1", "A2", "A3", "A4"}
+
+
+def _is_explicit_trader_setup(
+    trade: Dict[str, Any],
+    news_text: str,
+    prompt_version: str,
+) -> Tuple[bool, str]:
+    """Return (is_explicit, evidence_code).
+
+    Decision rules (only applied when prompt enforces the gate):
+
+      1. If the LLM provided an `explicit_evidence` field set to A1/A2/A3/A4,
+         trust it (the prompt told the LLM what each code means).
+      2. Else scan the news text for a direction-word + level-word pair
+         (e.g. "long BTC entry 78000 SL 74850 TP 79500").
+      3. Else accept a direction-word followed by a price-like number
+         within a short window (e.g. "Jumped in a BTC long to 79100",
+         "shorting 4200, target 4000"). This catches casual entry calls
+         that omit the formal "entry"/"sl" keywords.
+      4. Anything else → not explicit. The trade should NOT be written as
+         a trader_trade. Caller should drop it (the chart_hacker pass
+         independently produces an inferred opinion if the chart warrants).
+
+    Backward-compatible: returns (True, "legacy") when the prompt is the old
+    one, so historical interpretations / cached prompt versions don't break.
+    """
+    if not isinstance(trade, dict):
+        return False, "invalid_trade_object"
+
+    # Backward-compatible bypass for old prompts.
+    if not prompt_version or _TRADER_GATE_PROMPT_TAG not in str(prompt_version):
+        return True, "legacy_prompt"
+
+    # 1. LLM-declared evidence code.
+    ev_raw = str(trade.get("explicit_evidence") or "").upper().strip()
+    if ev_raw in _VALID_EVIDENCE_CODES:
+        return True, ev_raw
+
+    text = (news_text or "").lower()
+    if not text:
+        return False, "no_explicit_evidence"
+
+    has_dir = any(w in text for w in _DIRECTION_WORDS)
+
+    # 2. Strict keyword fallback — direction-word + level-word.
+    if has_dir and any(w in text for w in _LEVEL_WORDS):
+        return True, "A3_text_fallback"
+
+    # 3. Loose fallback — direction-word followed by a price-like number
+    # within ~40 characters. Catches "long 79100", "shorting at 4200",
+    # "buying $0.85", "entered btc 70k".
+    if has_dir:
+        for dw in _DIRECTION_WORDS:
+            i = text.find(dw)
+            while i != -1:
+                window = text[i + len(dw): i + len(dw) + 40]
+                if _re.search(r"[\$]?\s*\d{1,3}(?:[\.,]\d+)?\s*[kK]?", window):
+                    # Make sure the matched number isn't trivially "1" / "0"
+                    m = _re.search(r"[\$]?\s*(\d{1,3}(?:[\.,]\d+)?)\s*([kK]?)", window)
+                    if m:
+                        try:
+                            val = float(m.group(1).replace(",", "."))
+                            if m.group(2):
+                                val *= 1000.0
+                        except ValueError:
+                            val = 0.0
+                        if val >= 0.0001:  # any plausible price
+                            return True, "A3_price_window"
+                i = text.find(dw, i + 1)
+
+    return False, "no_explicit_evidence"
 
 
 def _parse_price_level(value: Any) -> Optional[float]:
@@ -2262,9 +2709,122 @@ async def create_tracked_position_from_interpretation(
 
     now = datetime.now(timezone.utc)
 
-    # Phase 6: normalise instrument symbol for cross-venue lookups
+    # Round 12 (2026-05-24): Exchange routing.
+    #
+    # Pre-Round-12, every position defaulted to ``instrument_exchange='bybit'``
+    # regardless of what the symbol actually was. PositionMonitor then spammed
+    # ~20k "bybit does not have market symbol" errors per day on four symbols
+    # (GOLD, US100, 1000PEPE/USDT, COTI/USDT). The new exchange_router
+    # consults unified_instruments + a small alias table + a Bybit-perp
+    # synthesis fallback to produce a deterministic (exchange, epic_code,
+    # canonical_symbol) tuple. See shared/utils/exchange_router.py.
+    #
+    # Three outcomes:
+    #   1. supported & crypto  → routed.exchange ∈ {bybit,bitget,blofin}
+    #      with .canonical_symbol used for the row + .ccxt_perp_symbol kept
+    #      in metadata for monitor lookups.
+    #   2. supported & cfd     → routed.exchange = 'capital.com',
+    #      routed.epic_code populated, used by PositionMonitor's Capital
+    #      OHLCV path (Phase 12.1c).
+    #   3. unsupported         → INSERT the row anyway with status='cancelled'
+    #      and status_reason='unsupported:<reason>:<utc>' so the trader's
+    #      call appears in history with a clear "we couldn't route this"
+    #      tag. This stops the monitor from polling and stops dashboard
+    #      "phantom pending" rows. The legacy ``or "bybit"`` default is
+    #      gone — fail loudly instead of silently sending bogus symbols.
+    from shared.utils.exchange_router import (
+        resolve_market as _resolve_market_r12,
+        unsupported_status_reason as _unsupported_reason_r12,
+    )
+    routed = await _resolve_market_r12(instrument_symbol, instrument_exchange)
+    if routed.supported:
+        # Use the routed values — the trader's free-text symbol gets
+        # canonicalised (e.g. NAS100 -> US100, XAU/USD -> GOLD) so dashboards
+        # and dedup queries see one form, not five. raw_signal_text retains
+        # the trader's original wording for audit.
+        instrument_symbol = routed.canonical_symbol or instrument_symbol
+        instrument_exchange = routed.exchange or instrument_exchange
+        _routed_epic_code = routed.epic_code  # may be None for crypto
+        _routed_perp_symbol = routed.ccxt_perp_symbol  # informational
+    else:
+        # Symbol can't be routed. Skip the rest of the heavy machinery
+        # (CCXT pre-flights, dedup) and persist a cancelled row so the
+        # operator sees the rejection once, not 20,000 times.
+        cancelled_reason = _unsupported_reason_r12(routed, now.isoformat())
+        logger.info(
+            "Round 12 routing: symbol=%r unsupported (reason=%s) — inserting "
+            "cancelled tracked_position news_item_id=%s",
+            instrument_symbol, routed.unsupported_reason, news_item_id,
+        )
+        try:
+            row_unsup = await shared_pool.fetch_one(
+                """
+                INSERT INTO public.tracked_positions (
+                    news_item_id, media_item_id, trader_profile_id,
+                    signal_interpretation_id,
+                    instrument_symbol, instrument_exchange,
+                    instrument_symbol_normalised,
+                    direction, entry_price, stop_loss, take_profit_1,
+                    detection_method, detection_confidence,
+                    raw_signal_text, signal_timestamp,
+                    status, status_reason, company_id,
+                    correlation_id,
+                    signal_source, actor_type, actor_id,
+                    created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7,
+                    $8, $9, $10, $11,
+                    $12, $13,
+                    $14, $15,
+                    'cancelled', $16, $17,
+                    $18,
+                    $19, $20, $21,
+                    $22, $22
+                )
+                ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction)
+                DO NOTHING
+                RETURNING id
+                """,
+                (
+                    news_item_id, media_item_id, trader_profile_id,
+                    signal_interpretation_id,
+                    (instrument_symbol or "")[:64],
+                    "unsupported",
+                    (routed.canonical_symbol or instrument_symbol or "")[:64],
+                    direction,
+                    entry_price, stop_loss, take_profit_1,
+                    "text_parser" if detection_method not in (
+                        "manual", "llm_vision", "text_parser",
+                        "quant_pattern", "agent_override",
+                    ) else detection_method,
+                    round(float(detection_confidence or 0.0), 4),
+                    (raw_signal_text or "")[:2000],
+                    now,
+                    cancelled_reason[:512],
+                    company_id,
+                    correlation_id or None,
+                    signal_source, actor_type, actor_id,
+                    now,
+                ),
+            )
+            return int(row_unsup["id"]) if row_unsup else None
+        except Exception as exc:
+            logger.warning(
+                "Round 12 routing: failed to write cancelled row "
+                "for symbol=%r news_item_id=%s: %s",
+                instrument_symbol, news_item_id, exc,
+            )
+            return None
+
+    # Phase 6: normalise instrument symbol for cross-venue lookups.
+    # Round 12 (2026-05-24): instrument_exchange is now post-router, so
+    # the legacy ``or "bybit"`` fallback is unnecessary. Defensive: still
+    # falls back to bybit if upstream somehow handed us a None (the router
+    # should already have replaced it, but normalise_instrument crashes
+    # on None).
     sym_norm, venue_norm = normalise_instrument(
-        instrument_symbol, instrument_exchange or "bybit"
+        instrument_symbol, instrument_exchange or "bybit"  # post-router; defensive only
     )
 
     # Phase 6: compute reason agreement + embed trader reason
@@ -2342,7 +2902,12 @@ async def create_tracked_position_from_interpretation(
     # retroactive retrospective/autopsy posts where price has already hit TP or SL.
     if entry_price is not None and entry_price > 0:
         try:
-            probe = await _ccxt_live_price(instrument_symbol, instrument_exchange or "bybit")
+            # Round 12 (2026-05-24): instrument_exchange is now the routed
+            # value (no more "or 'bybit'" default). For CFDs (capital.com)
+            # _ccxt_live_price will return None — that's fine, the in-play
+            # guard simply doesn't fire. CFD live-price probing happens via
+            # the Capital adapter elsewhere.
+            probe = await _ccxt_live_price(instrument_symbol, instrument_exchange)
             if probe is not None:
                 live_px, _, _ = probe
                 if direction == "long":
@@ -2378,53 +2943,143 @@ async def create_tracked_position_from_interpretation(
         except Exception as exc:
             logger.warning("Already-In-Play Guard price lookup failed: %s", exc)
 
-    # Phase 8 — cross-actor dedup: if a pending position already exists on
-    # the same symbol+direction within ±1% entry price in the last 24h,
-    # update the existing row instead of creating a duplicate.
+    # Round 13.6 (2026-05-24) — per-trader pending uniqueness.
+    #
+    # Operator rule (verbatim): "only one long and one short can be opened
+    # per coin per trader, whether the AI charthacker or a discord trader.
+    # We can update with the newest ones (freshest) if there's a new one
+    # that comes in."
+    #
+    # Translation: per (trader_profile_id, normalised_symbol, direction)
+    # there must be at most ONE row in status='pending'. When a new signal
+    # arrives for the same key, REFRESH the existing row in place with the
+    # freshest entry/SL/TP/reasons/raw text — do NOT create a second row.
+    # The function returns the existing id so downstream wiring (postmortem,
+    # surgeon-bridge, dashboard anchors) all keep pointing at one stable id.
+    #
+    # Why per-trader (not cross-trader): cross-trader dedup loses signal
+    # provenance (we'd cancel trader_1's BTC long because chart_hacker had
+    # one at the same price). Per-trader keeps each trader's own track
+    # record intact while still bounding total row count: with N traders
+    # the upper bound is now 2N rows per coin (1 long + 1 short per
+    # trader), vs. effectively unbounded before.
+    #
+    # Symbol matching: we accept canonical / compact / case-variant forms
+    # to catch legacy rows stored as ``BTCUSDT`` while a new write arrives
+    # canonicalised to ``BTC/USDT:USDT``. See ``trade_dedup._compact_symbol``
+    # for the full strip rules.
+    #
+    # Replaces the silently-broken Phase-8 cross-actor dedup (TypeError in
+    # fetch_one signature got swallowed by bare except, letting 125
+    # duplicates accumulate) AND the Round-13.5 1%/4h tolerance logic
+    # (too aggressive — collapsed genuine multi-trader confluence).
     if entry_price is not None and entry_price > 0:
+        from shared.intelligence.trade_dedup import _compact_symbol  # noqa: WPS433
+        compact_sym = _compact_symbol(instrument_symbol) or instrument_symbol
+
+        existing = None
         try:
             existing = await shared_pool.fetch_one(
                 """
-                SELECT id, entry_price
+                SELECT id, entry_price, created_at
                 FROM public.tracked_positions
                 WHERE status = 'pending'
-                  AND instrument_symbol = $1
+                  AND trader_profile_id = $1
                   AND direction = $2
-                  AND ABS((entry_price - $3) / entry_price) <= 0.01
-                  AND created_at > NOW() - INTERVAL '24 hours'
+                  AND (instrument_symbol = $3
+                       OR instrument_symbol = $4
+                       OR instrument_symbol_normalised = $3
+                       OR UPPER(instrument_symbol) = UPPER($4)
+                       OR UPPER(instrument_symbol_normalised) = UPPER($3))
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                instrument_symbol, direction, entry_price,
+                (
+                    int(trader_profile_id),
+                    direction,
+                    instrument_symbol,
+                    compact_sym,
+                ),
             )
-        except Exception:
-            existing = None  # defensive — never block a signal on dedup query failure
+        except Exception as exc:
+            # Defensive: never block a legitimate signal on a dedup hiccup.
+            # Log loudly — the previous bare-except swallow is exactly what
+            # hid the silently-broken Phase-8 dedup for 2 days.
+            logger.warning(
+                "per-trader dedup query failed (news_item_id=%s trader=%s symbol=%s dir=%s): %s "
+                "— proceeding without dedup",
+                news_item_id, trader_profile_id, instrument_symbol, direction, exc,
+            )
+            existing = None
 
         if existing is not None:
-            await shared_pool.execute(
-                """
-                UPDATE public.tracked_positions
-                SET entry_price = $1,
-                    entry_reason_trader = COALESCE($2, entry_reason_trader),
-                    entry_reason_llm = COALESCE($3, entry_reason_llm),
-                    raw_signal_text = CASE WHEN $4 != '' THEN $4 ELSE raw_signal_text END,
-                    deduped_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = $5
-                """,
-                entry_price,
-                entry_reason_trader,
-                entry_reason_llm,
-                (raw_signal_text or ""),
-                existing["id"],
-            )
-            logger.info(
-                "Dedup: updated existing pending position %s "
-                "(symbol=%s dir=%s entry=%.4f) instead of creating "
-                "duplicate from news_item_id=%s",
-                existing["id"], instrument_symbol, direction, entry_price, news_item_id,
-            )
-            return int(existing["id"])
+            existing_id = int(existing["id"])
+            try:
+                # In-place refresh: pull freshest entry/SL/TPs/reasons onto
+                # the existing pending row, advance signal_interpretation_id
+                # so the drawer points at the newest interpretation, stamp
+                # deduped_at for the dashboard KPI. raw_signal_text is only
+                # overwritten when the incoming text is non-empty (preserve
+                # the most-detailed prior wording on terse follow-ups).
+                await shared_pool.execute(
+                    """
+                    UPDATE public.tracked_positions
+                    SET entry_price             = $1,
+                        stop_loss               = COALESCE($2, stop_loss),
+                        take_profit_1           = COALESCE($3, take_profit_1),
+                        take_profit_2           = COALESCE($4, take_profit_2),
+                        take_profit_3           = COALESCE($5, take_profit_3),
+                        take_profit_4           = COALESCE($6, take_profit_4),
+                        take_profit_5           = COALESCE($7, take_profit_5),
+                        take_profit_6           = COALESCE($8, take_profit_6),
+                        entry_reason_trader     = COALESCE($9,  entry_reason_trader),
+                        entry_reason_llm        = COALESCE($10, entry_reason_llm),
+                        entry_reason_agent      = COALESCE($11, entry_reason_agent),
+                        raw_signal_text         = CASE WHEN COALESCE($12,'') != '' THEN $12 ELSE raw_signal_text END,
+                        signal_interpretation_id = $13,
+                        timeframe               = COALESCE($14, timeframe),
+                        signal_timestamp        = $15,
+                        deduped_at              = NOW(),
+                        updated_at              = NOW()
+                    WHERE id = $16
+                      AND status = 'pending'
+                    """,
+                    (
+                        float(entry_price),
+                        float(stop_loss) if stop_loss is not None else None,
+                        float(take_profit_1) if take_profit_1 is not None else None,
+                        float(take_profit_2) if take_profit_2 is not None else None,
+                        float(take_profit_3) if take_profit_3 is not None else None,
+                        float(take_profit_4) if take_profit_4 is not None else None,
+                        float(take_profit_5) if take_profit_5 is not None else None,
+                        float(take_profit_6) if take_profit_6 is not None else None,
+                        (entry_reason_trader[:2000] if entry_reason_trader else None),
+                        (entry_reason_llm[:2000] if entry_reason_llm else None),
+                        (entry_reason_agent[:2000] if entry_reason_agent else None),
+                        (raw_signal_text or ""),
+                        signal_interpretation_id,
+                        timeframe,
+                        now,
+                        existing_id,
+                    ),
+                )
+                logger.info(
+                    "per_trader_dedup_refresh news_item_id=%s trader=%s symbol=%s dir=%s "
+                    "entry=%.6f -> refreshed pid=%s (was entry=%s)",
+                    news_item_id, trader_profile_id, instrument_symbol, direction,
+                    float(entry_price), existing_id, existing.get("entry_price"),
+                )
+            except Exception as exc:
+                # If the UPDATE fails we still return the existing id so the
+                # caller doesn't accidentally create a duplicate via the
+                # INSERT below. The pending row keeps its previous values
+                # — operator can re-trigger by toggling the news item.
+                logger.warning(
+                    "per_trader_dedup UPDATE failed for pid=%s (%s) — returning "
+                    "existing id without refresh; operator should re-poll",
+                    existing_id, exc,
+                )
+            return existing_id
 
     row = await shared_pool.fetch_one(
         """
@@ -2433,6 +3088,7 @@ async def create_tracked_position_from_interpretation(
             signal_interpretation_id,
             instrument_symbol, instrument_exchange,
             instrument_symbol_normalised,
+            epic_code,
             direction, entry_price, stop_loss, take_profit_1,
             detection_method, detection_confidence,
             raw_signal_text, signal_timestamp,
@@ -2452,20 +3108,21 @@ async def create_tracked_position_from_interpretation(
             $4,
             $5, $6,
             $7,
-            $8, $9, $10, $11,
-            $12, $13,
-            $14, $15,
-            $16, $17, $18,
-            $19, $20, $21,
-            $22, $23,
-            $24::vector(384),
-            $25,
-            $26, $27, $28,
-            $29, $30,
-            $31, $32,
-            $33, $34, $35,
-            $36,
-            $37, $37
+            $8,
+            $9, $10, $11, $12,
+            $13, $14,
+            $15, $16,
+            $17, $18, $19,
+            $20, $21, $22,
+            $23, $24,
+            $25::vector(384),
+            $26,
+            $27, $28, $29,
+            $30, $31,
+            $32, $33,
+            $34, $35, $36,
+            $37,
+            $38, $38
         )
         ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction)
         DO NOTHING
@@ -2477,8 +3134,13 @@ async def create_tracked_position_from_interpretation(
             trader_profile_id,
             signal_interpretation_id,
             instrument_symbol,
-            instrument_exchange or "bybit",
+            # Round 12 (2026-05-24): instrument_exchange is now ALWAYS the
+            # routed exchange (no more silent ``or "bybit"`` default). For
+            # CFDs the routed value is 'capital.com' and epic_code is
+            # populated below.
+            instrument_exchange,
             sym_norm,
+            _routed_epic_code,
             direction,
             entry_price,
             stop_loss,
@@ -2538,27 +3200,81 @@ async def update_media_status(
     media_id: int,
     status: str,
     error: Optional[str] = None,
+    expected_processed_at: Optional[datetime] = None,
 ) -> None:
-    """Update media_items.processing_status and optional error."""
-    if error:
-        sql = (
-            "UPDATE public.media_items SET "
-            "  processing_status = $1, "
-            "  processing_error = $2, "
-            "  processed_at = NOW() "
-            "WHERE id = $3"
+    """Update media_items.processing_status and optional error.
+
+    Bug H fix (2026-05-24 second-round audit): only flip rows that are still
+    in a non-terminal state. Without this guard, a stale worker that finishes
+    a 60-minute LLM call after ``recover_stale_analyzing`` has reset its claim
+    (and a sibling worker has already written ``analyzed``) would blindly
+    overwrite the sibling's status. The DB unique constraints already prevent
+    duplicate trades, but the status field can still be cosmetically wrong.
+    The guard makes the late writer a no-op.
+
+    Bug H round-3 review fix (BH2 #2, CA1 Fix H #2): add an optional
+    ``expected_processed_at`` claim-timestamp CAS. When provided (callers that
+    fetched the row via ``fetch_pending_media`` know their claim timestamp),
+    the UPDATE additionally asserts ``processed_at = $expected_processed_at``.
+    If a stale-recovery sweep + sibling reclaim has rotated the row since
+    this worker's claim, ``processed_at`` will differ → 0 rows updated →
+    no-op + log. This closes the cosmetic ``analyzing → analyzed`` clobber
+    that the non_terminal guard alone could not catch.
+    """
+    non_terminal = ('downloaded', 'pending', 'analyzing')
+    async with shared_pool.acquire() as conn:
+        if error and expected_processed_at is not None:
+            result = await conn.execute(
+                "UPDATE public.media_items SET "
+                "  processing_status = $1, "
+                "  processing_error = $2, "
+                "  processed_at = NOW() "
+                "WHERE id = $3 "
+                "  AND processing_status = ANY($4::text[]) "
+                "  AND processed_at = $5",
+                status, error, media_id, list(non_terminal), expected_processed_at,
+            )
+        elif error:
+            result = await conn.execute(
+                "UPDATE public.media_items SET "
+                "  processing_status = $1, "
+                "  processing_error = $2, "
+                "  processed_at = NOW() "
+                "WHERE id = $3 "
+                "  AND processing_status = ANY($4::text[])",
+                status, error, media_id, list(non_terminal),
+            )
+        elif expected_processed_at is not None:
+            result = await conn.execute(
+                "UPDATE public.media_items SET "
+                "  processing_status = $1, "
+                "  processed_at = NOW() "
+                "WHERE id = $2 "
+                "  AND processing_status = ANY($3::text[]) "
+                "  AND processed_at = $4",
+                status, media_id, list(non_terminal), expected_processed_at,
+            )
+        else:
+            result = await conn.execute(
+                "UPDATE public.media_items SET "
+                "  processing_status = $1, "
+                "  processed_at = NOW() "
+                "WHERE id = $2 "
+                "  AND processing_status = ANY($3::text[])",
+                status, media_id, list(non_terminal),
+            )
+    # Log when the CAS path no-ops so operators can see late-worker drops.
+    # Round-6 sweep (CA2 #18): downgraded to DEBUG. The original INFO line
+    # was useful when the CAS guard first shipped, but in steady-state it
+    # spams the journal whenever multiple workers race on a slow vision LLM
+    # cycle. DEBUG keeps the audit trail accessible via journalctl -u
+    # tickles-interpretation -p debug while leaving INFO clean.
+    if isinstance(result, str) and result.endswith(" 0") and expected_processed_at is not None:
+        logger.debug(
+            "update_media_status no-op: media_id=%s status=%s claim revoked "
+            "(expected_processed_at=%s) — stale worker dropped its result.",
+            media_id, status, expected_processed_at,
         )
-        async with shared_pool.acquire() as conn:
-            await conn.execute(sql, status, error, media_id)
-    else:
-        sql = (
-            "UPDATE public.media_items SET "
-            "  processing_status = $1, "
-            "  processed_at = NOW() "
-            "WHERE id = $2"
-        )
-        async with shared_pool.acquire() as conn:
-            await conn.execute(sql, status, media_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2725,6 +3441,11 @@ class InterpretationService:
         headline = media_row.get("headline", "")
         content = media_row.get("content", "")
         instruments_jsonb = media_row.get("instruments")
+        # Bug H round-3 review fix (BH2 #2): claim timestamp from
+        # `fetch_pending_media`'s atomic UPDATE — used as a CAS sentinel
+        # on the terminal `update_media_status` call so a stale-recovered
+        # worker can't blindly clobber a sibling's fresh claim.
+        claim_ts = media_row.get("claim_ts")
 
         # Resolve company
         shared_pool = await self._ensure_pool()
@@ -2743,8 +3464,19 @@ class InterpretationService:
         )
         symbol_from_llm = False
         if not symbol:
-            # Try regex extraction from headline + content
-            symbol = _extract_symbol_from_text(f"{headline} {content}")
+            # Strip Discord reply quotes ([Reply to @user]: <quoted text>)
+            # before symbol extraction. Without this, common words inside the
+            # PARENT message's quoted text (e.g. "looking for the OF link"
+            # → matches LINK ticker) get falsely attributed to the replying
+            # author's signal. We want the symbol to come from the replying
+            # author's OWN words (or, if they have none, from the chart via
+            # the LLM — which has its own anti-guessing rules).
+            clean_headline = strip_reply_prefix(headline or "")
+            clean_content = strip_reply_prefix(content or "")
+            # Try regex extraction from headline + content (reply-quote-stripped)
+            symbol = _extract_symbol_from_text(
+                f"{clean_headline} {clean_content}"
+            )
             if symbol:
                 exchange = "bybit"  # default venue; LLM/quant can refine
                 logger.info(
@@ -2766,7 +3498,8 @@ class InterpretationService:
         # Resolve trader profile (from news item author/channel)
         author = media_row.get("author", "unknown")
         channel = media_row.get("headline", "")  # fallback
-        platform = "discord"  # default; could be resolved from source metadata
+        news_source = (media_row.get("source") or "discord").lower()
+        platform = "telegram" if news_source == "telegram" else "discord"
         trader_profile_id = await get_or_create_trader_profile(
             shared_pool, platform, author or "unknown", display_name=author
         )
@@ -2805,6 +3538,7 @@ class InterpretationService:
                                 await update_media_status(
                                     shared_pool, media_id, "failed",
                                     error=f"CDN download HTTP {resp.status}",
+                                    expected_processed_at=claim_ts,
                                 )
                                 return {
                                     "media_id": media_id,
@@ -2816,6 +3550,7 @@ class InterpretationService:
                     await update_media_status(
                         shared_pool, media_id, "failed",
                         error=f"CDN download error: {e}"[:500],
+                        expected_processed_at=claim_ts,
                     )
                     return {
                         "media_id": media_id,
@@ -2825,7 +3560,8 @@ class InterpretationService:
             else:
                 logger.warning("Media file missing: %s (media_id=%s)", local_path, media_id)
                 await update_media_status(
-                    shared_pool, media_id, "failed", error="local_path missing or file not found"
+                    shared_pool, media_id, "failed", error="local_path missing or file not found",
+                    expected_processed_at=claim_ts,
                 )
                 return {"media_id": media_id, "status": "failed", "reason": "file_missing"}
 
@@ -2870,7 +3606,10 @@ class InterpretationService:
                     media_id,
                     dup_id,
                 )
-                await update_media_status(shared_pool, media_id, "analyzed")
+                await update_media_status(
+                    shared_pool, media_id, "analyzed",
+                    expected_processed_at=claim_ts,
+                )
                 return {
                     "media_id": media_id,
                     "status": "analyzed",
@@ -2884,7 +3623,13 @@ class InterpretationService:
         cid = new_correlation_id("sig")
 
         # --- LLM Track (with rate limiting) ---
-        news_context = f"{headline}\n{content}"[:1000]
+        # Bug 12 sibling: strip the `[Reply to @user]: <quoted>` prefix from
+        # both headline and content before handing them to the vision LLM,
+        # otherwise the LLM gets the parent message's quoted text as context
+        # and can hallucinate the wrong direction or symbol from it.
+        clean_headline_for_ctx = strip_reply_prefix(headline or "")
+        clean_content_for_ctx = strip_reply_prefix(content or "")
+        news_context = f"{clean_headline_for_ctx}\n{clean_content_for_ctx}"[:1000]
         context_window_raw = media_row.get("context_window")
         ctx_txt = _format_context_window(context_window_raw, author)
         if ctx_txt:
@@ -2897,9 +3642,17 @@ class InterpretationService:
             direction=None,  # not yet known at this stage
             trader_handle=author if author and author != "unknown" else None,
         )
+        # Inject source-specific color scheme rules for the vision LLM
+        source_color_rules = await _load_source_color_rules(shared_pool, news_source)
+        if source_color_rules:
+            recall_context = source_color_rules + "\n\n" + recall_context
         try:
+            # Round 10: rate-limit budget is per-model, so resolve fresh
+            # so the dropdown change immediately moves us onto the new
+            # model's bucket without a service restart.
+            _rl_model = await _runtime_get_model(SLOT_PRIMARY)
             await self._rate_limiter.acquire(
-                model=self.cfg.primary_model,
+                model=_rl_model,
                 estimated_cost_usd=0.005,
             )
             llm_result = await run_llm_track(
@@ -2918,6 +3671,7 @@ class InterpretationService:
                 media_id,
                 "skipped_vision_unavailable",
                 error=str(exc)[:500],
+                expected_processed_at=claim_ts,
             )
             return {
                 "media_id": media_id,
@@ -2951,6 +3705,7 @@ class InterpretationService:
                 media_id,
                 "skipped_not_chart",
                 error=f"prefilter: not a chart — {reason_snippet}"[:500],
+                expected_processed_at=claim_ts,
             )
             return {
                 "media_id": media_id,
@@ -2992,6 +3747,7 @@ class InterpretationService:
                 await update_media_status(
                     shared_pool, media_id, "failed",
                     error="unresolved_instrument_after_llm",
+                    expected_processed_at=claim_ts,
                 )
                 return {
                     "media_id": media_id,
@@ -3043,10 +3799,15 @@ class InterpretationService:
         consensus = run_consensus(llm_result, quant_result)
 
         # --- Param hash for reproducibility (Rule 1) ---
+        # Round 10: resolve fresh so the audit hash reflects what the
+        # InterpretationService actually used at this moment in time, not the
+        # value baked into self.cfg at process start.
+        _ph_primary = await _runtime_get_model(SLOT_PRIMARY)
+        _ph_fallback = await _runtime_get_model(SLOT_FALLBACK)
         param_hash = _param_hash(
             model=llm_result.model_used,
-            primary_model=self.cfg.primary_model,
-            fallback_model=self.cfg.fallback_model,
+            primary_model=_ph_primary,
+            fallback_model=_ph_fallback,
             freshness_threshold=self.cfg.freshness_threshold_s,
             max_age_hours=self.cfg.max_age_hours,
         )
@@ -3138,7 +3899,12 @@ class InterpretationService:
                         direction=direction,
                         entry_price=entry_p,
                         stop_loss=_parse_price_level(trade.get("stop_loss")),
-                        take_profit_1=_parse_price_level(trade.get("tp1")),
+                        # Bug Hunter 2 §10.2 — fall back to singular
+                        # ``take_profit`` when the LLM emits a single TP
+                        # without numbering it.
+                        take_profit_1=_parse_price_level(
+                            trade.get("tp1") or trade.get("take_profit")
+                        ),
                         detection_method=consensus.method,
                         detection_confidence=float(
                             trade.get("confidence")
@@ -3146,7 +3912,10 @@ class InterpretationService:
                             or consensus.confidence
                             or 0.0
                         ),
-                        raw_signal_text=f"{headline}\n{content}"[:2000],
+                        # Bug 12 sibling — persist the cleaned reply body so
+                        # downstream consumers (postmortem LLM, dashboard,
+                        # learning) never see the parent's quoted text.
+                        raw_signal_text=f"{clean_headline_for_ctx}\n{clean_content_for_ctx}"[:2000],
                         company_id=company,
                         entry_reason_trader=reason_trader,
                         entry_reason_llm=str(
@@ -3174,22 +3943,52 @@ class InterpretationService:
                         source, sig_id, exc,
                     )
 
-            # Pass 1 — trader's marked trades
+            # Pass 1 — trader's marked trades.
+            # Round 9 (2026-05-24) — Trader-setup gate: only book a position
+            # with signal_source='trader' when the trade is backed by explicit
+            # evidence the human actually called the setup. See
+            # `_is_explicit_trader_setup` for the rules. Trades that fail the
+            # gate are dropped here (the chart_hacker pass below still gets
+            # to produce its own independent opinion if the LLM emitted one).
             trader_actor_id = f"{company}_trader_{trader_profile_id}"
+            news_text_for_gate = (
+                f"{clean_headline_for_ctx or ''}\n{clean_content_for_ctx or ''}"
+            )
+            prompt_version_for_gate = getattr(llm_result, "prompt_version", "") or ""
             for trade in (llm_result.trader_trades or []):
+                ok, evidence = _is_explicit_trader_setup(
+                    trade, news_text_for_gate, prompt_version_for_gate,
+                )
+                if not ok:
+                    logger.info(
+                        "Round 9 gate: dropping trader_trade with no explicit "
+                        "evidence (sig_id=%s news_item_id=%s symbol=%s "
+                        "direction=%s prompt=%s reason=%s) — chart_hacker "
+                        "track may still produce an inferred trade.",
+                        sig_id, news_item_id, symbol,
+                        trade.get("direction"), prompt_version_for_gate,
+                        evidence,
+                    )
+                    continue
+                # Stash the evidence code on the trade so downstream auditing
+                # can see WHY this trade survived the gate. _write_one ignores
+                # unknown keys.
+                trade.setdefault("_setup_evidence", evidence)
                 await _write_one(
                     trade=trade,
                     source="trader",
                     profile_id=trader_profile_id,
                     actor_type_val="trader_human",
                     actor_id_val=trader_actor_id,
-                    reason_trader=content[:2000] if content else None,
+                    # Bug 12 sibling — store the stripped reply body, not the
+                    # full `[Reply to @parent]: ...` blob.
+                    reason_trader=clean_content_for_ctx[:2000] if clean_content_for_ctx else None,
                     reason_agent=None,
                 )
 
             # Pass 2 — chart_hacker's independent analysis
             if chart_hacker_pid is not None:
-                ch_actor_id = f"{company}_chart_hacker"
+                ch_actor_id = f"{company}_rose_ch" if news_source == "telegram" else f"{company}_chart_hacker"
                 for trade in (llm_result.chart_hacker_trades or []):
                     await _write_one(
                         trade=trade,
@@ -3229,9 +4028,10 @@ class InterpretationService:
                         take_profit_1=_parse_price_level(llm_result.levels.get("take_profit")) if llm_result.levels else None,
                         detection_method=consensus.method,
                         detection_confidence=consensus.confidence,
-                        raw_signal_text=f"{headline}\n{content}"[:2000],
+                        # Bug 12 sibling — also strip in legacy fallback.
+                        raw_signal_text=f"{clean_headline_for_ctx}\n{clean_content_for_ctx}"[:2000],
                         company_id=company,
-                        entry_reason_trader=content[:2000] if content else None,
+                        entry_reason_trader=clean_content_for_ctx[:2000] if clean_content_for_ctx else None,
                         entry_reason_llm=llm_result.reasoning[:2000] if llm_result.reasoning else None,
                         correlation_id=cid,
                         signal_source="trader",
@@ -3249,7 +4049,13 @@ class InterpretationService:
                     )
 
         # --- Update media status ---
-        await update_media_status(shared_pool, media_id, "analyzed")
+        # Bug H round-3 review fix: pass the claim timestamp so the UPDATE is
+        # CAS-protected — a stale-recovered worker that finishes after a
+        # sibling reclaim cannot clobber the sibling's `analyzing` status.
+        await update_media_status(
+            shared_pool, media_id, "analyzed",
+            expected_processed_at=claim_ts,
+        )
 
         # --- MemU broadcast for high-confidence signals ---
         if consensus.confidence >= 0.7 and consensus.direction in ("long", "short"):
@@ -3287,6 +4093,51 @@ class InterpretationService:
             "quant_cost_usd": round(quant_result.cost_usd, 6),
         }
 
+    async def _mark_news_terminal(
+        self,
+        news_item_id: int,
+        terminal_status: str,
+    ) -> None:
+        """Mark a text-only news_item as terminally processed so the pending-text
+        queue (`_fetch_pending_text_news`) stops re-fetching it every cycle.
+
+        Bug C2 fix: previously, text-only messages that hit a skip path
+        (`skipped_meme`, `skipped_commentary`, `no_signal_detected`,
+        `skipped_unresolved_instrument`) returned without writing any record.
+        The queue's `WHERE enrichment_status NOT IN (...) AND NOT EXISTS (signal
+        interpretation)` predicate kept matching them forever, paying for an
+        LLM call every 5 minutes per stuck message. Setting `enrichment_status`
+        to a terminal value drops them from the queue permanently.
+
+        Allowed terminal values (must already be in the queue's NOT-IN list at
+        `_fetch_pending_text_news`): 'non_signal', 'skipped', 'duplicate_zone'.
+        """
+        if terminal_status not in ("non_signal", "skipped", "duplicate_zone"):
+            logger.warning(
+                "_mark_news_terminal: invalid terminal_status=%r for news_item_id=%s — skipping",
+                terminal_status,
+                news_item_id,
+            )
+            return
+        try:
+            shared_pool = await self._ensure_pool()
+            await shared_pool.execute(
+                "UPDATE public.news_items "
+                "SET enrichment_status = $1, enriched_at = COALESCE(enriched_at, NOW()) "
+                "WHERE id = $2 "
+                "  AND (enrichment_status IS NULL OR enrichment_status NOT IN ('non_signal','skipped','duplicate_zone'))",
+                (terminal_status, news_item_id),
+            )
+        except Exception as exc:
+            # Non-fatal: if this UPDATE fails the message will be re-tried next
+            # cycle, but at least we logged it. Don't poison the queue tick.
+            logger.warning(
+                "_mark_news_terminal: failed to mark news_item_id=%s terminal=%s: %s",
+                news_item_id,
+                terminal_status,
+                exc,
+            )
+
     async def _process_text_one(
         self,
         news_row: Dict[str, Any],
@@ -3303,13 +4154,16 @@ class InterpretationService:
         instruments_jsonb = news_row.get("instruments")
 
         if not content or len(content.strip()) < 10:
+            await self._mark_news_terminal(news_item_id, "skipped")
             return {"news_item_id": news_item_id, "status": "skipped_no_content"}
 
         # Classify message type
         msg_type = classify_message_type(content)
         if msg_type == "meme":
+            await self._mark_news_terminal(news_item_id, "skipped")
             return {"news_item_id": news_item_id, "status": "skipped_meme"}
         if msg_type == "commentary" and len(content.strip()) < 100:
+            await self._mark_news_terminal(news_item_id, "skipped")
             return {"news_item_id": news_item_id, "status": "skipped_commentary"}
 
         # Extract signal
@@ -3325,6 +4179,7 @@ class InterpretationService:
             signal = None
 
         if not signal:
+            await self._mark_news_terminal(news_item_id, "non_signal")
             return {"news_item_id": news_item_id, "status": "no_signal_detected"}
 
         # Resolve company and instrument
@@ -3348,6 +4203,8 @@ class InterpretationService:
                 news_item_id,
                 symbol,
             )
+            # Bug C2: mark terminal so we don't re-LLM this every 5 min forever.
+            await self._mark_news_terminal(news_item_id, "skipped")
             return {"news_item_id": news_item_id, "status": "skipped_unresolved_instrument"}
 
         # Resolve trader profile
@@ -3458,6 +4315,15 @@ class InterpretationService:
         )
 
         # --- Wire to tracked_positions ---
+        # Bug A round-3 review fix (BH1 #1, BH2 #1, CA1 §FixA): variables MUST
+        # be initialised BEFORE the `if sig_id is not None:` guard, otherwise
+        # when `write_signal_interpretation` returns None (ON CONFLICT DO
+        # NOTHING — see line ~1990), the references at the rollback / status
+        # / return blocks below trigger NameError and crash the entire
+        # text-processing loop. The previous round-3 patch placed these
+        # inside the guarded block — that was the root NameError.
+        text_position_id: Optional[int] = None
+        text_position_failed = False
         if sig_id is not None:
             try:
                 text_symbol = symbol or signal.get("symbol", "UNKNOWN")
@@ -3468,7 +4334,7 @@ class InterpretationService:
                 text_entry_p, text_entry_src = await _resolve_entry_price(
                     shared_pool, text_levels, text_symbol or "", exchange or "bybit",
                 )
-                await create_tracked_position_from_interpretation(
+                text_position_id = await create_tracked_position_from_interpretation(
                     shared_pool=shared_pool,
                     signal_interpretation_id=sig_id,
                     news_item_id=news_item_id,
@@ -3482,30 +4348,102 @@ class InterpretationService:
                     take_profit_1=_parse_price_level((signal.get("take_profits") or [None])[0]),
                     detection_method="text_extraction",
                     detection_confidence=signal.get("confidence", 0.5),
-                    raw_signal_text=content[:2000],
+                    # Bug 12 sibling — strip the Discord reply prefix from
+                    # text-only signal persistence too. Without this, the
+                    # parent's quoted text leaks into raw_signal_text and
+                    # entry_reason_trader, polluting postmortems and the UI.
+                    raw_signal_text=strip_reply_prefix(content)[:2000] if content else "",
                     company_id=company,
-                    entry_reason_trader=content[:2000] if content else None,
+                    entry_reason_trader=(
+                        strip_reply_prefix(content)[:2000] if content else None
+                    ),
                     entry_price_source=text_entry_src,
                 )
             except Exception as exc:
-                logger.warning("Failed to create tracked_position for text sig_id=%s: %s", sig_id, exc)
+                # Bug Hunter 1 §H3 fix:
+                #   Previously this swallowed the exception and the function
+                #   still returned `status='analyzed'` to the caller. Result:
+                #   the dashboard showed the signal as "analyzed", but no
+                #   `tracked_position` row existed → no monitoring, no P&L,
+                #   no postmortem. We now flag the failure and surface it in
+                #   the result so callers (and the daemon's log line) see it.
+                text_position_failed = True
+                logger.warning(
+                    "Failed to create tracked_position for text sig_id=%s: %s",
+                    sig_id, exc,
+                )
+
+        # Bug A fix (2026-05-24 second-round audit):
+        #   When position creation fails AFTER signal_interpretations was
+        #   already INSERTed, the row becomes an "orphan signal" — the queue's
+        #   `NOT EXISTS (signal_interpretations …)` check then sees the news
+        #   item as already processed and skips it forever, even though no
+        #   tracked_position exists. A transient DB hiccup turns into permanent
+        #   signal loss.
+        #
+        #   Fix: roll back the orphan signal_interpretations row on text-path
+        #   failure so the news_item is eligible for retry on the next cycle.
+        #   Text extraction is cheap (regex + light LLM), so retries are not a
+        #   cost concern. We deliberately do NOT apply the same rollback to the
+        #   media path: vision LLM is expensive and the analysis itself is
+        #   still valid even when no tracked_position is created — the orphan
+        #   there is data the operator can act on.
+        if text_position_failed and sig_id is not None:
+            try:
+                async with shared_pool.acquire() as conn:
+                    deleted = await conn.execute(
+                        "DELETE FROM public.signal_interpretations "
+                        "WHERE id = $1 "
+                        "  AND NOT EXISTS ("
+                        "    SELECT 1 FROM public.tracked_positions tp "
+                        "    WHERE tp.signal_interpretation_id = $1"
+                        "  )",
+                        sig_id,
+                    )
+                logger.warning(
+                    "Bug A: rolled back orphan signal_interpretation id=%s for "
+                    "news_item_id=%s after position creation failure (delete=%s); "
+                    "news_item will be retried next cycle.",
+                    sig_id, news_item_id, deleted,
+                )
+                sig_id = None
+            except Exception as cleanup_exc:
+                # Best-effort rollback. If the DELETE itself fails, the orphan
+                # remains and the news_item is permanently skipped — but we
+                # surface this loud and clear so the operator knows.
+                logger.error(
+                    "Bug A: orphan signal_interpretation id=%s rollback FAILED "
+                    "(news_item_id=%s): %s. News item will be permanently "
+                    "skipped until manually fixed.",
+                    sig_id, news_item_id, cleanup_exc,
+                )
 
         logger.info(
-            "Text signal written for news_item_id=%s: %s %s @ %.2f",
+            "Text signal written for news_item_id=%s: %s %s @ %.2f (position_id=%s)",
             news_item_id,
             signal["symbol"],
             signal["direction"],
             signal["entry"],
+            text_position_id if text_position_id else "FAILED",
         )
+
+        result_status = "analyzed"
+        if text_position_failed:
+            result_status = "analyzed_position_create_failed"
+        elif text_position_id is None:
+            # Position skipped intentionally (e.g. dedup) — distinguish from
+            # a hard failure.
+            result_status = "analyzed_no_position"
 
         return {
             "news_item_id": news_item_id,
-            "status": "analyzed",
+            "status": result_status,
             "direction": signal["direction"],
             "confidence": signal.get("confidence", 0.5),
             "method": "text_extraction",
             "symbol": signal["symbol"],
             "entry": signal["entry"],
+            "position_id": text_position_id,
         }
 
     async def run_cycle(self) -> Dict[str, Any]:
@@ -3523,6 +4461,7 @@ class InterpretationService:
         unsupported_media_swept = 0
         stale_news_drained = 0
         local_media_cleaned = 0
+        stale_analyzing_recovered = 0
         try:
             unsupported_media_swept = await cleanup_unsupported_media(
                 shared_pool,
@@ -3530,6 +4469,17 @@ class InterpretationService:
             )
         except Exception as exc:
             logger.warning("cleanup_unsupported_media failed: %s", exc)
+        # Bug C3 companion — recover rows pinned at 'analyzing' by a crashed
+        # worker. Bug H round-3 review fix (BH2 #6, CA1 Fix H #3, CA2 P1.2):
+        # threshold raised to 60 minutes so a healthy worker on a slow vision
+        # LLM (p99 ~16 min) is never falsely requeued and double-charged.
+        try:
+            stale_analyzing_recovered = await recover_stale_analyzing(
+                shared_pool,
+                stale_minutes=60,
+            )
+        except Exception as exc:
+            logger.warning("recover_stale_analyzing failed: %s", exc)
         try:
             stale_news_drained = await cleanup_stale_pending_news(
                 shared_pool,
@@ -3544,12 +4494,13 @@ class InterpretationService:
             )
         except Exception as exc:
             logger.warning("cleanup_expired_local_media failed: %s", exc)
-        if unsupported_media_swept or stale_news_drained or local_media_cleaned:
+        if unsupported_media_swept or stale_news_drained or local_media_cleaned or stale_analyzing_recovered:
             logger.info(
-                "Feed hygiene: unsupported_media_swept=%d stale_news_drained=%d local_media_cleaned=%d",
+                "Feed hygiene: unsupported_media_swept=%d stale_news_drained=%d local_media_cleaned=%d stale_analyzing_recovered=%d",
                 unsupported_media_swept,
                 stale_news_drained,
                 local_media_cleaned,
+                stale_analyzing_recovered,
             )
 
         # ── Media track ───────────────────────────────────────────────
@@ -3575,6 +4526,7 @@ class InterpretationService:
                             row["media_id"],
                             "failed",
                             error=f"unexpected: {exc}"[:500],
+                            expected_processed_at=row.get("claim_ts"),
                         )
                     except Exception:
                         pass
@@ -3612,17 +4564,27 @@ class InterpretationService:
         failed_media = sum(1 for r in media_results if r.get("status") == "failed")
         analyzed_text = sum(1 for r in text_results if r.get("status") == "analyzed")
         failed_text = sum(1 for r in text_results if r.get("status") == "failed")
+        # Round-6 sweep (BH2 #7): the text path can return a third terminal
+        # status — `analyzed_position_create_failed` — when signal_interp was
+        # written but the tracked_position INSERT raised. Round-3 Fix A rolls
+        # back the orphan sig_interp so the news_item is retriable, but the
+        # operator had no metric for "how often is this happening" — count it.
+        position_create_failed_text = sum(
+            1 for r in text_results
+            if r.get("status") == "analyzed_position_create_failed"
+        )
 
         logger.info(
             "Interpretation cycle complete: media(analyzed=%d skipped_vision=%d "
-            "skipped_not_chart=%d failed=%d) text(analyzed=%d failed=%d) "
-            "hygiene(unsupported=%d stale_news=%d)",
+            "skipped_not_chart=%d failed=%d) text(analyzed=%d failed=%d "
+            "position_create_failed=%d) hygiene(unsupported=%d stale_news=%d)",
             analyzed_media,
             skipped_media,
             skipped_not_chart,
             failed_media,
             analyzed_text,
             failed_text,
+            position_create_failed_text,
             unsupported_media_swept,
             stale_news_drained,
         )
@@ -3634,6 +4596,7 @@ class InterpretationService:
             "failed_media": failed_media,
             "analyzed_text": analyzed_text,
             "failed_text": failed_text,
+            "position_create_failed_text": position_create_failed_text,
             "unsupported_media_swept": unsupported_media_swept,
             "stale_news_drained": stale_news_drained,
             "results": media_results + text_results,

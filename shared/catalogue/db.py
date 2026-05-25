@@ -312,7 +312,7 @@ async def get_stats() -> Dict[str, int]:
         "SELECT COUNT(*) FROM public.watched_users WHERE is_enabled = TRUE"
     )
     pos = await pool.fetch_val(
-        "SELECT COUNT(*) FROM public.tracked_positions WHERE status IN ('open','partial_close')"
+        "SELECT COUNT(*) FROM public.tracked_positions WHERE status IN ('open','partial_exit')"
     )
     return {
         "active_sources": int(src or 0),

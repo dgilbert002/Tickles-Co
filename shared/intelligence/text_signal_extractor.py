@@ -337,7 +337,12 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
 
         symbol = parsed.get("symbol")
         direction = parsed.get("direction")
+        # Bug 10 sibling defense: LLMs sometimes emit `entry_price` instead of
+        # the singular `entry` key the system prompt asks for. Accept either
+        # so we don't silently drop a valid signal.
         entry = parsed.get("entry")
+        if entry is None:
+            entry = parsed.get("entry_price")
 
         if not symbol or not direction or not entry:
             return None
@@ -355,7 +360,21 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
         for i in range(1, 4):
             tp = parsed.get(f"take_profit_{i}")
             if tp:
-                tps.append(float(tp))
+                try:
+                    tps.append(float(tp))
+                except (TypeError, ValueError):
+                    pass
+        # Bug 10 sibling defense: LLMs sometimes emit a singular `take_profit`
+        # even when the system prompt asks for numbered keys. If we got
+        # nothing from the numbered keys, try the singular form so we don't
+        # silently drop the trader's TP.
+        if not tps:
+            singular_tp = parsed.get("take_profit")
+            if singular_tp is not None:
+                try:
+                    tps.append(float(singular_tp))
+                except (TypeError, ValueError):
+                    pass
 
         result: Dict[str, Any] = {
             "symbol": symbol.upper(),
@@ -386,21 +405,16 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
 # ---------------------------------------------------------------------------
 
 def strip_reply_prefix(text: str) -> str:
-    """Strips the Discord reply formatting quote from the text.
+    """Discord reply-prefix stripper. Thin re-export of the canonical helper.
 
-    Format:
-        [Reply to @username]: quoted_text...
-        actual_message_text...
+    Kept as a module-level binding because many existing callers in the
+    intelligence layer import
+    ``shared.intelligence.text_signal_extractor.strip_reply_prefix``
+    directly. The actual implementation lives in
+    ``shared.utils.reply_prefix`` so all layers share one source of truth.
     """
-    if not text:
-        return ""
-    if text.startswith("[Reply to @"):
-        parts = text.split("\n", 1)
-        if len(parts) > 1:
-            return parts[1]
-        else:
-            return ""  # Quoted text but no actual message
-    return text
+    from shared.utils.reply_prefix import strip_reply_prefix as _impl
+    return _impl(text)
 
 
 async def extract_signal_from_text(

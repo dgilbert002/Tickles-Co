@@ -119,7 +119,7 @@ async def _load_high_water_marks(db_pool: DatabasePool) -> Dict[str, str]:
     hwm: Dict[str, str] = {}
     try:
         rows = await db_pool.fetch_all(
-            "SELECT config_key, config_value FROM tickles_shared.system_config "
+            "SELECT config_key, config_value FROM system_config "
             "WHERE namespace = 'telegram_hwm'"
         )
         for row in rows:
@@ -478,16 +478,14 @@ class TelegramCollector(BaseCollector):
         else:
             # Try JSON file first, then env vars
             file_cfg = _load_config_from_file()
-            if file_cfg.get("api_id"):
-                self._api_id = file_cfg.get("api_id", "")
-                self._api_hash = file_cfg.get("api_hash", "")
-                self._session_string = file_cfg.get("session_string", "")
+            # API credentials always from env vars (JSON just stores channels)
+            self._api_id = os.environ.get("TELEGRAM_API_ID", "")
+            self._api_hash = os.environ.get("TELEGRAM_API_HASH", "")
+            self._session_string = os.environ.get("TELEGRAM_SESSION_STRING", "")
+            if file_cfg.get("channels"):
                 self._channels = file_cfg.get("channels", [])
             else:
                 env_cfg = _load_config_from_env()
-                self._api_id = env_cfg.get("api_id", "")
-                self._api_hash = env_cfg.get("api_hash", "")
-                self._session_string = env_cfg.get("session_string", "")
                 self._channels = env_cfg.get("channels", [])
 
         # Normalize channel config
@@ -656,7 +654,7 @@ class TelegramCollector(BaseCollector):
             except Exception as exc:
                 logger.warning("Failed to load collector_catalog for source_id=%s: %s", source_id, exc)
 
-        zone_filter_enabled = catalog.get("zone_filter_enabled", True) if catalog else True
+        zone_filter_enabled = catalog.get("zone_filter_enabled", False) if catalog else False  # default off for Telegram
         per_source_threshold = catalog.get("zone_filter_threshold") if catalog else None
 
         if zone_filter_enabled and item.content:
@@ -747,7 +745,11 @@ class TelegramCollector(BaseCollector):
                 channel_name = channel_cfg.get("name", str(channel_id))
 
                 try:
-                    entity = await client.get_entity(channel_id)
+                    # Channel ID may be string from JSON; convert to int for Telethon
+                    ch_id = channel_id
+                    if isinstance(ch_id, str) and ch_id.lstrip('-').isdigit():
+                        ch_id = int(ch_id)
+                    entity = await client.get_entity(ch_id)
                     channel_info = {
                         "id": str(entity.id),
                         "name": getattr(entity, "title", channel_name),
@@ -759,7 +761,7 @@ class TelegramCollector(BaseCollector):
                     after_id = self._hwm.get(str(entity.id))
 
                     raw_messages = []
-                    limit = self.config.max_messages_per_channel if self.config else 200
+                    limit = min(self.config.max_messages_per_channel if self.config else 200, 20)
 
                     if after_id:
                         async for msg in client.iter_messages(
@@ -886,6 +888,12 @@ class TelegramCollector(BaseCollector):
                 len(items),
                 len(self._channels),
             )
+
+            # Write to DB
+            if items:
+                pool = await self._ensure_db_pool()
+                inserted = await self.write_to_db(items, pool)
+                logger.info("Telegram: wrote %d items to news_items/media_items", inserted)
 
         except ImportError:
             logger.error(

@@ -10,8 +10,15 @@ WorkingDirectory=/opt/tickles
 EnvironmentFile=-/opt/tickles/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/tickles
-Environment=POSITION_MONITOR_INTERVAL_S=60
+# Round 12 (2026-05-24): legacy POSITION_MONITOR_INTERVAL_S alias removed.
+# Code reads POSITION_MONITOR_POLL_S (Round 11 rename); the legacy var was
+# never read by the daemon, only kept during the transition.
+Environment=POSITION_MONITOR_POLL_S=60
 Environment=POSITION_MONITOR_BATCH=50
+# Round 11 (2026-05-24): widened from 1800 (30 min) → 86400 (24 h) so the
+# monitor can catch up after restarts / brief candle-fetch outages. Touches
+# outside the fast 30-min window are tagged retro_activated:<utc>.
+Environment=POSITION_MONITOR_ACTIVATION_LOOKBACK_S=86400
 ExecStart=/usr/bin/python3 -m shared.intelligence.position_monitor
 Restart=always
 RestartSec=10

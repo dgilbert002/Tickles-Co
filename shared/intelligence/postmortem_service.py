@@ -489,7 +489,25 @@ class PostMortemService:
         Returns:
             Candle records ordered oldest-first.
         """
+        # Bug H3 fix (Bug Hunter 2 §11.1 + Code Analyzer 2 §2.1):
+        #   Previously this was `ORDER BY DESC LIMIT 50` (1m candles) over the
+        #   full open-window. A position open longer than 50 minutes had its
+        #   entry-side candles slide off the bottom of the window — the LLM
+        #   only ever saw the last 50 minutes of price action near the close.
+        #   The resulting postmortem narrative would misattribute why the
+        #   trade worked or failed, because it never saw the entry context.
+        #
+        #   Slide guard: if the [start, end] span exceeds candle_limit minutes,
+        #   we anchor at `start` (opened_at) and clamp `end` to
+        #   `start + candle_limit minutes` so the LLM always gets the entry
+        #   context. We then ORDER BY ASC (no reversal needed) within that
+        #   compressed window.
         try:
+            from datetime import timedelta as _td
+            window_seconds = (end - start).total_seconds()
+            limit_seconds = float(self.candle_limit) * 60.0  # 1m bars
+            if window_seconds > limit_seconds:
+                end = start + _td(seconds=limit_seconds)
             rows = await conn.fetch(
                 """
                 SELECT timestamp, open, high, low, close, volume
@@ -497,7 +515,7 @@ class PostMortemService:
                 WHERE instrument_id = $1
                   AND timeframe = '1m'::timeframe_t
                   AND timestamp BETWEEN $2 AND $3
-                ORDER BY timestamp DESC
+                ORDER BY timestamp ASC
                 LIMIT $4
                 """,
                 instrument_id,
@@ -514,7 +532,7 @@ class PostMortemService:
                 exc,
             )
             return []
-        return list(reversed(rows))
+        return list(rows)
 
     # ------------------------------------------------------------------
     # LLM call
@@ -530,6 +548,12 @@ class PostMortemService:
         fall back to ``'unknown'`` strings so the prompt is always
         well-formed.
         """
+        # Bug 12 sibling — defensive strip for legacy rows whose
+        # entry_reason_trader was persisted before the upstream fix.
+        # New rows are already stripped at write time; this guard ensures
+        # the postmortem LLM never sees a quoted parent message even when
+        # backfilling old positions.
+        from shared.utils.reply_prefix import strip_reply_prefix as _srp
         template = self._prompts.get("postmortem", {}).get("user_prompt_template", "")
         candle_rows = [
             {
@@ -553,7 +577,7 @@ class PostMortemService:
             max_profit_pct=_decimal_str(position["max_profit_pct"]),
             time_in_trade_minutes=position["time_in_trade_minutes"] or 0,
             realized_pnl_usd_final=_decimal_str(position["realized_pnl_usd_final"]),
-            entry_reason_trader=(position["entry_reason_trader"] or "(none provided)"),
+            entry_reason_trader=(_srp(position["entry_reason_trader"]) or "(none provided)"),
             entry_reason_llm=(position["entry_reason_llm"] or "(none provided)"),
             exit_reason=(position["exit_reason"] or "(none recorded)"),
             candles_json=json.dumps(candle_rows, separators=(",", ":")),

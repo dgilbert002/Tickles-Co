@@ -1,0 +1,12 @@
+[Unit]
+Description=Tickles Auto-Optimizer — backtest-driven SL/TP multiplier tuning
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/tickles
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m shared.backtest.auto_optimizer --once
+StandardOutput=append:/var/log/tickles/auto_optimizer.log
+StandardError=append:/var/log/tickles/auto_optimizer.log

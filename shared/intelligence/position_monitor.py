@@ -6,7 +6,7 @@ Purpose: Fixed daemon that continuously monitors open tracked_positions,
 Location: /opt/tickles/shared/intelligence/position_monitor.py
 
 Design:
-  * Polls tickles_shared.tracked_positions for status IN ('open','partial_close').
+  * Polls tickles_shared.tracked_positions for status IN ('open','partial_exit').
   * For each position, reads the latest candle from public.candles for the
     resolved instrument + timeframe (default '1m').
   * Computes: unrealized_pnl_usd, pnl_pct, distance_to_sl, distance_to_tp,
@@ -67,6 +67,194 @@ from shared.intelligence.position_quant import (
 
 logger = logging.getLogger("tickles.intelligence.position_monitor")
 
+
+# ---------------------------------------------------------------------------
+# Round 12 (2026-05-24): Multi-venue OHLCV fallback.
+#
+# Pre-Round-12, every CCXT fallback path hardcoded ``exchange or "bybit"``.
+# That meant Capital.com CFDs (GOLD, US100, USDJPY, etc.) and obscure alts
+# routed elsewhere produced "bybit does not have market symbol" errors on
+# every monitor cycle. The router now stamps tracked_positions.instrument_
+# exchange with the correct venue at INSERT time; this helper picks the
+# right adapter based on that value.
+#
+# Rules:
+#   * exchange == "capital.com" → CapitalAdapter; symbol passed in is the
+#     bare epic name (matches what unified_instruments stores).
+#   * Anything else → CCXTAdapter with the supplied exchange id; we still
+#     try _candidate_symbols() form-variants because the local DB may have
+#     slash form even when CCXT wants ``BTC/USDT:USDT``.
+#
+# This helper is intentionally NOT a class method — it has no state, only
+# adapter caching, which is owned by the caller's ``adapters`` dict.
+# ---------------------------------------------------------------------------
+async def _fetch_ohlcv_for_market(
+    symbol: str,
+    exchange: Optional[str],
+    timeframe: str,
+    since_utc: datetime,
+    *,
+    limit: int = 1000,
+    adapters: Optional[Dict[str, Any]] = None,
+) -> List[Any]:
+    """Fetch OHLCV candles via the right adapter for the routed exchange.
+
+    Returns a list of ``Candle`` objects from the adapter (each has
+    ``.timestamp``, ``.high``, ``.low``, ``.close``). Empty list if the
+    adapter can't find the market or fails — callers handle the empty
+    case as "no candles available, leave pending".
+
+    Args:
+        symbol: For CCXT exchanges, the unified slash form (or perp form);
+            for capital.com, the bare epic name (``GOLD``, ``US100``).
+        exchange: Routed exchange. ``capital.com`` triggers Capital path;
+            ``bybit``/``bitget``/``blofin`` use CCXT; ``None`` defaults
+            to ``bybit`` for backward compatibility with rows written
+            before Round 12 (the row wasn't routed → fall back to old
+            behaviour, log loudly).
+        timeframe: Candle timeframe (``"1m"``, ``"5m"``, etc.).
+        since_utc: Fetch candles strictly after this UTC timestamp.
+        limit: Max candles to fetch.
+        adapters: Optional reuse cache keyed by exchange id.
+
+    Returns:
+        List of Candle objects. Always returns a list, never raises.
+        Errors are logged + swallowed because monitor cycles must
+        continue regardless of one symbol's failure.
+    """
+    ex_id = (exchange or "").lower().strip() or "bybit"
+
+    if ex_id == "capital.com":
+        from shared.connectors.capital_adapter import CapitalAdapter
+        # Round 12 (2026-05-24): Capital.com's /prices/{epic} endpoint
+        # caps the requested window per resolution. Empirically (verified
+        # against demo on 2026-05-24): 1m allows up to ~12h, longer
+        # ranges return ``error.invalid.max.daterange``. The monitor
+        # only needs the recent window (activation lookback + SL/TP
+        # wicks); anything older is academic. Clamp before the call.
+        _CAPITAL_TF_MAX_LOOKBACK = {
+            "1m":  timedelta(hours=10),    # Capital cap is ~12h; 10h gives margin
+            "5m":  timedelta(days=2),
+            "15m": timedelta(days=10),
+            "1h":  timedelta(days=40),
+            "4h":  timedelta(days=120),
+            "1d":  timedelta(days=900),
+        }
+        max_lookback = _CAPITAL_TF_MAX_LOOKBACK.get(timeframe, timedelta(hours=10))
+        now_utc = datetime.now(timezone.utc)
+        clamp_floor = now_utc - max_lookback
+        if since_utc < clamp_floor:
+            logger.debug(
+                "_fetch_ohlcv_for_market(capital.com): clamped since=%s -> %s "
+                "for tf=%s (Capital max-range guard)",
+                since_utc, clamp_floor, timeframe,
+            )
+            since_utc = clamp_floor
+        adapter = None
+        is_cached = False
+        if adapters is not None and "capital.com" in adapters:
+            adapter = adapters["capital.com"]
+            is_cached = True
+        else:
+            env = os.environ.get("CAPITAL_ENV", "demo")
+            adapter = CapitalAdapter(environment=env)
+            email = os.environ.get("CAPITAL_EMAIL", "")
+            password = os.environ.get("CAPITAL_PASSWORD", "")
+            api_key = os.environ.get("CAPITAL_API_KEY", "")
+            if not (email and password and api_key):
+                logger.warning(
+                    "_fetch_ohlcv_for_market: Capital.com credentials missing "
+                    "(CAPITAL_EMAIL/PASSWORD/API_KEY) — cannot fetch %s",
+                    symbol,
+                )
+                return []
+            try:
+                await adapter.authenticate(email, password, api_key)
+            except Exception as auth_exc:
+                logger.warning(
+                    "_fetch_ohlcv_for_market: Capital auth failed for %s: %s",
+                    symbol, auth_exc,
+                )
+                return []
+            if adapters is not None:
+                adapters["capital.com"] = adapter
+                is_cached = True
+        try:
+            candles = await adapter.fetch_ohlcv(
+                epic=symbol, timeframe=timeframe, since=since_utc, limit=limit,
+            )
+            return list(candles or [])
+        except Exception as exc:
+            # Round 12 (2026-05-24): Capital surfaces several "not really
+            # an error" conditions as 404s:
+            #   * error.prices.not-found  → market closed (forex/commodity
+            #     on weekend), no prices in the requested window
+            #   * error.not-found.epic    → epic spelling wrong (rare with
+            #     unified_instruments-driven routing)
+            # Downgrade the noisy "no prices" path to DEBUG so weekends
+            # don't flood the log; treat genuine config issues as WARN.
+            msg = str(exc)
+            if "prices.not-found" in msg:
+                logger.debug(
+                    "_fetch_ohlcv_for_market(capital.com): no prices in "
+                    "window for epic=%s tf=%s (likely market closed)",
+                    symbol, timeframe,
+                )
+            else:
+                logger.warning(
+                    "_fetch_ohlcv_for_market: Capital fetch_ohlcv failed for "
+                    "epic=%s tf=%s: %s",
+                    symbol, timeframe, exc,
+                )
+            return []
+        finally:
+            if not is_cached:
+                try:
+                    await adapter.close()
+                except Exception:
+                    pass
+
+    # CCXT path (bybit / bitget / blofin / unknown)
+    from shared.connectors.ccxt_adapter import CCXTAdapter
+    from shared.market_data.live_price import _candidate_symbols
+    adapter = None
+    is_cached = False
+    if adapters is not None and ex_id in adapters:
+        adapter = adapters[ex_id]
+        is_cached = True
+    else:
+        adapter = CCXTAdapter(ex_id)
+        if adapters is not None:
+            adapters[ex_id] = adapter
+            is_cached = True
+    try:
+        candidates = _candidate_symbols(symbol)
+        last_err: Optional[Exception] = None
+        for cand in candidates:
+            try:
+                candles = await adapter.fetch_ohlcv(
+                    symbol=cand, timeframe=timeframe,
+                    since=since_utc, limit=limit,
+                )
+                if candles:
+                    return list(candles)
+            except Exception as sym_exc:
+                last_err = sym_exc
+                continue
+        if last_err is not None:
+            logger.debug(
+                "_fetch_ohlcv_for_market: all CCXT symbol forms failed for "
+                "%s on %s tf=%s: %s",
+                symbol, ex_id, timeframe, last_err,
+            )
+        return []
+    finally:
+        if not is_cached:
+            try:
+                await adapter.close()
+            except Exception:
+                pass
+
 # ---------------------------------------------------------------------------
 # Config (env-driven, no hardcodes)
 # ---------------------------------------------------------------------------
@@ -78,9 +266,20 @@ DEFAULT_TIMEFRAME = os.environ.get("POSITION_MONITOR_TF", "1m")
 # -> open transition must be NEWER than ``now - activation_lookback_s``. This
 # stops the monitor from "catching up" on touches that happened during
 # previous downtime (the agent wasn't watching → it doesn't get the fill).
-# Default 30 minutes — generous enough to survive a single restart, tight
-# enough that day-old touches don't activate retroactively.
-ACTIVATION_LOOKBACK_S = float(os.environ.get("POSITION_MONITOR_ACTIVATION_LOOKBACK_S", "1800"))
+#
+# Round 11 (2026-05-24): widened from 30 min → 24 h. The previous bound was
+# too tight: a brief outage or candle-fetch failure on a less-traded symbol
+# meant a pending row whose entry was touched even an hour ago would never
+# auto-activate, polluting the dashboard with "16% away" rows that should
+# have already been retired. 24 h covers monitor restarts and intermittent
+# fetch failures without retro-activating ancient stale calls. Rows
+# activated outside the original 30-min window are tagged with
+# ``status_reason='retro_activated:<utc>'`` for audit.
+ACTIVATION_LOOKBACK_S = float(os.environ.get("POSITION_MONITOR_ACTIVATION_LOOKBACK_S", "86400"))
+# How far back into history a touch can be before we stamp the row with the
+# retro_activated status_reason (in seconds). Anything outside this window
+# is "fast path" / normal, anything inside is "retro" and audited.
+FAST_ACTIVATION_LOOKBACK_S = 1800.0
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +342,18 @@ async def fetch_open_positions(
     Returns:
         List of position row dicts.
     """
+    # Bug H1 fix (Bug Hunter 1 §C2):
+    #   Previously this query returned only the NEWEST `batch_size` open rows
+    #   (`ORDER BY created_at DESC LIMIT 50` by default). Once we have 50+
+    #   open positions, the oldest ones permanently fall off the bottom of
+    #   the queue: they never get wick-scanned for SL/TP, never have
+    #   `price_updated_at` advanced, and never close on a hit. Dashboard
+    #   P&L silently drifts from reality.
+    #
+    #   We now order by `price_updated_at NULLS FIRST`: positions that have
+    #   never been touched (or have been waiting longest) are processed FIRST.
+    #   Combined with the 1000-cap raise from Bug 6, a healthy steady state
+    #   re-checks every position regularly even at scale.
     return await pool.fetch_all(
         """
         SELECT id, trader_profile_id, signal_interpretation_id,
@@ -155,26 +366,50 @@ async def fetch_open_positions(
                notional_usd
         FROM public.tracked_positions
         WHERE status IN ('open', 'partial_exit')
-        ORDER BY created_at DESC
+        ORDER BY price_updated_at ASC NULLS FIRST, created_at ASC
         LIMIT $1
         """,
         (batch_size,),
     )
 
 
-_INSTRUMENT_ID_CACHE = {}
+# Bug Code Analyzer 1 #4 — bound the instrument ID cache.
+#   Previously this was a plain dict that grew without bound. Each unique
+#   (symbol, exchange) pair added an entry; over multi-week uptimes with
+#   many tickers the cache leaked memory. The bound is generous (4096
+#   keys ≈ all instruments × major exchanges) and uses a simple
+#   first-in-first-out eviction so we don't pay for full LRU bookkeeping
+#   on every call. ~32 KB worst-case footprint.
+_INSTRUMENT_ID_CACHE_MAX = 4096
+_INSTRUMENT_ID_CACHE: "OrderedDict[Tuple[str, Optional[str]], int]" = None  # type: ignore
+
 
 async def _resolve_instrument_id(
     pool: DatabasePool,
     raw_symbol: str,
     raw_exchange: Optional[str],
 ) -> Optional[int]:
+    global _INSTRUMENT_ID_CACHE
+    if _INSTRUMENT_ID_CACHE is None:
+        from collections import OrderedDict
+        _INSTRUMENT_ID_CACHE = OrderedDict()
     cache_key = (raw_symbol, raw_exchange)
-    if cache_key in _INSTRUMENT_ID_CACHE:
-        return _INSTRUMENT_ID_CACHE[cache_key]
+    cached = _INSTRUMENT_ID_CACHE.get(cache_key)
+    if cached is not None:
+        # Touch for FIFO ordering refresh — cheap.
+        try:
+            _INSTRUMENT_ID_CACHE.move_to_end(cache_key)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return cached
     res = await _resolve_instrument_id_impl(pool, raw_symbol, raw_exchange)
     if res is not None:
         _INSTRUMENT_ID_CACHE[cache_key] = res
+        if len(_INSTRUMENT_ID_CACHE) > _INSTRUMENT_ID_CACHE_MAX:
+            try:
+                _INSTRUMENT_ID_CACHE.popitem(last=False)  # type: ignore[attr-defined]
+            except Exception:
+                pass
     return res
 
 
@@ -374,6 +609,7 @@ async def _find_sl_tp_wick_candle(
     since: datetime,
     max_candles: int = 10000,
     adapters: Optional[Dict[str, Any]] = None,
+    scan_state: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[datetime, float, str, float]]:
     """Find the FIRST 1m candle since ``since`` whose ``[low, high]`` range
     wicked through SL or TP.
@@ -413,20 +649,103 @@ async def _find_sl_tp_wick_candle(
     if instrument_id is None:
         return None
     since_utc = ensure_utc(since)
+
+    # Bug H12 fix (Code Analyzer 2 §2.5):
+    #   Previously this fetched up to ``max_candles`` (default 10000 ≈ 7 days
+    #   of 1m) starting at ``since_utc`` in one shot. A position open more
+    #   than 7 days had any SL/TP wicks beyond row 10000 silently dropped:
+    #   the watermark would advance, the loop body would find no hit, and
+    #   the position would stay "open" forever despite a real exit.
+    #
+    #   We now keyset-paginate: fetch in pages, scan each page, and if the
+    #   page is full and contains no hit, advance ``since_utc`` past the
+    #   last row's timestamp and re-fetch. Bounded by ``max_iterations`` so
+    #   pathological inputs can't loop forever.
+    rows: List[Dict[str, Any]] = []
+    page_size = max(1, min(max_candles, 10000))
+    max_iterations = 12  # 12 × 10000 = 120k 1m candles ≈ 83 days, more than
+                        # enough for any real-world long-running position.
+    fetch_since = since_utc
+    iterations = 0
+    last_scanned_ts: Optional[datetime] = None
+    scan_complete = True  # Optimistic; flipped False on exhaustion / query failure.
     try:
-        rows = await pool.fetch_all(
-            """
-            SELECT "timestamp", high, low, close
-            FROM public.candles
-            WHERE instrument_id = $1
-              AND timeframe = $2
-              AND "timestamp" >= $3
-            ORDER BY "timestamp" ASC
-            LIMIT $4
-            """,
-            (instrument_id, timeframe, since_utc, max_candles),
-        )
+        while iterations < max_iterations:
+            page = await pool.fetch_all(
+                """
+                SELECT "timestamp", high, low, close
+                FROM public.candles
+                WHERE instrument_id = $1
+                  AND timeframe = $2
+                  AND "timestamp" >= $3
+                ORDER BY "timestamp" ASC
+                LIMIT $4
+                """,
+                (instrument_id, timeframe, fetch_since, page_size),
+            )
+            iterations += 1
+            if not page:
+                break
+            rows.extend(page)
+            last_scanned_ts = ensure_utc(page[-1]["timestamp"])
+            # Scan this page in-place for a hit. If we find one, return it
+            # without paginating further.
+            for r in page:
+                hi = float(r["high"])
+                lo = float(r["low"])
+                close_v = float(r["close"])
+                if direction == "long":
+                    if stop_loss is not None and lo <= stop_loss:
+                        if scan_state is not None:
+                            scan_state["complete"] = True
+                            scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                            scan_state["hit"] = True
+                        return r["timestamp"], close_v, "sl", float(stop_loss)
+                    if take_profit is not None and hi >= take_profit:
+                        if scan_state is not None:
+                            scan_state["complete"] = True
+                            scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                            scan_state["hit"] = True
+                        return r["timestamp"], close_v, "tp", float(take_profit)
+                else:  # short
+                    if stop_loss is not None and hi >= stop_loss:
+                        if scan_state is not None:
+                            scan_state["complete"] = True
+                            scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                            scan_state["hit"] = True
+                        return r["timestamp"], close_v, "sl", float(stop_loss)
+                    if take_profit is not None and lo <= take_profit:
+                        if scan_state is not None:
+                            scan_state["complete"] = True
+                            scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                            scan_state["hit"] = True
+                        return r["timestamp"], close_v, "tp", float(take_profit)
+            # No hit in this page; if it was a full page, paginate forward.
+            if len(page) < page_size:
+                break
+            last_ts = page[-1]["timestamp"]
+            # Advance past the last row to avoid re-scanning it. 1ms increment
+            # works because candle timestamps are minute-aligned.
+            fetch_since = ensure_utc(last_ts) + timedelta(milliseconds=1)
+        if iterations >= max_iterations:
+            # Bug F fix (2026-05-24 second-round audit): the scan ran out of
+            # iterations before reaching the end of available candles. There
+            # MAY be a wick-hit beyond what we scanned. Flag scan_complete=False
+            # so the watermark advance code path resumes from `last_scanned_ts`
+            # next cycle instead of jumping to `now` (which would skip the
+            # unscanned region permanently).
+            scan_complete = False
+            logger.warning(
+                "_find_sl_tp_wick_candle paginated %d iterations (%d candles) for "
+                "instrument_id=%s tf=%s — stopping. Position likely older than "
+                "scan budget; watermark will resume from last_scanned_ts=%s "
+                "next cycle.",
+                iterations, len(rows), instrument_id, timeframe, last_scanned_ts,
+            )
     except Exception as exc:  # pragma: no cover — defensive
+        # Bug F fix: a query failure also means the scan is incomplete — do
+        # NOT advance the watermark past the last successfully scanned ts.
+        scan_complete = False
         logger.exception(
             "_find_sl_tp_wick_candle query failed instrument_id=%s tf=%s: %s",
             instrument_id, timeframe, exc,
@@ -434,62 +753,62 @@ async def _find_sl_tp_wick_candle(
         rows = []
 
     if not rows:
-        # Fallback: Query historical candle data (OHLCV) on-the-fly from the exchange via CCXT
+        # Round 12 (2026-05-24): use multi-venue OHLCV helper (handles
+        # bybit/bitget/blofin via CCXT + capital.com via REST). The legacy
+        # ``or "bybit"`` default lives inside the helper so legacy rows with
+        # NULL instrument_exchange still find the old code path. Adapter
+        # caching/cleanup is now owned by the helper — this block no longer
+        # constructs adapters directly, so the old try/finally adapter.close()
+        # is gone with it.
         try:
-            from shared.connectors.ccxt_adapter import CCXTAdapter
-            from shared.market_data.live_price import _candidate_symbols
-            exchange_id = exchange or "bybit"
             logger.info(
                 "_find_sl_tp_wick_candle: Local candles missing for %s since %s. "
-                "Falling back to CCXT OHLCV fetch via %s adapter.",
-                symbol, since_utc, exchange_id
+                "Falling back via %s adapter.",
+                symbol, since_utc, exchange or "bybit",
             )
-            
-            is_cached = False
-            if adapters is not None and exchange_id in adapters:
-                adapter = adapters[exchange_id]
-                is_cached = True
-            else:
-                adapter = CCXTAdapter(exchange_id)
-                if adapters is not None:
-                    adapters[exchange_id] = adapter
-                    is_cached = True
-                    
-            try:
-                candidates = _candidate_symbols(symbol)
-                ccxt_candles = []
-                last_err = None
-                for cand_sym in candidates:
-                    try:
-                        ccxt_candles = await adapter.fetch_ohlcv(
-                            symbol=cand_sym,
-                            timeframe=timeframe,
-                            since=since_utc,
-                            limit=1000
-                        )
-                        if ccxt_candles:
-                            logger.debug("Successfully fetched candles for %s using symbol form %s", symbol, cand_sym)
-                            break
-                    except Exception as sym_exc:
-                        last_err = sym_exc
-                        continue
-                if not ccxt_candles and last_err is not None:
-                    raise last_err
-
-                if ccxt_candles:
-                    logger.debug("Successfully fetched %d candles from CCXT for %s", len(ccxt_candles), symbol)
-                    rows = []
-                    for c in ccxt_candles:
-                        rows.append({
-                            "timestamp": c.timestamp,
-                            "high": float(c.high),
-                            "low": float(c.low),
-                            "close": float(c.close)
-                        })
-            finally:
-                if not is_cached:
-                    await adapter.close()
+            ccxt_candles = await _fetch_ohlcv_for_market(
+                symbol=symbol,
+                exchange=exchange,
+                timeframe=timeframe,
+                since_utc=since_utc,
+                limit=1000,
+                adapters=adapters,
+            )
+            if ccxt_candles:
+                logger.debug(
+                    "_find_sl_tp_wick_candle: fetched %d candles for %s "
+                    "(exchange=%s)",
+                    len(ccxt_candles), symbol, exchange or "bybit",
+                )
+                rows = []
+                for c in ccxt_candles:
+                    rows.append({
+                        "timestamp": c.timestamp,
+                        "high": float(c.high),
+                        "low": float(c.low),
+                        "close": float(c.close)
+                    })
+                # Bug F round-3 review fix (BH1 #5, CA1 Fix F #2):
+                #   When the local-DB pagination failed (exception path
+                #   set scan_complete=False, last_scanned_ts=None) and
+                #   CCXT successfully picked up some candles, surface
+                #   THIS scan's progress so the caller can resume from
+                #   the last CCXT row's timestamp. Without this, the
+                #   no-hit fallthrough at the bottom of this function
+                #   reports last_scanned_ts=None and the caller treats
+                #   it as "advance to MAX" — skipping the unscanned
+                #   tail forever.
+                if rows:
+                    last_scanned_ts = ensure_utc(rows[-1]["timestamp"])
+                    if len(rows) >= 1000:
+                        scan_complete = False
         except Exception as fallback_exc:
+            # Bug F round-3 review fix: CCXT fallback failure means we
+            # cannot trust our scan progress at all — keep scan_complete
+            # at its current False value (set by the local-DB exception)
+            # and DON'T advance last_scanned_ts. Caller will hold the
+            # watermark at `wick_since` for the next cycle.
+            scan_complete = False
             logger.warning(
                 "_find_sl_tp_wick_candle CCXT fallback failed for %s: %s",
                 symbol, fallback_exc
@@ -503,16 +822,39 @@ async def _find_sl_tp_wick_candle(
             # Long: SL is BELOW entry → wick down through SL = stop hit.
             # TP is ABOVE entry → wick up through TP = profit hit.
             if stop_loss is not None and lo <= stop_loss:
+                if scan_state is not None:
+                    scan_state["complete"] = True
+                    scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                    scan_state["hit"] = True
                 return r["timestamp"], close_v, "sl", float(stop_loss)
             if take_profit is not None and hi >= take_profit:
+                if scan_state is not None:
+                    scan_state["complete"] = True
+                    scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                    scan_state["hit"] = True
                 return r["timestamp"], close_v, "tp", float(take_profit)
         else:
             # Short: SL is ABOVE entry → wick up through SL = stop hit.
             # TP is BELOW entry → wick down through TP = profit hit.
             if stop_loss is not None and hi >= stop_loss:
+                if scan_state is not None:
+                    scan_state["complete"] = True
+                    scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                    scan_state["hit"] = True
                 return r["timestamp"], close_v, "sl", float(stop_loss)
             if take_profit is not None and lo <= take_profit:
+                if scan_state is not None:
+                    scan_state["complete"] = True
+                    scan_state["last_scanned_ts"] = ensure_utc(r["timestamp"])
+                    scan_state["hit"] = True
                 return r["timestamp"], close_v, "tp", float(take_profit)
+
+    # No hit found anywhere. Surface the scan state so the caller can decide
+    # whether it's safe to advance the watermark past `last_scanned_ts`.
+    if scan_state is not None:
+        scan_state["complete"] = scan_complete
+        scan_state["last_scanned_ts"] = last_scanned_ts
+        scan_state["hit"] = False
     return None
 
 
@@ -594,64 +936,64 @@ async def _find_entry_touch_candle(
 
     if row is None:
         try:
-            from shared.connectors.ccxt_adapter import CCXTAdapter
-            from shared.market_data.live_price import _candidate_symbols
-            exchange_id = exchange or "bybit"
+            # 2026-05-23: Safe pending queue check optimization.
+            # Check if local candles are up-to-date (fresh). If they are, and there's no local touch,
+            # we don't need the slow CCXT API fallback query!
+            max_ts = await pool.fetch_val(
+                """
+                SELECT MAX("timestamp") FROM public.candles
+                WHERE instrument_id = $1 AND timeframe = $2
+                """,
+                (instrument_id, timeframe),
+            )
+            if max_ts is not None:
+                now_utc = datetime.now(timezone.utc)
+                if now_utc - ensure_utc(max_ts) < timedelta(minutes=10):
+                    logger.debug(
+                        "_find_entry_touch_candle: Local candles are fresh for %s (last at %s). Skipping CCXT fallback.",
+                        symbol, max_ts
+                    )
+                    return None
+        except Exception as t_exc:
+            logger.warning("Failed to check local candle freshness for %s: %s", symbol, t_exc)
+
+        # Round 12 (2026-05-24): use multi-venue OHLCV helper. Adapter
+        # construction + auth + cleanup all live inside the helper so we
+        # only branch on "got candles? scan them" here.
+        try:
             logger.info(
                 "_find_entry_touch_candle: Local touch not found for %s. "
-                "Checking CCXT OHLCV fallback via %s.",
-                symbol, exchange_id
+                "Checking OHLCV fallback via %s.",
+                symbol, exchange or "bybit",
             )
-            
-            is_cached = False
-            if adapters is not None and exchange_id in adapters:
-                adapter = adapters[exchange_id]
-                is_cached = True
-            else:
-                adapter = CCXTAdapter(exchange_id)
-                if adapters is not None:
-                    adapters[exchange_id] = adapter
-                    is_cached = True
-            
-            try:
-                candidates = _candidate_symbols(symbol)
-                ccxt_candles = []
-                last_err = None
-                for cand_sym in candidates:
-                    try:
-                        ccxt_candles = await adapter.fetch_ohlcv(
-                            symbol=cand_sym,
-                            timeframe=timeframe,
-                            since=floor_ts,
-                            limit=1000
+            ccxt_candles = await _fetch_ohlcv_for_market(
+                symbol=symbol,
+                exchange=exchange,
+                timeframe=timeframe,
+                since_utc=floor_ts,
+                limit=1000,
+                adapters=adapters,
+            )
+            if ccxt_candles:
+                logger.debug(
+                    "_find_entry_touch_candle: fetched %d candles for %s "
+                    "(exchange=%s)",
+                    len(ccxt_candles), symbol, exchange or "bybit",
+                )
+                for c in ccxt_candles:
+                    hi = float(c.high)
+                    lo = float(c.low)
+                    if lo <= entry <= hi:
+                        logger.info(
+                            "Entry touch found via OHLCV fallback for %s at "
+                            "%s (entry=%.6f, low=%.6f, high=%.6f)",
+                            symbol, c.timestamp, entry, lo, hi,
                         )
-                        if ccxt_candles:
-                            logger.debug("Successfully fetched candles for %s using symbol form %s", symbol, cand_sym)
-                            break
-                    except Exception as sym_exc:
-                        last_err = sym_exc
-                        continue
-                if not ccxt_candles and last_err is not None:
-                    raise last_err
-
-                if ccxt_candles:
-                    logger.debug("Fetched %d candles from CCXT for %s entry check", len(ccxt_candles), symbol)
-                    for c in ccxt_candles:
-                        hi = float(c.high)
-                        lo = float(c.low)
-                        if lo <= entry <= hi:
-                            logger.info(
-                                "Entry touch found via CCXT OHLCV fallback for %s at %s (entry=%.6f, low=%.6f, high=%.6f)",
-                                symbol, c.timestamp, entry, lo, hi
-                            )
-                            return c.timestamp, float(c.close)
-            finally:
-                if not is_cached:
-                    await adapter.close()
+                        return c.timestamp, float(c.close)
         except Exception as fallback_exc:
             logger.warning(
-                "_find_entry_touch_candle CCXT fallback failed for %s: %s",
-                symbol, fallback_exc
+                "_find_entry_touch_candle OHLCV fallback failed for %s: %s",
+                symbol, fallback_exc,
             )
         return None
 
@@ -963,6 +1305,12 @@ async def update_position_outcome(
     Returns:
         Affected row count.
     """
+    # Bug C4 fix (Code Analyzer 2 §1.2) — optimistic status guard.
+    # Without `AND status IN ('open','partial_exit')`, two concurrent monitor
+    # ticks (or a manual close followed by a monitor close) could both update
+    # the same row, with the second write overwriting `exit_price`,
+    # `realized_pnl_usd`, and `realized_pnl_usd_final` with potentially
+    # different values. The guard ensures the second writer becomes a no-op.
     if realized_pnl_final is None:
         return await pool.execute(
             """
@@ -974,6 +1322,7 @@ async def update_position_outcome(
                 closed_at = $5,
                 updated_at = $5
             WHERE id = $6
+              AND status IN ('open', 'partial_exit')
             """,
             (status, outcome, exit_price, realized_pnl, now, position_id),
         )
@@ -988,6 +1337,7 @@ async def update_position_outcome(
             closed_at = $6,
             updated_at = $6
         WHERE id = $7
+          AND status IN ('open', 'partial_exit')
         """,
         (
             status,
@@ -1043,11 +1393,30 @@ async def update_position_price_pnl(
     current_price: float,
     pnl_pct: float,
     unrealized_pnl_usd: float,
+    distance_to_entry_pct: Optional[float] = None,
+    distance_to_sl_pct: Optional[float] = None,
+    distance_to_tp1_pct: Optional[float] = None,
+    time_in_trade_minutes: Optional[int] = None,
 ) -> int:
-    """Update current_price, pnl_pct, unrealized_pnl_usd on tracked_positions.
+    """Update live P&L + distance + time-in-trade fields on tracked_positions.
+
+    Round 12 (2026-05-24): the four "live monitor" fields
+    ``distance_to_entry_pct``, ``distance_to_sl_pct``, ``distance_to_tp1_pct``,
+    and ``time_in_trade_minutes`` are now mirrored back to ``tracked_positions``
+    on every cycle. Previously they were only written to ``position_updates``
+    (the time-series), which forced the dashboard to either compute them
+    client-side or run an extra subquery per row.
+
+    Mirroring keeps ``position_updates`` as the canonical history and
+    ``tracked_positions`` as the always-current snapshot — both are written
+    in the same monitor tick from the same ``PositionSnapshot`` so they
+    cannot disagree.
 
     Idempotent: only writes when at least one value differs from the stored
-    row, avoiding unnecessary write amplification on every cycle.
+    row, avoiding unnecessary write amplification on every cycle. The
+    distance/time mirrors are passed via optional kwargs so existing
+    callers (tests, partial-exit settle path) keep working without
+    modification.
 
     Args:
         pool: Shared Postgres pool.
@@ -1055,6 +1424,14 @@ async def update_position_price_pnl(
         current_price: Current market price.
         pnl_pct: Unrealized P&L percentage.
         unrealized_pnl_usd: Unrealized P&L in USD.
+        distance_to_entry_pct: % distance from current_price to entry_price
+            (mirrored from PositionSnapshot.distance_to_entry_pct).
+        distance_to_sl_pct: % distance from current_price to stop_loss
+            (mirrored from PositionSnapshot.distance_to_sl_pct).
+        distance_to_tp1_pct: % distance from current_price to take_profit_1
+            (mirrored from PositionSnapshot.distance_to_tp_pct — note rename).
+        time_in_trade_minutes: Minutes since opened_at (int, mirrored from
+            PositionSnapshot.hours_open * 60).
 
     Returns:
         Affected row count.
@@ -1065,14 +1442,31 @@ async def update_position_price_pnl(
         SET current_price = $1,
             unrealized_pnl_pct = $2,
             unrealized_pnl_usd = $3,
+            distance_to_entry_pct = COALESCE($4, distance_to_entry_pct),
+            distance_to_sl_pct = COALESCE($5, distance_to_sl_pct),
+            distance_to_tp1_pct = COALESCE($6, distance_to_tp1_pct),
+            time_in_trade_minutes = COALESCE($7, time_in_trade_minutes),
             price_updated_at = NOW(),
             updated_at = NOW()
-        WHERE id = $4
+        WHERE id = $8
           AND (current_price IS DISTINCT FROM $1
                OR unrealized_pnl_pct IS DISTINCT FROM $2
-               OR unrealized_pnl_usd IS DISTINCT FROM $3)
+               OR unrealized_pnl_usd IS DISTINCT FROM $3
+               OR distance_to_entry_pct IS DISTINCT FROM COALESCE($4, distance_to_entry_pct)
+               OR distance_to_sl_pct IS DISTINCT FROM COALESCE($5, distance_to_sl_pct)
+               OR distance_to_tp1_pct IS DISTINCT FROM COALESCE($6, distance_to_tp1_pct)
+               OR time_in_trade_minutes IS DISTINCT FROM COALESCE($7, time_in_trade_minutes))
         """,
-        (current_price, pnl_pct, unrealized_pnl_usd, position_id),
+        (
+            current_price,
+            pnl_pct,
+            unrealized_pnl_usd,
+            distance_to_entry_pct,
+            distance_to_sl_pct,
+            distance_to_tp1_pct,
+            time_in_trade_minutes,
+            position_id,
+        ),
     )
 
 
@@ -1241,15 +1635,21 @@ class PositionMonitor:
             FROM public.tracked_positions
             WHERE status = 'pending'
             ORDER BY created_at ASC
-            LIMIT 200
+            LIMIT 1000
             """,
         )
 
         if not pending:
-            return {"activated": 0, "expired": 0, "no_price": 0, "error": 0}
+            return {"activated": 0, "expired": 0, "expired_lost_race": 0, "no_price": 0, "error": 0}
 
         activated = 0
         expired = 0
+        # Round-6 sweep (BH2 #8): split the lost-race counter from the success
+        # counter so dashboards can distinguish "nothing to expire" from
+        # "expired UPDATE returned 0 rows because a sibling monitor already
+        # flipped this row". Without this, every concurrent expire-vs-activate
+        # race was silently classified as "no rows expired".
+        expired_lost_race = 0
         no_price = 0
         error = 0
         expiry_cutoff = now - timedelta(days=7)
@@ -1260,18 +1660,38 @@ class PositionMonitor:
             try:
                 pos_id = int(pos["id"])
                 created = pos["created_at"]
-                # Expire positions older than 7 days
+                # Expire positions older than 7 days.
+                # Bug D fix (2026-05-24 second-round audit): mirror the H13
+                # activation guard with `AND status='pending'` so a position
+                # that was activated by another monitor instance between this
+                # cycle's SELECT and this UPDATE cannot be flipped from 'open'
+                # → 'expired'. Without the guard, two overlapping monitor
+                # instances could clobber an open position with `expired`,
+                # silently killing live trades. The guard makes the lost-race
+                # case a no-op, with a clear log line so we know it happened.
                 if isinstance(created, datetime) and created < expiry_cutoff:
-                    await pool.execute(
+                    expire_result = await pool.execute(
                         """
                         UPDATE public.tracked_positions
                         SET status = 'expired',
                             status_reason = 'entry_never_reached',
                             updated_at = $1
                         WHERE id = $2
+                          AND status = 'pending'
                         """,
                         (now, pos_id),
                     )
+                    if isinstance(expire_result, str) and expire_result.endswith(" 0"):
+                        # Round-6 sweep: count it so the cycle summary
+                        # surfaces the race; demote to DEBUG so a degenerate
+                        # all-races sweep doesn't spam the journal.
+                        expired_lost_race += 1
+                        logger.debug(
+                            "Expiry sweep lost race for position %s "
+                            "(status changed concurrently to non-pending); skipping.",
+                            pos_id,
+                        )
+                        continue
                     expired += 1
                     logger.info(
                         "Expired pending position %s (symbol=%s, age > 7 days)",
@@ -1310,18 +1730,49 @@ class PositionMonitor:
                     continue
 
                 trigger_ts, trigger_close = triggered
-                await pool.execute(
+                # Round 11 (2026-05-24): when the touch is outside the fast
+                # path (older than 30 min), tag the row so we can audit which
+                # activations "caught up" vs which fired live. A normal/live
+                # activation clears status_reason; a retro activation stamps
+                # `retro_activated:<utc>` so dashboards can show a small
+                # badge and operators can grep the log.
+                trigger_age_s = (
+                    (now - trigger_ts).total_seconds()
+                    if isinstance(trigger_ts, datetime) else 0.0
+                )
+                is_retro = trigger_age_s > FAST_ACTIVATION_LOOKBACK_S
+                retro_reason = (
+                    f"retro_activated:{now.replace(microsecond=0).isoformat()}"
+                    if is_retro else None
+                )
+                # Bug H13 fix (Code Analyzer 2 §2.6) — guard the activation
+                # UPDATE against a concurrent state change. Without
+                # `AND status = 'pending'`, the expiry sweep (or a manual
+                # cancel) could mark a row 'expired' between our SELECT and
+                # this UPDATE, and we'd still flip it to 'open' — reviving
+                # a position that should have died. The guard turns that race
+                # into a no-op.
+                update_result = await pool.execute(
                     """
                     UPDATE public.tracked_positions
                     SET status = 'open',
-                        status_reason = NULL,
+                        status_reason = $4,
                         current_price = $1,
                         price_updated_at = $2,
                         updated_at = $2
                     WHERE id = $3
+                      AND status = 'pending'
                     """,
-                    (trigger_close, trigger_ts, pos_id),
+                    (trigger_close, trigger_ts, pos_id, retro_reason),
                 )
+                # asyncpg returns "UPDATE n" — n=0 means we lost the race.
+                if isinstance(update_result, str) and update_result.endswith(" 0"):
+                    logger.info(
+                        "Pending activation lost race for position %s "
+                        "(status changed concurrently); skipping.",
+                        pos_id,
+                    )
+                    continue
                 activated += 1
                 logger.info(
                     "Activated pending position %s: %s %s entry=%.6f "
@@ -1346,6 +1797,7 @@ class PositionMonitor:
         return {
             "activated": activated,
             "expired": expired,
+            "expired_lost_race": expired_lost_race,
             "no_price": no_price,
             "error": error,
         }
@@ -1399,6 +1851,7 @@ class PositionMonitor:
                 or position.get("updated_at")
                 or position.get("created_at")
             )
+            wick_scan_state: Dict[str, Any] = {}
             if wick_since is not None:
                 try:
                     wick = await _find_sl_tp_wick_candle(
@@ -1411,6 +1864,7 @@ class PositionMonitor:
                         take_profit=float(tp_val_for_wick) if tp_val_for_wick is not None else None,
                         since=wick_since,
                         adapters=self._adapters,
+                        scan_state=wick_scan_state,
                     )
                 except Exception as exc:  # noqa: BLE001 — defensive
                     logger.warning(
@@ -1454,21 +1908,63 @@ class PositionMonitor:
             }
 
         if wick is None and wick_since is not None:
-            # Optimize future cycles: since we found no wick hit, advance the check watermark
-            # to the newest candle's timestamp currently in the database to prevent missing late-ingested candles.
+            # Bug H2 fix (Bug Hunter 1 §C3 + Code Analyzer 2 §2.4):
+            #   Previously we advanced `price_updated_at` to the GLOBAL
+            #   `MAX(timestamp)` of all 1m candles. If the candle ingester
+            #   then back-filled a candle older than that MAX (e.g. CCXT
+            #   gap-fill of an exchange feed outage), it would land below
+            #   our watermark and never be wick-scanned — silently missing
+            #   real SL/TP hits.
+            #
+            #   Bug F fix (2026-05-24 second-round audit): when H12 keyset
+            #   pagination exhausts at max_iterations (~83 days of 1m), the
+            #   scan covers only `[wick_since, last_scanned_ts]`, not all
+            #   the way to `now`. Advancing the watermark past
+            #   `last_scanned_ts` would skip the unscanned tail forever.
+            #   We now check `scan_state["complete"]` returned by the wick
+            #   scanner: if False, watermark advances only to `last_scanned_ts`
+            #   so the next cycle resumes from there. Same logic applies on
+            #   query-failure paths.
             try:
-                instrument_id = await _resolve_instrument_id(pool, symbol, instrument_exchange)
-                max_ts = None
-                if instrument_id is not None:
-                    max_ts = await pool.fetch_val(
-                        """
-                        SELECT MAX("timestamp") FROM public.candles
-                        WHERE instrument_id = $1 AND timeframe = $2
-                        """,
-                        (instrument_id, self.cfg.default_timeframe)
+                scan_complete = bool(wick_scan_state.get("complete", True))
+                last_scanned_ts = wick_scan_state.get("last_scanned_ts")
+
+                if not scan_complete:
+                    # Bug F round-3 review fix (BH1 #4, BH1 #5):
+                    #   An incomplete scan means we did NOT scan all the way
+                    #   up to MAX(timestamp) or `now`, so advancing past the
+                    #   actual progress would skip the unscanned tail. Resume
+                    #   from `last_scanned_ts` if we have it; if we don't
+                    #   (first-page failure with no CCXT fallback), HOLD the
+                    #   watermark at `wick_since` so the next cycle re-tries
+                    #   from where we started. Never jump forward on failure.
+                    if last_scanned_ts is not None:
+                        watermark = ensure_utc(last_scanned_ts)
+                    else:
+                        watermark = ensure_utc(wick_since)
+                    logger.info(
+                        "Position %s wick scan incomplete (last_scanned_ts=%s) — "
+                        "watermark held at %s; next cycle will re-attempt forward "
+                        "from this point.",
+                        pos_id, last_scanned_ts, watermark,
                     )
-                
-                watermark = max_ts if max_ts is not None else datetime.now(timezone.utc)
+                else:
+                    instrument_id = await _resolve_instrument_id(pool, symbol, instrument_exchange)
+                    max_ts = None
+                    if instrument_id is not None:
+                        max_ts = await pool.fetch_val(
+                            """
+                            SELECT MAX("timestamp") FROM public.candles
+                            WHERE instrument_id = $1 AND timeframe = $2
+                            """,
+                            (instrument_id, self.cfg.default_timeframe)
+                        )
+                    # Choose the earlier of `now` and DB MAX so back-fills below
+                    # `now` still get scanned next cycle.
+                    if max_ts is not None and max_ts < now:
+                        watermark = max_ts
+                    else:
+                        watermark = now
                 await pool.execute(
                     """
                     UPDATE public.tracked_positions
@@ -1516,14 +2012,23 @@ class PositionMonitor:
             best_price=price if snapshot.mfe_pct > 0 else None,
         )
 
-        # Write current_price, pnl_pct, unrealized_pnl_usd back to tracked_positions
-        # so the dashboard snapshot can show real P&L numbers without extra queries.
+        # Round 12 (2026-05-24): mirror live distance + time-in-trade fields
+        # back to tracked_positions alongside price/P&L. These four columns
+        # used to live ONLY in the position_updates time-series, forcing
+        # the dashboard to compute them client-side from row payload. Now
+        # the daemon is the single source of truth for both the snapshot
+        # (tracked_positions) and the history (position_updates) — they are
+        # written in the same tick from the same PositionSnapshot.
         await update_position_price_pnl(
             pool,
             pos_id,
             snapshot.current_price,
             snapshot.pnl_pct,
             snapshot.unrealized_pnl,
+            distance_to_entry_pct=snapshot.distance_to_entry_pct,
+            distance_to_sl_pct=snapshot.distance_to_sl_pct,
+            distance_to_tp1_pct=snapshot.distance_to_tp_pct,
+            time_in_trade_minutes=int(snapshot.hours_open * 60),
         )
 
         # Expiry check (F2): runs before SL/TP so an expired position

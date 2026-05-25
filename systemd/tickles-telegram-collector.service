@@ -1,0 +1,14 @@
+[Unit]
+Description=Tickles Telegram collector — reads configured channels, writes to news_items
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m shared.collectors.telegram.run_collector
+Restart=always
+RestartSec=15
+StandardOutput=append:/var/log/tickles/telegram_collector.log
+StandardError=append:/var/log/tickles/telegram_collector.log

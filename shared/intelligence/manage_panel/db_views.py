@@ -179,7 +179,7 @@ async def list_open_positions() -> List[Dict[str, Any]]:
             tp.realized_pnl_usd
         FROM public.tracked_positions tp
         LEFT JOIN public.trader_profiles tpf ON tp.trader_profile_id = tpf.id
-        WHERE tp.status IN ('open', 'partial_close')
+        WHERE tp.status IN ('open', 'partial_exit')
         ORDER BY tp.created_at DESC
         """
     )

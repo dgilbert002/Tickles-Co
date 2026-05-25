@@ -33,7 +33,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from shared.candles.resample import resample_chain, resample_one
-from shared.candles.schema import RESAMPLE_CHAIN
+from shared.candles.schema import RESAMPLE_CHAIN, Timeframe
 from shared.utils.db import get_shared_pool
 
 log = logging.getLogger("tickles.resample_runner")
@@ -110,6 +110,26 @@ async def _run_full_resample(
     return result
 
 
+def _floor_dt(dt: datetime, tf: Timeframe) -> datetime:
+    """Floor a datetime to the target timeframe's bucket floor to protect open price."""
+    if tf == Timeframe.M5:
+        return dt.replace(minute=dt.minute // 5 * 5, second=0, microsecond=0)
+    if tf == Timeframe.M15:
+        return dt.replace(minute=dt.minute // 15 * 15, second=0, microsecond=0)
+    if tf == Timeframe.M30:
+        return dt.replace(minute=dt.minute // 30 * 30, second=0, microsecond=0)
+    if tf == Timeframe.H1:
+        return dt.replace(minute=0, second=0, microsecond=0)
+    if tf == Timeframe.H4:
+        return dt.replace(hour=dt.hour // 4 * 4, minute=0, second=0, microsecond=0)
+    if tf == Timeframe.D1:
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if tf == Timeframe.W1:
+        monday = dt - timedelta(days=dt.weekday())
+        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    return dt
+
+
 async def _run_incremental_resample(
     pool: Any, instrument_id: int, source: str,
 ) -> Dict[str, int]:
@@ -126,16 +146,17 @@ async def _run_incremental_resample(
     Returns:
         Dict mapping timeframe → rows_written count.
     """
-    window_start = datetime.now(timezone.utc) - timedelta(
-        minutes=INCREMENTAL_WINDOW_MINUTES
-    )
-    window_end = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    base_start = now_utc - timedelta(minutes=INCREMENTAL_WINDOW_MINUTES)
+    window_end = now_utc
     result: Dict[str, int] = {}
     for tf in RESAMPLE_CHAIN:
         try:
+            # Floor window_start to the target timeframe boundary to prevent partial slice open-price corruption
+            tf_start = _floor_dt(base_start, tf)
             report = await resample_one(
                 pool, instrument_id, source, tf,
-                window_start=window_start,
+                window_start=tf_start,
                 window_end=window_end,
             )
             result[tf.value] = report.rows_written

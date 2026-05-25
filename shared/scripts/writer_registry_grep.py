@@ -29,12 +29,18 @@ UPDATE_RE = re.compile(r"UPDATE\s+(?:public\.)?(\w+)\s+SET", re.IGNORECASE)
 DELETE_RE = re.compile(r"DELETE\s+FROM\s+(?:public\.)?(\w+)", re.IGNORECASE)
 
 # Path → service inference. Override with explicit marker.
+# Round-6 sweep (CA2 #7, #8): added position_monitor mapping so the static
+# gate covers tracked_positions writes from the monitor; documented
+# media_items writers via interpretation_service (already mapped) plus
+# collectors that download media (also already mapped).
 PATH_TO_SERVICE = {
     "intelligence/interpretation_service.py": "interpretation_service",
     "intelligence/postmortem_service.py": "postmortem_service",
     "intelligence/chart_hacker_opinion_service.py": "chart_hacker_opinion_service",
     "intelligence/edge_scorer_service.py": "edge_scorer_service",
     "intelligence/coach_service.py": "coach_service",
+    "intelligence/position_monitor.py": "position_monitor",
+    "intelligence/surgeon_position_reconciler.py": "surgeon_position_reconciler",
     "daemons/surgeon2_trader.py": "surgeon2_trader",
     "memu/listener_service.py": "memu_listener",
     # collectors

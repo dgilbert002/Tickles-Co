@@ -542,6 +542,15 @@ CREATE TABLE IF NOT EXISTS public.tracked_positions (
     actor_instance        TEXT            NOT NULL DEFAULT '',
     source_position_id  BIGINT          NULL,
 
+    -- Bug B fix (2026-05-24 second-round audit): persist the dedup decision
+    -- so the dashboard "duplicates today" KPI and the trade_dedup writer
+    -- (`UPDATE … SET deduped_at = NOW() …`) have a column to read/write
+    -- against on a freshly provisioned VPS. Previously this column was added
+    -- by an out-of-band migration (`2026_05_24_bughunt_t0_t1_columns.sql`)
+    -- and was missing from the canonical schema, so disaster-recovery
+    -- restores would 500 the dedup write and the KPI query.
+    deduped_at            TIMESTAMPTZ     NULL,
+
     -- Metadata
     created_at            TIMESTAMPTZ(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at            TIMESTAMPTZ(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -562,6 +571,12 @@ CREATE INDEX idx_tp_postmortem           ON public.tracked_positions (postmortem
 CREATE INDEX idx_tp_closed_at            ON public.tracked_positions (closed_at) WHERE closed_at IS NOT NULL;
 CREATE INDEX idx_tp_correlation_id       ON public.tracked_positions (correlation_id) WHERE correlation_id IS NOT NULL;
 CREATE INDEX idx_tp_symbol_norm          ON public.tracked_positions (instrument_symbol_normalised) WHERE instrument_symbol_normalised IS NOT NULL;
+
+-- Bug B fix (2026-05-24): partial index on deduped_at for the dashboard KPI
+-- counter that reads `WHERE deduped_at >= now() - interval '24h'`.
+CREATE INDEX IF NOT EXISTS idx_tracked_positions_deduped_at
+    ON public.tracked_positions (deduped_at)
+    WHERE deduped_at IS NOT NULL;
 
 -- Phase 10 — extended UNIQUE for multi-instance actor safety
 CREATE UNIQUE INDEX uniq_tracked_positions_actor
