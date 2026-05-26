@@ -344,6 +344,25 @@ body.drawer-resizing{cursor:ew-resize;user-select:none}
 .service strong{display:block}.service span{color:var(--muted);font-size:12px}
 .chart{height:310px}
 
+/* ─── Trader Intel drawer ─── */
+.trader-stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
+.trader-stats-grid div{background:var(--row);border:1px solid var(--line);border-radius:12px;padding:10px}
+.trader-stats-grid label{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}
+.trader-stats-grid strong{display:block;font-family:var(--mono);font-size:15px;margin-top:4px}
+.trader-coins-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.trader-coins-grid h3{margin:0 0 8px;font-size:13px;font-weight:800}
+.coin-list{display:flex;flex-direction:column;gap:5px}
+.coin-chip{font-family:var(--mono);font-size:12px;padding:6px 10px;background:var(--row);border:1px solid var(--line);border-radius:10px}
+.coin-chip.win{border-left:3px solid var(--green)}
+.coin-chip.loss{border-left:3px solid var(--red)}
+.coin-chip em{color:var(--muted);font-style:normal;margin-left:6px;font-size:11px}
+.trader-trade-tabs{display:flex;gap:8px;padding:10px 0 12px}
+.trader-trades-panel{margin-bottom:14px}
+.trader-trades-panel .table-wrap{max-height:500px;overflow-y:auto}
+.trader-learnings{margin-top:4px}
+.trader-learnings h3{font-size:14px;margin:0 0 10px}
+.trader-learnings .lesson{margin-bottom:8px}
+
 @keyframes fade{from{opacity:.5;transform:translateY(4px)}to{opacity:1;transform:none}}
 @media(max-width:1100px){.chart-split,.bottom-grid{grid-template-columns:1fr}.posted-chart{border-right:0;border-bottom:1px solid var(--line)}.level-grid.wide{grid-template-columns:repeat(2,1fr)}.replay-chart{height:320px}.comp-stats{grid-template-columns:repeat(3,1fr)}}
 ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#3a3a44;border-radius:999px}::-webkit-scrollbar-track{background:transparent}

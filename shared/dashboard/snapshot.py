@@ -1595,55 +1595,199 @@ async def get_interpretation_by_id(interp_id: int, company: str | None = None) -
 
 
 async def get_trader_drill_data(trader_id: str, company_filter: str | None = None) -> dict:
-    """Fetch performance and recent trades for a specific trader."""
+    """Fetch performance, all trades, and AI learnings for a specific trader.
+
+    Matches ``trader_id`` against both ``tracked_positions.actor_id`` AND
+    ``trader_profiles.handle_normalized`` so the dashboard can pass Discord
+    handles (e.g. ``kingofsocks``) from the leaderboard directly.
+
+    Returns:
+        Dict with keys: trader_id, stats, trades_active, trades_history,
+        ai_learnings.
+    """
     companies = await list_active_companies()
     if company_filter and company_filter != "all":
         companies = [c for c in companies if c == company_filter]
 
-    perf = []
-    trades = []
-
     from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
 
-    for company in companies:
-        try:
-            # NOTE: trader_performance uses trader_profile_id (bigint), not trader_id (string).
-            # The trader_performance schema alignment is deferred to Phase R.
-            # For now, derive performance from tracked_positions aggregation.
-            shared_pool = await get_shared_pool()
-            async with shared_pool.acquire() as s_conn:
-                # Aggregate performance from tracked_positions
-                agg = await s_conn.fetchrow(
-                    "SELECT "
-                    "  COUNT(*) AS total_trades, "
-                    "  COUNT(*) FILTER (WHERE realized_pnl_usd > 0) AS wins, "
-                    "  AVG(realized_pnl_usd) FILTER (WHERE realized_pnl_usd IS NOT NULL) AS avg_pnl "
-                    "FROM tracked_positions "
-                    "WHERE actor_id = $1 AND company_id = $2",
-                    trader_id, company
-                )
-                if agg and agg["total_trades"] > 0:
-                    perf.append({
-                        "trader_id": trader_id,
-                        "total_trades": int(agg["total_trades"]),
-                        "win_rate": round(int(agg["wins"] or 0) / int(agg["total_trades"]) * 100, 1),
-                        "avg_pnl": float(agg["avg_pnl"] or 0),
-                        "_company": company,
-                    })
+    # Unified query that matches by actor_id OR handle_normalized
+    _MATCH_WHERE = """(
+        tp.actor_id = $1
+        OR tp.trader_profile_id IN (
+            SELECT id FROM public.trader_profiles WHERE handle_normalized = $1
+        )
+    )"""
 
-                # Recent trades
-                t = await s_conn.fetch(
-                    "SELECT * FROM tracked_positions WHERE actor_id = $1 AND company_id = $2 ORDER BY signal_timestamp DESC LIMIT 20",
-                    trader_id, company
-                )
-                trades.extend({**dict(r), "_company": company} for r in t)
-        except Exception as e:
-            LOG.error("Trader drill failed for %s: %s", company, e)
+    stats: dict = {}
+    trades_active: list = []
+    trades_history: list = []
+    ai_learnings: list = []
+
+    try:
+        async with pool.acquire() as conn:
+            # ── Stats: aggregate from tracked_positions ──
+            agg = await conn.fetchrow(
+                "SELECT "
+                "  COUNT(*) AS total_trades, "
+                "  COUNT(*) FILTER (WHERE tp.status NOT IN ('open', 'pending')) AS closed_trades, "
+                "  COUNT(*) FILTER (WHERE tp.realized_pnl_usd > 0) AS wins, "
+                "  COUNT(*) FILTER (WHERE tp.realized_pnl_usd < 0) AS losses, "
+                "  COUNT(*) FILTER (WHERE tp.realized_pnl_usd = 0 AND tp.status NOT IN ('open', 'pending')) AS breakeven, "
+                "  SUM(COALESCE(tp.realized_pnl_usd, 0)) AS total_pnl, "
+                "  AVG(COALESCE(tp.realized_pnl_usd, 0)) FILTER (WHERE tp.realized_pnl_usd > 0) AS avg_win, "
+                "  AVG(COALESCE(tp.realized_pnl_usd, 0)) FILTER (WHERE tp.realized_pnl_usd < 0) AS avg_loss, "
+                "  MAX(COALESCE(tp.realized_pnl_usd, 0)) AS best_trade, "
+                "  MIN(COALESCE(tp.realized_pnl_usd, 0)) AS worst_trade, "
+                "  COUNT(DISTINCT tp.instrument_symbol) AS unique_coins "
+                "FROM public.tracked_positions tp "
+                "WHERE " + _MATCH_WHERE,
+                trader_id,
+            )
+            if agg and agg["total_trades"]:
+                total = int(agg["total_trades"] or 0)
+                w = int(agg["wins"] or 0)
+                l_ = int(agg["losses"] or 0)
+                stats = {
+                    "total_trades": total,
+                    "closed_trades": int(agg["closed_trades"] or 0),
+                    "wins": w,
+                    "losses": l_,
+                    "breakeven": int(agg["breakeven"] or 0),
+                    "win_rate": round(w / total * 100, 1) if total > 0 else 0.0,
+                    "total_pnl": float(agg["total_pnl"] or 0),
+                    "avg_win": float(agg["avg_win"] or 0),
+                    "avg_loss": float(agg["avg_loss"] or 0),
+                    "best_trade": float(agg["best_trade"] or 0),
+                    "worst_trade": float(agg["worst_trade"] or 0),
+                    "unique_coins": int(agg["unique_coins"] or 0),
+                }
+
+            # ── Coin breakdown ──
+            coin_rows = await conn.fetch(
+                "SELECT "
+                "  tp.instrument_symbol, "
+                "  COUNT(*) AS trades, "
+                "  COUNT(*) FILTER (WHERE tp.realized_pnl_usd > 0) AS coin_wins, "
+                "  SUM(COALESCE(tp.realized_pnl_usd, 0)) AS coin_pnl "
+                "FROM public.tracked_positions tp "
+                "WHERE " + _MATCH_WHERE + " "
+                "  AND tp.instrument_symbol IS NOT NULL "
+                "GROUP BY tp.instrument_symbol "
+                "ORDER BY trades DESC "
+                "LIMIT 25",
+                trader_id,
+            )
+            coin_breakdown = []
+            for cr in coin_rows:
+                sym = cr["instrument_symbol"] or ""
+                ct = int(cr["trades"] or 0)
+                cw = int(cr["coin_wins"] or 0)
+                coin_breakdown.append({
+                    "symbol": sym,
+                    "trades": ct,
+                    "wins": cw,
+                    "win_rate": round(cw / ct * 100, 1) if ct > 0 else 0.0,
+                    "pnl": float(cr["coin_pnl"] or 0),
+                })
+            stats["coin_breakdown"] = coin_breakdown
+            stats["most_traded"] = sorted(coin_breakdown, key=lambda x: x["trades"], reverse=True)[:5]
+            stats["most_profitable"] = sorted(coin_breakdown, key=lambda x: x["pnl"], reverse=True)[:5]
+
+            # ── Active trades ──
+            active_rows = await conn.fetch(
+                "SELECT tp.*, tr.handle_normalized, tr.display_name, tr.platform, tr.trader_type "
+                "FROM public.tracked_positions tp "
+                "LEFT JOIN public.trader_profiles tr ON tr.id = tp.trader_profile_id "
+                "WHERE tp.status IN ('open', 'pending', 'partial_exit') "
+                "  AND " + _MATCH_WHERE + " "
+                "ORDER BY tp.signal_timestamp DESC NULLS LAST "
+                "LIMIT 200",
+                trader_id,
+            )
+            trades_active = [dict(r) for r in active_rows]
+
+            # ── History trades ──
+            history_rows = await conn.fetch(
+                "SELECT tp.*, tr.handle_normalized, tr.display_name, tr.platform, tr.trader_type "
+                "FROM public.tracked_positions tp "
+                "LEFT JOIN public.trader_profiles tr ON tr.id = tp.trader_profile_id "
+                "WHERE tp.status NOT IN ('open', 'pending', 'partial_exit') "
+                "  AND " + _MATCH_WHERE + " "
+                "ORDER BY COALESCE(tp.closed_at, tp.updated_at, tp.signal_timestamp) DESC NULLS LAST "
+                "LIMIT 500",
+                trader_id,
+            )
+            trades_history = [dict(r) for r in history_rows]
+
+            # ── AI learnings from agent_decisions ──
+            learn_rows = await conn.fetch(
+                "SELECT ad.id, ad.mode, ad.verdict, ad.confidence, ad.rationale, "
+                "ad.decided_at, ad.inputs, ad.outputs, "
+                "ap.name AS persona_name, ap.role AS persona_role "
+                "FROM public.agent_decisions ad "
+                "JOIN public.agent_personas ap ON ap.id = ad.persona_id "
+                "WHERE ad.rationale IS NOT NULL AND ad.rationale <> '' "
+                "  AND (ad.inputs::text ILIKE '%' || $1 || '%' "
+                "       OR ad.outputs::text ILIKE '%' || $1 || '%') "
+                "ORDER BY ad.decided_at DESC "
+                "LIMIT 80",
+                trader_id,
+            )
+            for lr in learn_rows:
+                ai_learnings.append({
+                    "id": lr["id"],
+                    "mode": lr["mode"],
+                    "verdict": lr["verdict"],
+                    "confidence": float(lr["confidence"] or 0),
+                    "rationale": lr["rationale"],
+                    "decided_at": lr["decided_at"].isoformat() if lr["decided_at"] else None,
+                    "persona_name": lr["persona_name"],
+                    "persona_role": lr["persona_role"],
+                })
+
+            # ── AI learnings from position_postmortems (join via trader) ──
+            pm_rows = await conn.fetch(
+                "SELECT pm.lessons_for_actor, pm.what_happened, pm.why_it_worked, pm.why_it_failed, "
+                "pm.created_at, pm.position_id, "
+                "tp.instrument_symbol, tp.direction "
+                "FROM public.position_postmortems pm "
+                "JOIN public.tracked_positions tp ON tp.id = pm.position_id "
+                "WHERE pm.lessons_for_actor IS NOT NULL AND pm.lessons_for_actor <> '' "
+                "  AND " + _MATCH_WHERE + " "
+                "ORDER BY pm.created_at DESC "
+                "LIMIT 60",
+                trader_id,
+            )
+            for pr in pm_rows:
+                ai_learnings.append({
+                    "source": "postmortem",
+                    "position_id": pr["position_id"],
+                    "symbol": pr["instrument_symbol"],
+                    "direction": pr["direction"],
+                    "what_happened": pr["what_happened"],
+                    "why_it_worked": pr["why_it_worked"],
+                    "why_it_failed": pr["why_it_failed"],
+                    "lesson": pr["lessons_for_actor"],
+                    "created_at": pr["created_at"].isoformat() if pr["created_at"] else None,
+                })
+
+            # Sort learnings by date
+            ai_learnings.sort(
+                key=lambda x: x.get("decided_at") or x.get("created_at") or "",
+                reverse=True,
+            )
+
+    except Exception as e:
+        LOG.error("Trader drill failed: %s", e)
 
     return {
         "trader_id": trader_id,
-        "performance": perf,
-        "recent_trades": sorted(trades, key=lambda x: x.get("signal_timestamp") or datetime.min, reverse=True)[:50]
+        "stats": stats,
+        "trades_active": trades_active,
+        "trades_history": trades_history,
+        "ai_learnings": ai_learnings[:100],
     }
 
 
@@ -1789,6 +1933,11 @@ async def aggregate_agent_performance(
     total PnL, and trade count. Falls back to agent_decisions volume when
     tracked_positions has no data.
 
+    Also enriches each row with ``handle_normalized`` and ``display_name``
+    from ``trader_profiles`` (via ``trader_profile_id``) so the dashboard
+    can cross-reference performance rows with the leaderboard which uses
+    Discord handles as ``actor_id``.
+
     Args:
         company_filter: Optional company short-name; ``None`` or ``"all"``
             aggregates across every active company.
@@ -1804,25 +1953,28 @@ async def aggregate_agent_performance(
         async with pool.acquire() as conn:
             base_sql = (
                 "SELECT "
-                "  coalesce(actor_id, 'unknown') AS actor_id, "
-                "  company_id, "
+                "  coalesce(tp.actor_id, 'unknown') AS actor_id, "
+                "  tp.company_id, "
                 "  COUNT(*) AS total_trades, "
-                "  COUNT(*) FILTER (WHERE realized_pnl_usd > 0) AS wins, "
-                "  COUNT(*) FILTER (WHERE realized_pnl_usd < 0) AS losses, "
-                "  SUM(COALESCE(realized_pnl_usd, 0)) AS total_pnl, "
-                "  AVG(COALESCE(realized_pnl_usd, 0)) AS avg_pnl, "
-                "  MAX(COALESCE(realized_pnl_usd, 0)) AS best_trade, "
-                "  MIN(COALESCE(realized_pnl_usd, 0)) AS worst_trade "
-                "FROM public.tracked_positions "
-                "WHERE status <> 'open' "
-                "  AND realized_pnl_usd IS NOT NULL "
-                "  AND actor_id IS NOT NULL "
+                "  COUNT(*) FILTER (WHERE tp.realized_pnl_usd > 0) AS wins, "
+                "  COUNT(*) FILTER (WHERE tp.realized_pnl_usd < 0) AS losses, "
+                "  SUM(COALESCE(tp.realized_pnl_usd, 0)) AS total_pnl, "
+                "  AVG(COALESCE(tp.realized_pnl_usd, 0)) AS avg_pnl, "
+                "  MAX(COALESCE(tp.realized_pnl_usd, 0)) AS best_trade, "
+                "  MIN(COALESCE(tp.realized_pnl_usd, 0)) AS worst_trade, "
+                "  MIN(tr.handle_normalized) AS handle_normalized, "
+                "  MIN(tr.display_name) AS display_name "
+                "FROM public.tracked_positions tp "
+                "LEFT JOIN public.trader_profiles tr ON tr.id = tp.trader_profile_id "
+                "WHERE tp.status <> 'open' "
+                "  AND tp.realized_pnl_usd IS NOT NULL "
+                "  AND tp.actor_id IS NOT NULL "
             )
-            limit_sql = " GROUP BY actor_id, company_id ORDER BY total_pnl DESC LIMIT 50"
+            limit_sql = " GROUP BY tp.actor_id, tp.company_id ORDER BY total_pnl DESC LIMIT 50"
             if company_filter and company_filter != "all":
                 cr = await conn.fetch(
                     base_sql
-                    + "AND company_id = $1 "
+                    + "AND tp.company_id = $1 "
                     + limit_sql,
                     company_filter,
                 )

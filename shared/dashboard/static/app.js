@@ -6,7 +6,7 @@ const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll
 const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
 const n=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
 const fmt=(v,d=2)=>{const x=Number(v);return Number.isFinite(x)?x.toFixed(d):'—'};
-const usd=v=>`${n(v)>=0?'+':''}$${Math.abs(n(v)).toFixed(2)}`;
+const usd=v=>`${n(v)>=0?'+':'-'}$${Math.abs(n(v)).toFixed(2)}`;
 const pct=v=>`${n(v)>=0?'+':''}${fmt(v,2)}%`;
 const rel=iso=>{if(!iso)return'—';const s=Math.max(0,Math.floor((Date.now()-new Date(iso))/1000));if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`};
 const fmtDate=iso=>{if(!iso)return'—';const d=new Date(iso);return d.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})};
@@ -945,7 +945,7 @@ function renderSignalsTable(rows){table('#signals-table',[{label:'Signal'},{labe
    Positions tab now uses Live/Historic split via renderPositionsLive() and
    renderPositionsHistoric(). The legacy single-table renderer had no callers
    after the Round 11 split. */
-function renderTradersPage(){const pm=perfMap();let rows=(state.snap?.leaderboard||[]).map(t=>({...t,perf:pm[t.actor_id]||pm[`jarvais_${t.actor_id}`]}));const q=$('#traders-filter')?.value;rows=filterRows(rows,q,['actor_id','display_name','platform']);const sort=$('#traders-sort')?.value||'success';rows.sort((a,b)=>sort==='trades'?n(b.perf?.total_trades||b.closed_position_count)-n(a.perf?.total_trades||a.closed_position_count):sort==='pnl'?n(b.perf?.total_pnl)-n(a.perf?.total_pnl):sort==='edge'?n(b.edge_score)-n(a.edge_score):n(b.perf?.win_rate||0)-n(a.perf?.win_rate||0));const body=rows.map(t=>{const p=t.perf||{}, name=t.display_name||t.actor_id;return`<tr data-trader="${esc(t.actor_id)}"><td>${rowMain(name,`${t.platform||'discord'} · ${t.actor_type||'unknown'}`)}</td><td class="num">${fmt(p.win_rate,1)}%</td><td class="num">${p.total_trades??t.closed_position_count??0}</td><td class="num success">${p.wins??'—'}</td><td class="num danger">${p.losses??'—'}</td><td class="num ${n(p.total_pnl)>=0?'success':'danger'}">${p.total_pnl!=null?usd(p.total_pnl):'—'}</td><td class="num">${fmt(t.edge_score,3)}</td><td>${esc(t._company||'—')}</td></tr>`}).join('');table('#traders-table',[{label:'Discord / actor'},{label:'Success',num:1},{label:'Trades',num:1},{label:'Wins',num:1},{label:'Losses',num:1},{label:'P&L',num:1},{label:'Edge',num:1},{label:'Company'}],[body]);$$('#traders-table tr[data-trader]').forEach(tr=>tr.onclick=()=>openTrader(tr.dataset.trader))}
+function renderTradersPage(){const pm=perfMap();let rows=(state.snap?.leaderboard||[]).map(t=>({...t,perf:pm[t.actor_id]||pm[t.display_name]||pm[`jarvais_${t.actor_id}`]}));const q=$('#traders-filter')?.value;rows=filterRows(rows,q,['actor_id','display_name','platform']);const sort=$('#traders-sort')?.value||'success';rows.sort((a,b)=>sort==='trades'?n(b.perf?.total_trades||b.closed_position_count)-n(a.perf?.total_trades||a.closed_position_count):sort==='pnl'?n(b.perf?.total_pnl)-n(a.perf?.total_pnl):sort==='edge'?n(b.edge_score)-n(a.edge_score):n(b.perf?.win_rate||0)-n(a.perf?.win_rate||0));const body=rows.map(t=>{const p=t.perf||{}, name=t.display_name||t.actor_id;return`<tr data-trader="${esc(t.actor_id)}"><td>${rowMain(name,`${t.platform||'discord'} · ${t.actor_type||'unknown'}`)}</td><td class="num">${fmt(p.win_rate,1)}%</td><td class="num">${p.total_trades??t.closed_position_count??0}</td><td class="num success">${p.wins??'—'}</td><td class="num danger">${p.losses??'—'}</td><td class="num ${n(p.total_pnl)>=0?'success':'danger'}">${p.total_pnl!=null?usd(p.total_pnl):'—'}</td><td class="num">${fmt((t.edge_score||0)*100,1)}%</td><td>${esc(t._company||'—')}</td></tr>`}).join('');table('#traders-table',[{label:'Discord / actor'},{label:'Success',num:1},{label:'Trades',num:1},{label:'Wins',num:1},{label:'Losses',num:1},{label:'P&L',num:1},{label:'Edge',num:1},{label:'Company'}],[body]);$$('#traders-table tr[data-trader]').forEach(tr=>tr.onclick=()=>openTrader(tr.dataset.trader))}
 
 /* ─── Discord drawer with per-chart tabs ─── */
 async function openDiscordDrawer(newsItemId,newsSrc){
@@ -1342,7 +1342,92 @@ const _src=String(r.signal_source||r.position?.signal_source||r.signal?.signal_s
 const _srcTag=_src==='chart_hacker'?' · AI INFERRED (ChartHacker)':(_src==='trader'?' · TRADER CALL':'');
 $('#drawer-kicker').textContent=`CALL DETAIL | INTERP ID: ${r.id}${_srcTag}`;
 $('#drawer-body').innerHTML=`<div class="drawer-panel chart-panel"><img class="chart-img xl" src="${chartUrl}" loading="lazy" decoding="async"><div class="level-grid wide">${levelCards(levels)}</div></div>`}
-function openTrader(actor){const sigs=(state.snap?.signals||[]).filter(s=>[s.actor_id,s.trader_handle_normalized,s.trader_display_name].includes(actor)||JSON.stringify(s).includes(actor));const lessons=(state.learning?.feed?.rows||[]).filter(l=>String(l.actor||'').includes(actor));openDrawer(actor,'TRADER INTEL',`<div class="drawer-panel"><h3>Recent calls</h3><div class="table-wrap"><table class="data-table"><tbody>${sigRows(sigs,12)}</tbody></table></div></div><div class="drawer-panel"><h3>What AI learned about them</h3>${lessons.slice(0,8).map(r=>`<div class="lesson"><div class="lesson-body">${esc(r.body)}</div><div class="lesson-foot">${rel(r.ts)}</div></div>`).join('')||'<div class="secondary">No targeted lessons in current window.</div>'}</div>`);wireRows()}
+async function openTrader(actor){openDrawer(actor,'TRADER INTEL','<div class="empty">Loading trader intelligence…</div>');try{const d=await api(`/api/trader-drill?trader_id=${encodeURIComponent(actor)}`);renderTraderDrawer(d,actor)}catch(e){console.error('trader drill failed',e);$('#drawer-body').innerHTML=`<div class="empty">Failed to load trader data: ${esc(e?.message||e)}</div>`}}
+
+/* ─── Trader drawer — stats + Active/History tabs + AI learnings ─── */
+function renderTraderDrawer(d,actor){
+  const s=d.stats||{};
+  const pnlOk=n(s.total_pnl)>=0;
+  let html='';
+
+  // ── Stats summary grid ──
+  html+=`<div class="trader-stats-grid">`;
+  html+=`<div><label>Total Trades</label><strong>${s.total_trades||0}</strong></div>`;
+  html+=`<div><label>Wins</label><strong class="success">${s.wins||0}</strong></div>`;
+  html+=`<div><label>Losses</label><strong class="danger">${s.losses||0}</strong></div>`;
+  html+=`<div><label>Win Rate</label><strong>${fmt(s.win_rate,1)}%</strong></div>`;
+  html+=`<div><label>Total P&L</label><strong class="${pnlOk?'success':'danger'}">${usd(s.total_pnl)}</strong></div>`;
+  html+=`<div><label>Avg Win</label><strong class="success">${usd(s.avg_win)}</strong></div>`;
+  html+=`<div><label>Avg Loss</label><strong class="danger">${usd(s.avg_loss)}</strong></div>`;
+  html+=`<div><label>Best Trade</label><strong class="success">${usd(s.best_trade)}</strong></div>`;
+  html+=`<div><label>Worst Trade</label><strong class="danger">${usd(s.worst_trade)}</strong></div>`;
+  html+=`<div><label>Unique Coins</label><strong>${s.unique_coins||0}</strong></div>`;
+  html+=`<div><label>Closed</label><strong>${s.closed_trades||0}</strong></div>`;
+  html+=`<div><label>Breakeven</label><strong>${s.breakeven||0}</strong></div>`;
+  html+=`</div>`;
+
+  // ── Most traded / Most profitable coins ──
+  if((s.most_traded||[]).length||(s.most_profitable||[]).length){
+    html+=`<div class="trader-coins-grid">`;
+    html+=`<div><h3>Most Traded</h3><div class="coin-list">${(s.most_traded||[]).map(c=>`<span class="coin-chip ${n(c.pnl)>=0?'win':'loss'}">${esc(dispSymbol(c.symbol))} <em>${c.trades}t · ${c.wins}w · ${usd(c.pnl)}</em></span>`).join('')||'<span class="secondary">—</span>'}</div></div>`;
+    html+=`<div><h3>Most Profitable</h3><div class="coin-list">${(s.most_profitable||[]).map(c=>`<span class="coin-chip ${n(c.pnl)>=0?'win':'loss'}">${esc(dispSymbol(c.symbol))} <em>${usd(c.pnl)} · ${c.win_rate}%</em></span>`).join('')||'<span class="secondary">—</span>'}</div></div>`;
+    html+=`</div>`;
+  }
+
+  // ── Trade tabs ──
+  const hasActive=(d.trades_active||[]).length>0;
+  const hasHistory=(d.trades_history||[]).length>0;
+  if(hasActive||hasHistory){
+    html+=`<div class="trader-trade-tabs" id="trader-trade-tabs">`;
+    html+=`<button class="comp-dtab active" data-ttab="active">Active (${d.trades_active.length})</button>`;
+    html+=`<button class="comp-dtab" data-ttab="history">History (${d.trades_history.length})</button>`;
+    html+=`</div>`;
+    html+=`<div class="trader-trades-panel" id="trader-trades-panel"></div>`;
+  }
+
+  // ── AI Learnings ──
+  const learnings=d.ai_learnings||[];
+  if(learnings.length){
+    html+=`<div class="trader-learnings"><h3>AI Learnings <span class="secondary">(${learnings.length})</span></h3>`;
+    html+=learnings.slice(0,30).map(l=>{
+      if(l.source==='postmortem'){
+        return `<div class="lesson"><div class="lesson-kind">POSTMORTEM · ${esc(dispSymbol(l.symbol))} · ${esc(l.direction||'')}</div><div class="lesson-body">${esc(l.lesson||l.what_happened||'')}</div>${l.why_it_worked?`<div class="lesson-body"><b>Why it worked:</b> ${esc(l.why_it_worked)}</div>`:''}${l.why_it_failed?`<div class="lesson-body"><b>Why it failed:</b> ${esc(l.why_it_failed)}</div>`:''}<div class="lesson-foot">${rel(l.created_at)}</div></div>`;
+      }
+      return `<div class="lesson"><div class="lesson-kind">${esc(l.persona_name||l.mode||'AI')} · ${esc(l.verdict||'')}</div><div class="lesson-body">${esc(l.rationale||'')}</div><div class="lesson-foot">${rel(l.decided_at)}</div></div>`;
+    }).join('');
+    html+=`</div>`;
+  }
+
+  $('#drawer-body').innerHTML=html;
+
+  // ── Wire trade tabs ──
+  const activeData=d.trades_active||[];
+  const historyData=d.trades_history||[];
+  function _renderTrades(rows){
+    if(!rows.length) return '<div class="empty">No trades</div>';
+    return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Symbol</th><th>Direction</th><th>Entry</th><th>Exit</th><th>Status</th><th class="num">P&L</th><th>Outcome</th><th>Opened</th></tr></thead><tbody>${rows.map(r=>{
+      const sym=dispSymbol(r.instrument_symbol);
+      const dir=r.direction||'';
+      const entry=n(r.entry_price);
+      const exit=n(r.exit_price);
+      const status=r.status||'';
+      const pnl=n(r.realized_pnl_usd||r.unrealized_pnl_usd);
+      const outcome=r.outcome||'';
+      const opened=r.signal_timestamp||r.created_at||'';
+      return `<tr><td>${esc(sym)}</td><td>${dirPill(dir)}</td><td>${fmt(entry,4)}</td><td>${exit?fmt(exit,4):'—'}</td><td>${pill(status,status)}</td><td class="num ${pnl>=0?'success':'danger'}">${pnl!==0?usd(pnl):'—'}</td><td>${esc(outcome||status)}</td><td>${fmtDate(opened)}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+  const panel=$('#trader-trades-panel');
+  if(panel){
+    const defaultTab=hasActive?'active':'history';
+    panel.innerHTML=_renderTrades(defaultTab==='active'?activeData:historyData);
+    $$('#trader-trade-tabs .comp-dtab').forEach(b=>b.onclick=()=>{
+      $$('#trader-trade-tabs .comp-dtab').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      panel.innerHTML=_renderTrades(b.dataset.ttab==='active'?activeData:historyData);
+    });
+  }
+}
 
 /* ─── shared ui ─── */
 function table(id,cols,rows,onSort){const head=cols.map(c=>`<th class="${c.num?'num ':''}${c.sort?'sortable':''}" data-key="${c.key||''}">${esc(c.label)}</th>`).join('');const body=rows.join('')||`<tr><td colspan="${cols.length}" class="empty">No data</td></tr>`;$(id).innerHTML=`<table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;if(onSort)$$(id+' th[data-key]').forEach(th=>th.onclick=()=>onSort(th.dataset.key))}
@@ -1380,7 +1465,7 @@ function attachDrawerResizer(){
   document.addEventListener('visibilitychange',()=>{if(document.hidden)cleanup()});
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.body.classList.contains('drawer-resizing'))cleanup()});
 }
-function perfMap(){const m={};(state.agentPerf?.agent_performance||[]).forEach(p=>m[p.actor_id]=p);return m}
+function perfMap(){const m={};(state.agentPerf?.agent_performance||[]).forEach(p=>{m[p.actor_id]=p;if(p.handle_normalized)m[p.handle_normalized]=p;if(p.display_name)m[p.display_name]=p});return m}
 function safeJson(s){try{return typeof s==='string'?JSON.parse(s):s}catch{return{}}}
 function chart(id){const el=document.getElementById(id);if(!el||!window.echarts)return null;
   // 2026-05-24: Force-clear the container before re-init. We were seeing stuck
