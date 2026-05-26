@@ -169,6 +169,7 @@ class LlmResult:
     prompt_version: str = ""
     prompt_hash: str = ""
     prompt_source: str = ""  # 'db', 'config', or 'file'
+    setup_state: str = ""  # actionable|in_play|projection|commentary — gates trade creation
 
 
 @dataclass
@@ -1333,6 +1334,7 @@ async def run_llm_track(
                     prompt_version=prompt_version,
                     prompt_hash=prompt_hash,
                     prompt_source=_prompt_source,
+                    setup_state=str(parsed.get("setup_state", parsed.get("chart_state", ""))).strip(),
                 )
             except Exception as exc:
                 last_exc = exc
@@ -4235,7 +4237,16 @@ class InterpretationService:
         # Both pass through the same downstream pipeline (monitor → postmortem
         # → skill score) and land on the same leaderboard.
         positions_created: List[int] = []
-        if sig_id is not None and llm_result is not None:
+        # Gate: skip tracked_position creation for non-actionable setup states.
+        # in_play/commentary/projection get signal_interpretation rows (analytics)
+        # but no tracked_position (no trade). Empty setup_state = old prompt, allowed.
+        setup_state = (llm_result.setup_state or "").lower().strip() if llm_result else ""
+        if setup_state in ("in_play", "projection", "commentary"):
+            logger.info(
+                "media_id=%s: setup_state=%s — logging only, no trade created",
+                media_id, setup_state,
+            )
+        elif sig_id is not None and llm_result is not None:
             chart_hacker_pid = await _get_chart_hacker_profile_id(shared_pool)
 
             async def _write_one(
