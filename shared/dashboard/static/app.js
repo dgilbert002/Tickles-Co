@@ -43,7 +43,7 @@ async function renderCompetition(){
     const liveReturn=((liveEq/starting)-1)*100;
     return `<tr class="comp-row" data-agent="${esc(p.agent_id)}" id="comp-tr-${esc(p.agent_id)}">
       <td class="num rank">#${p.rank}</td>
-      <td>${rowMain(p.agent_id,p.metadata?.description||p.strategy_ref||'')}</td>
+      <td title="${esc(p.metadata?.description||'')}">${rowMain(p.agent_id,(p.metadata?.description||p.strategy_ref||'').split('.')[0])}</td>
       <td>${esc(p.strategy_ref||'—')}</td>
       <td class="num mono">$${fmt(eq,2)}</td>
       <td class="num mono"><strong>$${fmt(liveEq,2)}</strong></td>
@@ -54,10 +54,9 @@ async function renderCompetition(){
       <td class="num">${p.scores?.open_positions||0}</td>
     </tr>`;
   });
-  $('#competition-body').innerHTML=`<table class="data-table comp-table"><thead><tr>
-    <th class="num">Rank</th><th>Agent / description</th><th>Strategy</th>
-    <th class="num">Balance</th><th class="num">Live Equity</th><th class="num">P&L</th><th class="num">Return</th>
-    <th class="num">Win</th><th class="num">Trades</th><th class="num">Open</th>
+  $('#competition-body').innerHTML=`<div class="comp-scroll"><table class="data-table comp-table"><thead><tr>
+    <th class="num">#</th><th>Agent</th><th class="num" style="min-width:70px">Balance</th><th class="num" style="min-width:80px">Live Eq</th><th class="num" style="min-width:90px">P&L</th><th class="num" style="min-width:80px">Return</th>
+    <th class="num" style="min-width:55px">Win</th><th class="num">Trd</th><th class="num">Opn</th>
   </tr></thead><tbody>${rows.join('')}</tbody></table><div id="comp-expand-zone"></div>`;
   $$('#competition-body .comp-row').forEach(tr=>tr.onclick=()=>toggleAgentExpand(tr.dataset.agent));
   // Restore expanded agent after refresh
@@ -1562,14 +1561,14 @@ function updateCompNumbers(){
     const rpct=n(p.scores?.return_pct), starting=n(p.scores?.starting_balance_usd)||1000;
     const liveReturn=((liveEq/starting)-1)*100;
     const cells=tr.querySelectorAll('td');
-    if(cells.length>=9){
-      cells[3].innerHTML='$'+fmt(eq,2);                    // Balance
-      cells[4].innerHTML='<strong>$'+fmt(liveEq,2)+'</strong>'; // Live Equity
-      cells[5].innerHTML=usd(p.scores?.total_realized_pnl_usd)+'<br><span class="secondary small">unreal '+usd(p.scores?.unrealized_pnl_usd)+'</span>'; // P&L
-      cells[6].innerHTML='<span class="'+(rpct>=0?'success':'danger')+'">'+pct(rpct)+'</span><br><span class="secondary small">'+pct(liveReturn)+' live</span>'; // Return
-      cells[7].textContent=fmt(n(p.scores?.win_rate)*100,1)+'%'; // Win
-      cells[8].textContent=p.scores?.total_trades||0;      // Trades
-      cells[9].textContent=p.scores?.open_positions||0;    // Open
+    if(cells.length>=8){
+      cells[2].innerHTML='$'+fmt(eq,2);                    // Balance
+      cells[3].innerHTML='<strong>$'+fmt(liveEq,2)+'</strong>'; // Live Equity
+      cells[4].innerHTML=usd(p.scores?.total_realized_pnl_usd)+'<br><span class="secondary small">unreal '+usd(p.scores?.unrealized_pnl_usd)+'</span>'; // P&L
+      cells[5].innerHTML='<span class="'+(rpct>=0?'success':'danger')+'">'+pct(rpct)+'</span><br><span class="secondary small">'+pct(liveReturn)+' live</span>'; // Return
+      cells[6].textContent=fmt(n(p.scores?.win_rate)*100,1)+'%'; // Win
+      cells[7].textContent=p.scores?.total_trades||0;      // Trades
+      cells[8].textContent=p.scores?.open_positions||0;    // Open
     }
   });
   $('#updated-at').textContent=new Date().toLocaleTimeString();

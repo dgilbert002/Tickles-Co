@@ -239,6 +239,8 @@ body.drawer-resizing{cursor:ew-resize;user-select:none}
 .call-text.big{font-size:14px;line-height:1.55;color:var(--soft)}
 
 /* Competition inline expand */
+.comp-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
+.comp-scroll table{min-width:680px;white-space:nowrap}
 .comp-row{cursor:pointer;transition:background .15s}
 .comp-row:hover{background:var(--hover)!important}
 .comp-row.expanded{background:linear-gradient(135deg,rgba(252,114,255,.08),rgba(122,92,255,.06))!important;box-shadow:inset 0 0 0 1px rgba(252,114,255,.18)}
