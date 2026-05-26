@@ -407,7 +407,7 @@ class LiveCopyTradeMonitor:
 
 
                   AND tp.signal_timestamp >= NOW() - INTERVAL '7 days'
-                  AND (tp.actor_id LIKE 'jarvais_trader_%' OR tp.actor_id = 'jarvais_chart_hacker')
+                  AND (tp.actor_id LIKE 'jarvais_trader_%' OR tp.actor_id = 'jarvais_chart_hacker' OR tp.actor_id = 'jarvais_rose_ch')
                 ORDER BY tp.signal_timestamp DESC
                 LIMIT 200
             """)
@@ -532,6 +532,21 @@ class LiveCopyTradeMonitor:
             await self._save_agent(agent_name)
         except Exception as exc:
             logger.warning("copy_agent_state save (open) failed for %s: %s", agent_name, exc)
+
+    async def _sync_sl_tp(self):
+        """Re-read SL/TP from tracked_positions for all in-memory positions."""
+        pool = await self._ensure_pool()
+        for agent_name, agent in self._agents.items():
+            for pos in agent["open_positions"]:
+                row = await pool.fetch_one(
+                    "SELECT stop_loss, take_profit_1 FROM tracked_positions WHERE id = $1",
+                    (pos["trader_id"],),
+                )
+                if row:
+                    if row["stop_loss"] and float(row["stop_loss"] or 0) > 0:
+                        pos["sl"] = float(row["stop_loss"])
+                    if row["take_profit_1"] and float(row["take_profit_1"] or 0) > 0:
+                        pos["tp"] = float(row["take_profit_1"])
 
     async def _check_agent_positions(self, agent_name: str):
         """Check all open positions for one agent against recent candles."""
@@ -850,6 +865,8 @@ class LiveCopyTradeMonitor:
         logger.info("Tick start")
         # 0. Refresh optimal multipliers from DB
         await self._load_optimal_multipliers()
+        # 0.5 Sync SL/TP from tracked_positions (may have been updated by LLM re-extraction)
+        await self._sync_sl_tp()
         # 1. Enter new trader positions
         new_positions = await self._get_new_open_positions()
         for pos in new_positions:

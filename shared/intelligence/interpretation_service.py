@@ -2453,6 +2453,7 @@ _KNOWN_BASES = {
     # Rose/DigiLeakBot frequent coins (May 2026)
     "TAO", "HYPE", "ZEC", "TOWNS", "LPT", "RENDER", "ONDO", "FET",
     "KAS", "VIRTUAL", "BEAM", "ICP", "ALGO", "BRETT", "WLD",
+    "DOLO", "FLUX", "MITO", "YB",
     # Wrapped / staked / stablecoins (treated as crypto bases too)
     "WBTC", "WETH", "STETH", "USDC", "DAI", "TUSD",
     # Forex majors and minors
@@ -2488,6 +2489,7 @@ _BARE_CRYPTO_BASES = {
     "BNB", "LTC", "MATIC", "UNI", "AAVE", "NEAR", "APT", "SUI",
     "TAO", "HYPE", "ZEC", "TOWNS", "LPT", "RENDER", "ONDO", "FET",
     "KAS", "VIRTUAL", "BEAM", "ICP", "ALGO", "BRETT", "WLD",
+    "DOLO", "FLUX", "MITO", "YB",
 }
 
 
