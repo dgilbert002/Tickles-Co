@@ -35,8 +35,10 @@ from shared.utils.db import get_company_pool, get_shared_pool
 
 logger = logging.getLogger(__name__)
 
-# 250ms hard budget per provider, matching PHASE_Y §4.3.
-NEWS_PROVIDER_TIMEOUT_S: float = 0.25
+# 750ms budget — the original 250ms was too tight for cold-cache queries
+# at limit=120 (observed ~264ms). The provider itself is still defensive
+# and returns empty on timeout so the dashboard never hangs.
+NEWS_PROVIDER_TIMEOUT_S: float = 0.75
 
 # Allowed window sizes in days. ``1`` (24h) is news-specific; 7/30 mirror
 # the learning tab. ``14`` is intentionally not offered for news — the
