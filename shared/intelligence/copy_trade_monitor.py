@@ -52,7 +52,7 @@ AGENTS = [
     ("C+Opt: +BE Lock",  None, None, "lev_be_lock_opt"),
     ("CH: AI Vision",    1.0, 1.0, "spot_seq_ch"),
     ("A×3: Spot Lev 3x", 1.0, 1.0, "spot_lev_3x"),
-    ("Rose CH: AI Vision", 1.0, 1.0, "spot_seq_rose"),
+    ("Rose CH: AI Vision", 1.0, 1.0, "lev_parallel"),
 ]
 
 # Display-name → DB-id mapping. Round-7 persistence migration (2026-05-24):
