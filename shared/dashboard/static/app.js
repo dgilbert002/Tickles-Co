@@ -1516,6 +1516,7 @@ function wire(){
   ['floor-signal-filter','floor-position-filter'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=()=>renderFloor()});
   ['radar-filter','radar-age'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderRadarPage()});
   ['signals-filter','signals-status'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderSignalsPage()});
+  const ust=$('#unified-status'); if(ust) ust.onchange=()=>renderUnifiedPage();
   // Round 11: Positions tab Live/Historic sub-tabs + filters.
   $$('#tab-positions .comp-dtab').forEach(b=>b.onclick=()=>{
     _positionsState.sub=b.dataset.ptab;
