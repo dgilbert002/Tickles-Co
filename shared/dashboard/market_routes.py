@@ -1087,6 +1087,27 @@ async def handle_competition_agent(request: web.Request) -> web.Response:
             for r in rows:
                 live_prices_by_canon[r["symbol"]] = float(r["close"])
 
+        # Fallback: for symbols with no candles, use tracked_positions.current_price
+        unpriced = [raw for raw in raw_symbols if raw_to_canon.get(raw, raw) not in live_prices_by_canon]
+        if unpriced:
+            tp_rows = await pool.fetch_all(
+                """
+                SELECT DISTINCT ON (instrument_symbol) instrument_symbol, current_price
+                FROM public.tracked_positions
+                WHERE instrument_symbol = ANY($1) AND current_price IS NOT NULL AND current_price > 0
+                ORDER BY instrument_symbol, updated_at DESC
+                """,
+                (unpriced,),
+            )
+            for r in tp_rows:
+                sym = r["instrument_symbol"] or ""
+                if sym and r["current_price"]:
+                    # Also try without :USDT suffix
+                    clean = sym.replace(':USDT','').replace(':USDC','')
+                    live_prices_by_canon[sym] = float(r["current_price"])
+                    if clean != sym:
+                        live_prices_by_canon[clean] = float(r["current_price"])
+
         # Resolve each trade's symbol back via raw->canon map.
         live_prices: dict[str, float] = {
             raw: live_prices_by_canon.get(raw_to_canon.get(raw, raw))
