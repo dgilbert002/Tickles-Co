@@ -52,7 +52,9 @@ AGENTS = [
     ("C+Opt: +BE Lock",  None, None, "lev_be_lock_opt"),
     ("CH: AI Vision",    1.0, 1.0, "spot_seq_ch"),
     ("A×3: Spot Lev 3x", 1.0, 1.0, "spot_lev_3x"),
-    ("Rose CH: AI Vision", 1.0, 1.0, "lev_parallel"),
+    ("Rose A: Spot Seq",  1.0, 1.0, "spot_seq_rose"),
+    ("Rose B: Lev Par",   1.0, 1.0, "lev_parallel_rose"),
+    ("Rose C: +BE Lock",  1.0, 1.0, "lev_be_lock_rose"),
 ]
 
 # Display-name → DB-id mapping. Round-7 persistence migration (2026-05-24):
@@ -69,7 +71,9 @@ NAME_TO_ID = {
     "C+Opt: +BE Lock":  "copy_opt_lev_be_lock",
     "CH: AI Vision":    "copy_ch_ai_vision",
     "A×3: Spot Lev 3x": "copy_spot_lev_3x",
-    "Rose CH: AI Vision": "copy_rose_ch",
+    "Rose A: Spot Seq":  "copy_rose_a",
+    "Rose B: Lev Par":   "copy_rose_b",
+    "Rose C: +BE Lock":  "copy_rose_c",
 }
 ID_TO_NAME = {v: k for k, v in NAME_TO_ID.items()}
 
