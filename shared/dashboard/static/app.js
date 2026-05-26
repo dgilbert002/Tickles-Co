@@ -216,7 +216,11 @@ async function renderUnifiedPage(){
   $('#unified-card-panel').classList.toggle('hidden',view!=='card');
   try{
     const d=await api('/api/unified-signals?limit=120');
-    const rows=d.signals||[];
+    let rows=d.signals||[];
+    const statusEl=$('#unified-status');const sf=statusEl?.value||'';
+    if(!sf||sf===''){
+      rows=rows.filter(r=>!['closed','cancelled','expired','invalidated'].includes(r.position_status));
+    }
     if(view==='card'){
       const sorted=[...rows].sort((a,b)=>signalDistance(a)-signalDistance(b));
       $('#unified-card-panel').innerHTML=sorted.map(radarCard).join('')||'<div class=empty>No signals</div>';
