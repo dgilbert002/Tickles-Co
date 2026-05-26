@@ -206,7 +206,7 @@ _CRYPTO_FIRST_REMAP: Dict[str, str] = {
     "NQ/USDT":         "QQQ/USDT",
     "NAS100/USDT":     "QQQ/USDT",
     "US100/USDT":      "QQQ/USDT",
-    "US30/USDT":       "DXY/USDT",
+    # US30 (Dow Jones) has no tokenized perp — leave for capital.com routing
     # Tokenised stocks (NVDA, MSTR, TSLA, AAPL etc.) reach the resolver
     # by their bare ticker via the bare-crypto-base path. Aliases here
     # are reserved for cross-asset-class translations.

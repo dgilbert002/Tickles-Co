@@ -3991,6 +3991,9 @@ class InterpretationService:
                     "— overriding, processing as chart",
                     media_id, symbol,
                 )
+                # Clear the prefilter's direction='unclear' verdict so the
+                # consensus engine treats this as a fresh chart analysis.
+                llm_result = None
                 # Fall through to normal processing below
             else:
                 reason_snippet = llm_result.reasoning[:240]
@@ -4089,8 +4092,11 @@ class InterpretationService:
                             if _clean and len(_clean) >= 2:
                                 s = _clean
                 # Add /USDT if we end up with a bare base token
-                if s and "/" not in s:
+                if s and "/" not in s and s.upper() not in ("UNKNOWN", ""):
                     s = f"{s}/USDT"
+                # Guard: if cleanup produced nothing, fall back to UNKNOWN
+                if not s or s == "/USDT":
+                    s = "UNKNOWN"
                 symbol = s
                 # Reject dominance metrics: USDT.D, BTC.D, TOTAL3 etc.
                 if symbol and symbol.endswith(".D/USDT"):

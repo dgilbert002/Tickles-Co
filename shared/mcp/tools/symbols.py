@@ -44,15 +44,22 @@ async def _get_pool() -> Any:
     return await DatabasePool.get_instance()
 
 
-# Copy of cleanup from interpretation_service (keep in sync)
-_REMAP_KEYS = {
-    "BITTENSOR/USDT": "TAO/USDT", "ZCASH/USDT": "ZEC/USDT",
-    "BEAMX/USDT": "BEAM/USDT",
-    "XAU/USD": "XAU/USDT", "BTC/USD": "BTC/USDT", "ETH/USD": "ETH/USDT",
-    "GOLD": "XAU/USDT", "XAU": "XAU/USDT",
-    "NQ": "QQQ/USDT", "NAS100": "QQQ/USDT", "US100": "QQQ/USDT",
-    "NQ/USDT": "QQQ/USDT", "NAS100/USDT": "QQQ/USDT",
-}
+# Import from source of truth (exchange_router._CRYPTO_FIRST_REMAP)
+# Lazy import so tests don't need the full dependency chain
+def _get_remap():
+    try:
+        from shared.utils.exchange_router import _CRYPTO_FIRST_REMAP
+        return _CRYPTO_FIRST_REMAP
+    except Exception:
+        # Fallback for test environments
+        return {
+            "BITTENSOR/USDT": "TAO/USDT", "ZCASH/USDT": "ZEC/USDT",
+            "BEAMX/USDT": "BEAM/USDT",
+            "XAU/USD": "XAU/USDT", "BTC/USD": "BTC/USDT", "ETH/USD": "ETH/USDT",
+            "GOLD": "XAU/USDT", "XAU": "XAU/USDT",
+            "NQ": "QQQ/USDT", "NAS100": "QQQ/USDT", "US100": "QQQ/USDT",
+            "NQ/USDT": "QQQ/USDT", "NAS100/USDT": "QQQ/USDT",
+        }
 
 
 def _cleanup(raw: str) -> Optional[str]:
@@ -72,13 +79,13 @@ def _cleanup(raw: str) -> Optional[str]:
         base, quote = parts[0], parts[1]
         if quote in ("USD", "USDC", "BUSD", "TETHERUS"):
             s = f"{base}/USDT"
-        s = _REMAP_KEYS.get(s, s)
+        s = _get_remap().get(s, s)
     else:
         for q in ("USDT", "USDC", "USD", "BUSD"):
             if s.endswith(q) and len(s) > len(q):
                 s = s[:-len(q)]
                 break
-        s = _REMAP_KEYS.get(s, s)
+        s = _get_remap().get(s, s)
     # Strip contract-multiplier prefixes from BASE.
     # Only strips when there are 3+ leading digits (1000PEPE, 1000000MOG).
     # Single/double-digit prefixes are real tickers (1INCH, 2Z).
@@ -99,7 +106,7 @@ def _cleanup(raw: str) -> Optional[str]:
         s = f"{s}/USDT"
     # Re-apply remap for slash form after digit strip
     if "/" in s:
-        s = _REMAP_KEYS.get(s, s)
+        s = _get_remap().get(s, s)
     # Reject dominance metrics (USDT.D, BTC.D, etc.)
     if s.endswith(".D/USDT"):
         return None

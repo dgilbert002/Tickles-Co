@@ -212,6 +212,16 @@ async def resolve_pending(pool: DatabasePool) -> int:
     
     # Store results
     resolved_count = 0
+    # Guard: if LLM call completely failed (all None), leave all as pending.
+    # Only mark individual symbols unresolvable if the LLM explicitly said so.
+    all_failed = all(v is None for v in resolved.values())
+    if all_failed:
+        logger.warning(
+            "symbol_learner: LLM resolution failed for all %d unknowns — "
+            "leaving as pending for next cycle", len(unknowns),
+        )
+        return 0
+    
     for raw_symbol, mapping in resolved.items():
         if mapping and mapping.get("symbol") and mapping.get("exchange"):
             # Insert into symbol_mappings
