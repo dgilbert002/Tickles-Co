@@ -4031,6 +4031,16 @@ class InterpretationService:
                 s = llm_instrument
                 # Social-media prefixes: "$BTC" -> "BTC", "#SOL" -> "SOL"
                 s = s.lstrip("$#")
+                # Telegram/Rose format cleanup:
+                # "TAO/TetherUS Perpetual Contract" -> "TAO/USDT"
+                # "FLUX/USDT Perpetual" -> "FLUX/USDT"
+                # "YB / TetherUS Perpetual" -> "YB/USDT"
+                # "Zcash / U.S. Dollar - 2D - CRYPTO" -> "ZEC/USD"
+                s = _re.sub(r'(?i)\s*perpetual\s*(contract)?\s*$', '', s)
+                s = _re.sub(r'(?i)\s*-\s*\d+[DWMh]\s*-\s*CRYPTO\s*$', '', s)
+                s = s.replace(' / ', '/').replace('TetherUS', 'USDT').replace('TETHERUS', 'USDT')
+                s = _re.sub(r'(?i)/U\.S\.\s*Dollar', '/USD', s)
+                s = s.replace('Bitcoin', 'BTC').replace('Zcash', 'ZEC')
                 # Exchange prefix: "BYBIT:BTCUSDT.P" -> "BTCUSDT.P"
                 s = _re.sub(r"^[A-Z]+:", "", s)
                 # Perp/futures suffixes: .P, /P, :USDT, :USDC, 1!, USDT.P
