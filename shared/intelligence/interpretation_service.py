@@ -972,35 +972,47 @@ async def run_prefilter(
     image_b64 = _encode_image_b64(image_path)
     image_mime = _image_mime_type(image_path)
 
-    prefilter_prompt = (
-        "You are a fast binary gate in a trading-chart pipeline. Decide whether "
-        "an image is a FINANCIAL TRADING CHART that plausibly contains a trade "
-        "setup, so it can be passed to a stronger model for full analysis.\n\n"
-        "BIAS TOWARD PASSING IT THROUGH. A wrongly-dropped chart is lost forever; "
-        "a wrongly-passed image just costs one extra model call. When unsure, pass.\n\n"
-        "It IS a trading chart if you see ANY of these:\n"
-        "- Vertical candlesticks (red/green bars with wicks)\n"
-        "- A price axis with numeric values on the right or left edge\n"
-        "- A time axis with dates/months along the bottom\n"
-        "- A ticker/symbol header (e.g. \"TAO PERPETUAL CONTRACT\", \"HYPEUS 4H\")\n"
-        "- OHLC values in a header (Open/High/Low/Close numbers)\n"
-        "- Drawn overlays: trend lines, horizontal levels, colored rectangular zones\n\n"
-        "It plausibly contains a SETUP if you ALSO see any of:\n"
-        "- A colored rectangle (blue, tan/cream, orange, pink) drawn on the chart\n"
-        "- Boxed price labels on the right axis (blue, orange, green, red, gray)\n"
-        "- A drawn arrow, trendline, or marked target\n\n"
-        "Mobile screenshots count: the symbol/timeframe may be at the BOTTOM-LEFT "
-        "(e.g. \"HYPEUS 4H\") instead of the top, and the right axis may show "
-        "stacked colored price labels. Side-by-side dual charts count.\n"
-        "Watermarks/logos (e.g. \"Digileak.org\", \"@Digi_Leak\") do NOT disqualify.\n\n"
-        "Do NOT judge whether the setup is good, fresh, long, or short — that is "
-        "the next model's job. You only decide: chart + plausible setup → pass.\n\n"
-        "Respond ONLY with JSON, no prose, no markdown fences:\n"
-        "  {\"is_chart\": true|false, \"has_possible_setup\": true|false, "
-        "\"pass_to_strong\": true|false, \"confidence\": 0.0-1.0}\n"
-        "Set pass_to_strong = true if is_chart is true AND (has_possible_setup is true "
-        "OR confidence >= 0.5)."
-    )
+    # Load prefilter prompt from DB (dashboard-editable), fall back to hardcoded
+    try:
+        from shared.utils.db import DatabasePool
+        _pool = await DatabasePool.get_instance()
+        _row = await _pool.fetch_one(
+            "SELECT body FROM prompt_versions WHERE name='chart_prefilter' ORDER BY created_at DESC LIMIT 1"
+        )
+        if _row and _row["body"]:
+            prefilter_prompt = _row["body"]
+        else:
+            raise ValueError("no prefilter prompt in DB")
+    except Exception:
+        prefilter_prompt = (
+            "You are a fast binary gate in a trading-chart pipeline. Decide whether "
+            "an image is a FINANCIAL TRADING CHART that plausibly contains a trade "
+            "setup, so it can be passed to a stronger model for full analysis.\n\n"
+            "BIAS TOWARD PASSING IT THROUGH. A wrongly-dropped chart is lost forever; "
+            "a wrongly-passed image just costs one extra model call. When unsure, pass.\n\n"
+            "It IS a trading chart if you see ANY of these:\n"
+            "- Vertical candlesticks (red/green bars with wicks)\n"
+            "- A price axis with numeric values on the right or left edge\n"
+            "- A time axis with dates/months along the bottom\n"
+            "- A ticker/symbol header (e.g. \"TAO PERPETUAL CONTRACT\", \"HYPEUS 4H\")\n"
+            "- OHLC values in a header (Open/High/Low/Close numbers)\n"
+            "- Drawn overlays: trend lines, horizontal levels, colored rectangular zones\n\n"
+            "It plausibly contains a SETUP if you ALSO see any of:\n"
+            "- A colored rectangle (blue, tan/cream, orange, pink) drawn on the chart\n"
+            "- Boxed price labels on the right axis (blue, orange, green, red, gray)\n"
+            "- A drawn arrow, trendline, or marked target\n\n"
+            "Mobile screenshots count: the symbol/timeframe may be at the BOTTOM-LEFT "
+            "(e.g. \"HYPEUS 4H\") instead of the top, and the right axis may show "
+            "stacked colored price labels. Side-by-side dual charts count.\n"
+            "Watermarks/logos (e.g. \"Digileak.org\", \"@Digi_Leak\") do NOT disqualify.\n\n"
+            "Do NOT judge whether the setup is good, fresh, long, or short — that is "
+            "the next model's job. You only decide: chart + plausible setup → pass.\n\n"
+            "Respond ONLY with JSON, no prose, no markdown fences:\n"
+            "  {\"is_chart\": true|false, \"has_possible_setup\": true|false, "
+            "\"pass_to_strong\": true|false, \"confidence\": 0.0-1.0}\n"
+            "Set pass_to_strong = true if is_chart is true AND (has_possible_setup is true "
+            "OR confidence >= 0.5)."
+        )
     user_text = f"Chart for {instrument_symbol}."
 
     from shared.intelligence.gateway_config import GatewayConfig, call_vision_llm
