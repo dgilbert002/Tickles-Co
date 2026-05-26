@@ -1304,9 +1304,137 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
     })
 
 
+async def handle_traders_intel(request: web.Request) -> web.Response:
+    """GET /api/traders-intel — enriched trader stats with coins, frequency, avg win/loss.
+
+    Returns per-trader: win_rate, total_trades, total_pnl, avg_win, avg_loss,
+    trade_frequency (trades/week), most_traded_coins (top 5), most_profitable_coins (top 5),
+    plus handle/display_name from trader_profiles.
+    """
+    company = request.query.get("company") or None
+    from shared.utils.companies import list_active_companies
+    try:
+        companies = await list_active_companies()
+    except Exception:
+        companies = []
+    if company and company != "all":
+        companies = [c for c in companies if c == company]
+
+    pool = await get_shared_pool()
+
+    # ── Per-trader aggregate stats ──
+    agg_rows = await pool.fetch_all(
+        """
+        SELECT
+            tp.actor_id,
+            tp.company_id,
+            COUNT(*) AS total_trades,
+            COUNT(*) FILTER (WHERE tp.realized_pnl_usd > 0) AS wins,
+            COUNT(*) FILTER (WHERE tp.realized_pnl_usd < 0) AS losses,
+            COUNT(*) FILTER (WHERE tp.realized_pnl_usd = 0 AND tp.status NOT IN ('open','pending')) AS breakeven,
+            SUM(COALESCE(tp.realized_pnl_usd, 0)) AS total_pnl,
+            AVG(COALESCE(tp.realized_pnl_usd, 0)) FILTER (WHERE tp.realized_pnl_usd > 0) AS avg_win,
+            AVG(COALESCE(tp.realized_pnl_usd, 0)) FILTER (WHERE tp.realized_pnl_usd < 0) AS avg_loss,
+            MIN(tp.signal_timestamp) AS first_trade_ts,
+            MAX(tp.signal_timestamp) AS last_trade_ts,
+            MIN(tr.handle_normalized) AS handle_normalized,
+            MIN(tr.display_name) AS display_name,
+            MIN(tr.platform) AS platform,
+            MIN(tr.trader_type) AS trader_type
+        FROM public.tracked_positions tp
+        LEFT JOIN public.trader_profiles tr ON tr.id = tp.trader_profile_id
+        WHERE tp.actor_id IS NOT NULL
+          AND tp.status NOT IN ('open', 'pending')
+          AND tp.realized_pnl_usd IS NOT NULL
+        GROUP BY tp.actor_id, tp.company_id
+        ORDER BY total_pnl DESC
+        LIMIT 100
+        """
+    )
+
+    # ── Per-trader coin breakdown ──
+    coin_rows = await pool.fetch_all(
+        """
+        SELECT
+            tp.actor_id,
+            tp.instrument_symbol,
+            COUNT(*) AS trades,
+            COUNT(*) FILTER (WHERE tp.realized_pnl_usd > 0) AS coin_wins,
+            SUM(COALESCE(tp.realized_pnl_usd, 0)) AS coin_pnl
+        FROM public.tracked_positions tp
+        WHERE tp.actor_id IS NOT NULL
+          AND tp.instrument_symbol IS NOT NULL
+          AND tp.status NOT IN ('open', 'pending')
+          AND tp.realized_pnl_usd IS NOT NULL
+        GROUP BY tp.actor_id, tp.instrument_symbol
+        ORDER BY trades DESC
+        """
+    )
+
+    # Index coins by actor
+    coins_by_actor: dict[str, list[dict]] = {}
+    for cr in coin_rows:
+        aid = cr["actor_id"]
+        sym = cr["instrument_symbol"] or ""
+        coins_by_actor.setdefault(aid, []).append({
+            "symbol": sym,
+            "trades": int(cr["trades"] or 0),
+            "wins": int(cr["coin_wins"] or 0),
+            "pnl": float(cr["coin_pnl"] or 0),
+        })
+
+    result: list[dict] = []
+    now = datetime.now(timezone.utc)
+    for r in agg_rows:
+        total = int(r["total_trades"] or 0)
+        w = int(r["wins"] or 0)
+        l_ = int(r["losses"] or 0)
+        actor = r["actor_id"] or ""
+        win_rate = round(w / max(total, 1) * 100, 1)
+        avg_w = float(r["avg_win"] or 0)
+        avg_l = float(r["avg_loss"] or 0)
+        total_pnl = float(r["total_pnl"] or 0)
+
+        # Trade frequency: trades per week
+        first = r["first_trade_ts"]
+        last = r["last_trade_ts"]
+        freq = 0.0
+        if first and last and isinstance(first, datetime) and isinstance(last, datetime):
+            span_days = max(1, (last - first).total_seconds() / 86400)
+            freq = round(total / (span_days / 7), 1)
+
+        # Coin breakdown
+        coins = coins_by_actor.get(actor, [])
+        most_traded = sorted(coins, key=lambda x: x["trades"], reverse=True)[:5]
+        most_profitable = sorted(coins, key=lambda x: x["pnl"], reverse=True)[:5]
+
+        result.append({
+            "actor_id": actor,
+            "company": r["company_id"] or "",
+            "display_name": r["display_name"] or actor,
+            "handle_normalized": r["handle_normalized"] or "",
+            "platform": r["platform"] or "",
+            "trader_type": r["trader_type"] or "",
+            "total_trades": total,
+            "wins": w,
+            "losses": l_,
+            "breakeven": int(r["breakeven"] or 0),
+            "win_rate": win_rate,
+            "total_pnl": total_pnl,
+            "avg_win": round(avg_w, 2),
+            "avg_loss": round(avg_l, 2),
+            "trade_frequency_weekly": freq,
+            "most_traded_coins": most_traded,
+            "most_profitable_coins": most_profitable,
+        })
+
+    return _json({"ok": True, "traders": result})
+
+
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(prefix + "/api/candles", handle_candles)
     app.router.add_get(prefix + "/api/signal-replay", handle_signal_replay)
     app.router.add_get(prefix + "/api/entry-radar", handle_entry_radar)
     app.router.add_get(prefix + "/api/unified-signals", handle_unified_signals)
     app.router.add_get(prefix + "/api/competition-agent", handle_competition_agent)
+    app.router.add_get(prefix + "/api/traders-intel", handle_traders_intel)
