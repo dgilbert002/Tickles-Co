@@ -238,6 +238,11 @@ body.drawer-resizing{cursor:ew-resize;user-select:none}
 .tag-row{display:flex;gap:6px;flex-wrap:wrap}
 .call-text.big{font-size:14px;line-height:1.55;color:var(--soft)}
 
+/* Unified view toggle */
+.view-toggle{display:flex;gap:4px;background:var(--panel);border-radius:8px;padding:2px}
+.view-btn{background:transparent;border:none;color:var(--muted);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-family:var(--mono);transition:all .15s}
+.view-btn.active{background:var(--accent);color:#fff}
+.view-btn:hover:not(.active){color:var(--text);background:var(--hover)}
 /* Competition inline expand */
 .comp-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
 .comp-scroll table{min-width:680px;white-space:nowrap}

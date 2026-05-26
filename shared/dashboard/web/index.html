@@ -21,9 +21,8 @@
     <div class="brand"><div class="brand-mark">T</div><div><strong>Tickles</strong><span>Trading intelligence</span></div></div>
     <nav class="nav">
       <button class="nav-link active" data-tab="floor"><span>⌁</span>Trading Floor</button>
-      <button class="nav-link" data-tab="radar"><span>◎</span>Entry Radar</button>
+      <button class="nav-link" data-tab="unified"><span>◎</span>Signals & Radar</button>
       <button class="nav-link" data-tab="competition"><span>♛</span>Competition</button>
-      <button class="nav-link" data-tab="signals"><span>↯</span>Signals Watch</button>
       <button class="nav-link" data-tab="positions"><span>◆</span>Positions</button>
       <button class="nav-link" data-tab="traders"><span>@</span>Trader Intel</button>
       <button class="nav-link" data-tab="news"><span>☰</span>Discord Feed</button>
@@ -60,16 +59,22 @@
       </div>
     </section>
 
-    <section id="tab-radar" class="tab">
+    <section id="tab-unified" class="tab">
       <div class="panel full">
-        <div class="panel-head"><div><h2>Entry Radar</h2><p>Pending calls sorted by live distance to entry. Closest setup floats to the top.</p></div><div class="filters"><input id="radar-filter" class="input wide" placeholder="symbol / Discord user"><select id="radar-age" class="select small"><option value="">All ages</option><option value="2">≤2d</option><option value="7">≤7d</option><option value="14">≤14d</option></select></div></div>
-        <div id="entry-radar" class="radar-grid"></div>
+        <div class="panel-head"><div><h2>Signals & Radar</h2><p>All detected chart signals with live prices and distance to entry.</p></div>
+        <div class="filters">
+          <div id="unified-toggle" class="view-toggle">
+            <button class="view-btn active" data-view="list" onclick="setUnifiedView('list')">☰ List</button>
+            <button class="view-btn" data-view="card" onclick="setUnifiedView('card')">▦ Cards</button>
+          </div>
+          <input id="unified-filter" class="input wide" placeholder="symbol / trader / status">
+        </div></div>
+        <div id="unified-list-panel"><div id="unified-list-table" class="table-wrap"></div></div>
+        <div id="unified-card-panel" class="radar-grid hidden"></div>
       </div>
     </section>
 
     <section id="tab-competition" class="tab"><div class="panel full"><div class="panel-head"><h2>Copy-trade competition</h2><p>Agents, strategy descriptions, equity, return, win rate and open risk.</p></div><div id="competition-body"></div></div></section>
-
-    <section id="tab-signals" class="tab"><div class="panel full"><div class="panel-head"><h2>Signals Watch</h2><div class="filters"><input id="signals-filter" class="input wide" placeholder="symbol / Discord user / status"><select id="signals-status" class="select small"><option value="">All status</option><option value="pending">Pending</option><option value="open">Open</option><option value="partial_exit">Partial exit</option><option value="closed">Closed</option><option value="expired">Expired</option><option value="cancelled">Cancelled</option><option value="invalidated">Invalidated</option></select></div></div><div id="signals-table" class="table-wrap"></div></div></section>
 
     <section id="tab-positions" class="tab">
       <div class="panel full">

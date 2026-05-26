@@ -26,8 +26,8 @@ async function api(path,opt={}){const u=new URL(path.replace(/^\//,''),document.
 async function load(){try{const needsSnap=['floor','radar','signals','positions','traders','ops'].includes(state.tab)||!state.snap;if(needsSnap)state.snap=await api('/api/snapshot');if(state.tab==='competition'||state.tab==='floor')state.competitions=await api('/api/competitions');if(state.tab==='learning'||state.tab==='floor'||state.tab==='traders')state.learning=await fetchLearning();if(state.tab==='news'||state.tab==='floor')state.news=await api('/api/news/feed?window=30d&limit=120');
       if(state.tab==='telegram')state.telegram=await api('/api/news/feed?window=30d&limit=120&source=telegram');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');if(state.tab==='settings'){state.settings=null;await fetchSettings();}render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
 async function fetchLearning(){const [skill,feed,brain]=await Promise.all([api('/api/learning/skill-summary?window=1m'),api('/api/learning/memory-feed?window=1m'),api('/api/learning/agent-brain?window=1m')]);return{skill,feed,brain}}
-function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],radar:['LIVE ENTRY WATCH','Entry Radar'],competition:['CONTEST MODE','Competition'],signals:['ENTRY WATCH','Signals Watch'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings']};$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
-function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='radar')renderRadarPage();if(state.tab==='competition')renderCompetition();if(state.tab==='signals')renderSignalsPage();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage()}
+function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings']};$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
+function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage()}
 function renderStats(){const s=state.snap||{};const pnl=n(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`edge ${fmt(s.top_actor_score,3)}`:'edge —';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
 
 /* ─── row helpers ─── */
@@ -207,8 +207,34 @@ function renderNewsPage(){
   $$('[data-newsrow]').forEach(el=>el.onclick=()=>openDiscordDrawer(el.dataset.newsrow,el.dataset.newssrc));
 }
 
+/* ─── Unified Signals & Radar — single view with list/card toggle ─── */
+const _unifiedView=localStorage.getItem('tickles.unified.view')||'list';
+async function renderUnifiedPage(){
+  const view=_unifiedView;
+  $$('#unified-toggle .view-btn').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+  $('#unified-list-panel').classList.toggle('hidden',view!=='list');
+  $('#unified-card-panel').classList.toggle('hidden',view!=='card');
+  try{
+    const d=await api('/api/unified-signals?limit=120');
+    const rows=d.signals||[];
+    if(view==='card'){
+      const sorted=[...rows].sort((a,b)=>signalDistance(a)-signalDistance(b));
+      $('#unified-card-panel').innerHTML=sorted.map(radarCard).join('')||'<div class=empty>No signals</div>';
+    }else{
+      renderUnifiedTable(rows);
+    }
+  }catch(e){console.warn('unified signals failed',e)}
+}
+function renderUnifiedTable(rows){
+  let r=rows;const f=$('#unified-filter')?.value;if(f)r=filterRows(r,f,['symbol','trader_display_name','trader_handle_normalized','position_status','headline']);
+  table('#unified-list-table',[
+    {label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},
+    {label:'Live',num:1},{label:'Δ entry',num:1},{label:'Win',num:1},{label:'Status'},{label:'Source'}
+  ],[sigRows(r)]);wireRows()
+}
+function setUnifiedView(v){_unifiedView=v;localStorage.setItem('tickles.unified.view',v);renderUnifiedPage()}
 /* ─── Landing pages ─── */
-function renderSignalsPage(){let rows=state.snap?.signals||[];rows=filterRows(rows,$('#signals-filter')?.value,['instrument_symbol','trader_display_name','trader_handle_normalized','status','raw_signal_text']);const st=$('#signals-status')?.value;if(st)rows=rows.filter(r=>r.status===st);renderSignalsTable(rows)}
+function renderSignalsPage(){renderUnifiedPage()}
 // Round 11 (2026-05-24): Positions tab now has Live + Historic sub-tabs.
 // Live  = open + partial_exit (+ broker fills) from /api/positions/live.
 // Historic = closed + expired + cancelled + invalidated, paginated, from
@@ -408,7 +434,7 @@ function newsMsg(r){
 // the success/green class, which the user reads as "exactly at entry, in
 // your favour" — wrong. Now we detect the no-data case explicitly and
 // render '—' in the muted .secondary class. Real zero stays "+0.00%" green.
-function sigRows(rows,limit){return rows.slice(0,limit||rows.length).map(s=>{const dir=s.consensus_direction||s.direction;const trader=traderName(s);const liveRaw=s.current_price;const entryRaw=s.entry_price??s.levels?.entry;const distRaw=s.distance_to_entry_pct;const hasLive=liveRaw!=null&&Number.isFinite(Number(liveRaw))&&Number(liveRaw)>0;const hasEntry=entryRaw!=null&&Number.isFinite(Number(entryRaw))&&Number(entryRaw)>0;const hasStoredDist=distRaw!=null&&Number.isFinite(Number(distRaw))&&Number(distRaw)!==0;const computedDist=hasLive&&hasEntry?((Number(liveRaw)-Number(entryRaw))/Number(entryRaw)*100):null;const dist=computedDist!=null?computedDist:(hasStoredDist?Number(distRaw):null);const distCell=dist==null?'<span class="secondary">—</span>':`<span class="${dist>=0?'success':'danger'}">${pct(dist)}</span>`;return`<tr data-call="${esc(s.signal_interpretation_id||s.id)}" data-news="${esc(s.news_item_id||'')}"><td>${rowMain(dispSymbol(s.instrument_symbol),`${trader} · ${rel(s.signal_timestamp||s.created_at)}`)}</td><td>${pill(dir,dir)}</td><td class="num mono">${fmt(entryRaw,6)}</td><td class="num mono">${fmt(s.stop_loss||s.levels?.stop_loss,6)}</td><td class="num mono">${fmt(s.take_profit_1||s.levels?.take_profit_1,6)}</td><td class="num">${distCell}</td><td>${pill(s.status||'signal',s.status)}</td><td><div class="secondary">${esc((s.raw_signal_text||s.news_content||s.news_headline||'').slice(0,90))}</div></td></tr>`}).join('')}
+function sigRows(rows,limit){return rows.slice(0,limit||rows.length).map(s=>{const sym=s.symbol||s.instrument_symbol||'';const dir=s.direction||s.consensus_direction;const trader=traderName(s);const liveRaw=s.current_price;const entryRaw=s.entry_price??s.levels?.entry;const distRaw=s.distance_to_entry_pct;const hasLive=liveRaw!=null&&Number.isFinite(Number(liveRaw))&&Number(liveRaw)>0;const hasEntry=entryRaw!=null&&Number.isFinite(Number(entryRaw))&&Number(entryRaw)>0;const hasStoredDist=distRaw!=null&&Number.isFinite(Number(distRaw))&&Number(distRaw)!==0;const computedDist=hasLive&&hasEntry?((Number(liveRaw)-Number(entryRaw))/Number(entryRaw)*100):null;const dist=computedDist!=null?computedDist:(hasStoredDist?Number(distRaw):null);const distCell=dist==null?'<span class="secondary">—</span>':`<span class="${dist>=0?'success':'danger'}">${pct(dist)}</span>`;const liveCell=hasLive?fmt(liveRaw,6):'<span class="secondary">—</span>';const status=s.position_status||s.status||'signal';const callId=s.signal_interpretation_id||s.id;return`<tr data-call="${esc(callId)}" data-news="${esc(s.news_item_id||'')}"><td>${rowMain(dispSymbol(sym),`${trader} · ${rel(s.signal_timestamp||s.created_at)}`)}</td><td>${pill(dir,dir)}</td><td class="num mono">${fmt(entryRaw,6)}</td><td class="num mono">${fmt(s.stop_loss||s.levels?.stop_loss,6)}</td><td class="num mono">${fmt(s.take_profit_1||s.levels?.take_profit_1,6)}</td><td class="num mono">${liveCell}</td><td class="num">${distCell}</td><td class="num">${fmt(n(s.consensus_confidence)*100,0)}%</td><td>${pill(status,status)}</td><td><div class="secondary">${esc((s.headline||s.raw_signal_text||s.news_content||s.news_headline||'').slice(0,60))}</div></td></tr>`}).join('')}
 // Round 11 (2026-05-24): closed/expired/cancelled rows have realized_pnl_usd_final
 // populated and unrealized_pnl_usd null/zero. Branch on status so the P&L column
 // shows the correct number for both live and historic positions.
@@ -1538,8 +1564,7 @@ async function pulseUpdate(){
     if(['floor','radar','signals'].includes(state.tab)||!state.snap){
       state.snap=await api('/api/snapshot');
       if(state.tab==='floor'){updateCompNumbers();renderStats();}
-      if(state.tab==='radar')renderRadarPage();
-      if(state.tab==='signals')renderSignalsPage();
+      if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();
     }
     // Refresh expanded agent if present
     if(state.expandedAgent&&state._agentCache){

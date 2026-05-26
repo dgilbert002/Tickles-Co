@@ -1152,8 +1152,151 @@ async def handle_competition_agent(request: web.Request) -> web.Response:
         "history": closed_trades,
     })
 
+async def handle_unified_signals(request: web.Request) -> web.Response:
+    """GET /api/unified-signals?limit=120&status=pending
+
+    Single endpoint powering both list and card views. Returns all signals
+    enriched with live prices and real delta-to-entry. Replaces separate
+    entry-radar and snapshot.signals data sources.
+    """
+    try:
+        limit = max(1, min(int(request.query.get("limit", "120")), 200))
+    except ValueError:
+        limit = 120
+    status_filter = request.query.get("status", "").strip()
+
+    pool = await get_shared_pool()
+
+    # 1. Query all signals with their metadata
+    status_filter_sql = f"AND tp.status = '{status_filter}'" if status_filter else ""
+    limit_sql = str(int(limit))
+
+    rows = await pool.fetch_all(
+        """
+        SELECT DISTINCT ON (si.id) si.id, si.instrument_symbol, si.instrument_exchange,
+               si.consensus_direction, si.entry_price, si.stop_loss, si.take_profit_1,
+               si.take_profit_2, si.take_profit_3, si.timeframe,
+               si.consensus_confidence, si.consensus_method,
+               si.llm_reasoning, si.ai_comment, si.created_at,
+               si.news_item_id, si.media_item_id, si.trader_profile_id,
+               ni.author, ni.headline,
+               tr.handle_raw, tr.handle_normalized, tr.display_name, tr.platform,
+               mi.id AS media_id, mi.local_path AS media_local_path, mi.source_url AS media_source_url,
+               tp.id AS position_id, tp.status AS position_status,
+               tp.signal_timestamp, tp.current_price AS tp_current_price,
+               tp.distance_to_entry_pct AS tp_distance_to_entry_pct,
+               tp.actor_id, tp.signal_source, tp.detection_method
+        FROM public.signal_interpretations si
+        LEFT JOIN public.tracked_positions tp ON tp.signal_interpretation_id = si.id
+        LEFT JOIN public.news_items ni ON ni.id = si.news_item_id
+        LEFT JOIN public.trader_profiles tr ON tr.id = si.trader_profile_id
+        LEFT JOIN public.media_items mi ON mi.id = si.media_item_id
+        WHERE si.created_at > now() - interval '30 days'
+        """ + status_filter_sql + f" ORDER BY si.id, si.created_at DESC LIMIT {limit_sql}",
+        (),
+    )
+
+    # 2. Collect unique symbols and batch-fetch latest prices
+    # Build a lookup map: every raw symbol form → cleaned canonical form
+    raw_to_clean: dict = {}
+    for r in rows:
+        raw = (r.get("instrument_symbol") or "").strip()
+        clean = _clean_symbol(raw)
+        if clean:
+            raw_to_clean[raw] = clean
+    
+    all_cleaned = list(set(raw_to_clean.values()))
+    prices: dict = {}
+    
+    if all_cleaned:
+        # Primary: latest 1m candle close (candles table via instruments)
+        price_rows = await pool.fetch_all(
+            """
+            SELECT DISTINCT ON (i.symbol) i.symbol, c.close
+            FROM public.candles c
+            JOIN public.instruments i ON i.id = c.instrument_id
+            WHERE i.symbol = ANY($1) AND c.timeframe::text = '1m'
+            ORDER BY i.symbol, c.timestamp DESC
+            """,
+            (all_cleaned,),
+        )
+        for pr in price_rows:
+            prices[pr["symbol"]] = float(pr["close"])
+
+        # Fallback: tracked_positions for symbols with no candles
+        unpriced = [s for s in all_cleaned if s not in prices]
+        if unpriced:
+            # Try both cleaned and :USDT-suffixed forms
+            tp_forms = unpriced + [s + ":USDT" for s in unpriced]
+            tp_rows = await pool.fetch_all(
+                """
+                SELECT DISTINCT ON (instrument_symbol) 
+                       REPLACE(REPLACE(instrument_symbol, ':USDT', ''), ':USDC', '') as clean_sym,
+                       current_price
+                FROM public.tracked_positions
+                WHERE (instrument_symbol = ANY($1) OR REPLACE(REPLACE(instrument_symbol, ':USDT', ''), ':USDC', '') = ANY($2))
+                  AND current_price IS NOT NULL AND current_price > 0
+                ORDER BY instrument_symbol, updated_at DESC
+                """,
+                (tp_forms, unpriced),
+            )
+            for tr in tp_rows:
+                cs = tr["clean_sym"] or ""
+                if cs and tr["current_price"] and cs not in prices:
+                    prices[cs] = float(tr["current_price"])
+
+    # 3. Build enriched response
+    result: list = []
+    for r in rows:
+        raw_sym = (r.get("instrument_symbol") or "").strip()
+        sym = raw_to_clean.get(raw_sym, _clean_symbol(raw_sym))
+        entry = float(r.get("entry_price") or 0)
+        current = prices.get(sym)  # lookup by cleaned symbol
+        distance_to_entry = None
+        if current and entry > 0:
+            distance_to_entry = round(abs((current - entry) / entry * 100), 2)
+
+        result.append({
+            "id": r["id"],
+            "symbol": sym,
+            "exchange": r.get("instrument_exchange") or "",
+            "direction": r.get("consensus_direction") or "",
+            "entry_price": entry,
+            "stop_loss": float(r.get("stop_loss") or 0),
+            "take_profit_1": float(r.get("take_profit_1") or 0),
+            "take_profit_2": float(r.get("take_profit_2") or 0),
+            "take_profit_3": float(r.get("take_profit_3") or 0),
+            "timeframe": r.get("timeframe") or "",
+            "consensus_confidence": float(r.get("consensus_confidence") or 0),
+            "consensus_method": r.get("consensus_method") or "",
+            "llm_reasoning": r.get("llm_reasoning") or "",
+            "current_price": current,
+            "distance_to_entry_pct": distance_to_entry,
+            "position_status": r.get("position_status") or "signal",
+            "signal_timestamp": (r.get("signal_timestamp") or r.get("created_at")).isoformat() if (r.get("signal_timestamp") or r.get("created_at")) else None,
+            "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+            "author": r.get("author") or "",
+            "headline": r.get("headline") or "",
+            "trader_display_name": r.get("display_name") or r.get("handle_raw") or "",
+            "trader_handle_normalized": r.get("handle_normalized") or "",
+            "trader_platform": r.get("platform") or "",
+            "actor_id": r.get("actor_id") or "",
+            "signal_source": r.get("signal_source") or "",
+            "detection_method": r.get("detection_method") or "",
+            "media_id": r.get("media_id"),
+            "media_url": _media_url(r.get("media_id"), r.get("media_local_path"), r.get("media_source_url")),
+        })
+
+    return web.json_response({
+        "ok": True,
+        "count": len(result),
+        "signals": result,
+    })
+
+
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(prefix + "/api/candles", handle_candles)
     app.router.add_get(prefix + "/api/signal-replay", handle_signal_replay)
     app.router.add_get(prefix + "/api/entry-radar", handle_entry_radar)
+    app.router.add_get(prefix + "/api/unified-signals", handle_unified_signals)
     app.router.add_get(prefix + "/api/competition-agent", handle_competition_agent)
