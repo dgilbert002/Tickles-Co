@@ -218,7 +218,11 @@ async function renderUnifiedPage(){
     const d=await api('/api/unified-signals?limit=120');
     let rows=d.signals||[];
     const statusEl=$('#unified-status');const sf=statusEl?.value||'';
-    if(!sf||sf===''){
+    // Always exclude unclear + no-entry signals (commentary, not trade setups)
+    rows=rows.filter(r=>r.direction&&r.direction!=='unclear'&&r.entry_price>0);
+    if(sf==='history'){
+      rows=rows.filter(r=>['closed','cancelled','expired','invalidated'].includes(r.position_status));
+    }else if(!sf||sf===''){
       rows=rows.filter(r=>!['closed','cancelled','expired','invalidated'].includes(r.position_status));
     }
     if(view==='card'){
