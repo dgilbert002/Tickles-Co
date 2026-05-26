@@ -98,7 +98,7 @@ async function toggleAgentExpand(agentId,fromCache){
 function renderAgentInline(agentId,d){
   if(!d||!d.ok){$('#comp-expand-zone').innerHTML='<div class="empty">No agent data</div>';return}
   const a=d.agent||{}, open=d.open_positions||[], hist=d.history||[];
-  let posTab='live';
+  let posTab=state._lastAgentSubTab||'live';
 
   function buildLive(){
     if(!open.length)return'<tr><td colspan="11" class="empty">No open positions — waiting for new signals</td></tr>';
@@ -174,11 +174,19 @@ function renderAgentInline(agentId,d){
     </div>
   </div>`;
   $('#comp-expand-zone').innerHTML=html;
+  // Restore active sub-tab
+  const activeTab=posTab;
+  $$('#comp-expand-zone .comp-dtab').forEach(b=>{
+    b.classList.toggle('active',b.dataset.ctab===activeTab);
+  });
+  $('#comp-live-panel').classList.toggle('hidden',activeTab!=='live');
+  $('#comp-history-panel').classList.toggle('hidden',activeTab!=='history');
   // tab switching
   $$('#comp-expand-zone .comp-dtab').forEach(b=>b.onclick=()=>{
     $$('#comp-expand-zone .comp-dtab').forEach(x=>x.classList.remove('active'));
     b.classList.add('active');
     const tab=b.dataset.ctab;
+    state._lastAgentSubTab=tab;
     $('#comp-live-panel').classList.toggle('hidden',tab!=='live');
     $('#comp-history-panel').classList.toggle('hidden',tab!=='history');
   });
@@ -1516,5 +1524,54 @@ async function loadPromptsTab(){
     tbody.querySelectorAll('[data-prompt-version]').forEach(btn=>btn.onclick=()=>openPromptModal(btn.dataset.promptVersion));
   }catch(e){console.error('loadPromptsTab',e);}
 }
-window.addEventListener('DOMContentLoaded',()=>{loadDrawerWidth();wire();attachDrawerResizer();load();state.timer=setInterval(()=>{const ts=new Date();$('#updated-at').textContent=`${ts.toLocaleTimeString()}`; if(['floor','radar','signals','positions','competition'].includes(state.tab)) load()},30000)});
+  window.addEventListener('DOMContentLoaded',()=>{loadDrawerWidth();wire();attachDrawerResizer();load();state.timer=setInterval(()=>{const ts=new Date();$('#updated-at').textContent=`${ts.toLocaleTimeString()}`; pulseUpdate()},5000)});
+async function pulseUpdate(){
+  try{
+    // Lightweight data refresh — no DOM rebuild
+    if(['competition','floor'].includes(state.tab)){
+      state.competitions=await api('/api/competitions');
+      updateCompNumbers();
+    }
+    if(['positions'].includes(state.tab)){
+      // Only re-render if not in historic sub-tab (historic is manual pagination)
+      if(_positionsState.sub==='live') await renderPositionsLive();
+    }
+    if(['floor','radar','signals'].includes(state.tab)||!state.snap){
+      state.snap=await api('/api/snapshot');
+      if(state.tab==='floor'){updateCompNumbers();renderStats();}
+      if(state.tab==='radar')renderRadarPage();
+      if(state.tab==='signals')renderSignalsPage();
+    }
+    // Refresh expanded agent if present
+    if(state.expandedAgent&&state._agentCache){
+      try{
+        const d=await api('/api/competition-agent?agent='+encodeURIComponent(state.expandedAgent));
+        state._agentCache={agentId:state.expandedAgent,data:d};
+        renderAgentInline(state.expandedAgent,d);
+      }catch(e){}
+    }
+  }catch(e){/* silent pulse failure */}
+}
+function updateCompNumbers(){
+  const c=state.competitions?.competitions?.[0];
+  if(!c)return;
+  (c.participants||[]).forEach(p=>{
+    const tr=document.getElementById('comp-tr-'+p.agent_id);
+    if(!tr)return;
+    const eq=n(p.scores?.equity), unreal=n(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal;
+    const rpct=n(p.scores?.return_pct), starting=n(p.scores?.starting_balance_usd)||1000;
+    const liveReturn=((liveEq/starting)-1)*100;
+    const cells=tr.querySelectorAll('td');
+    if(cells.length>=9){
+      cells[3].innerHTML='$'+fmt(eq,2);                    // Balance
+      cells[4].innerHTML='<strong>$'+fmt(liveEq,2)+'</strong>'; // Live Equity
+      cells[5].innerHTML=usd(p.scores?.total_realized_pnl_usd)+'<br><span class="secondary small">unreal '+usd(p.scores?.unrealized_pnl_usd)+'</span>'; // P&L
+      cells[6].innerHTML='<span class="'+(rpct>=0?'success':'danger')+'">'+pct(rpct)+'</span><br><span class="secondary small">'+pct(liveReturn)+' live</span>'; // Return
+      cells[7].textContent=fmt(n(p.scores?.win_rate)*100,1)+'%'; // Win
+      cells[8].textContent=p.scores?.total_trades||0;      // Trades
+      cells[9].textContent=p.scores?.open_positions||0;    // Open
+    }
+  });
+  $('#updated-at').textContent=new Date().toLocaleTimeString();
+}
 })();
