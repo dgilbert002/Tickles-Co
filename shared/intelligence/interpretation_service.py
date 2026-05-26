@@ -866,12 +866,13 @@ async def _load_prompts_async(
                     logger.info("Loaded prompt via ILIKE: chart_analysis/%s", row["version"])
                     return _build_prompt_result(row, source, channel)
 
-            # 4. Fallback: newest chart_analysis entry
+            # 4. Fallback: newest chart_analysis entry (prefer Discord as default)
             try:
                 row = await conn.fetchrow(
                     "SELECT system, body, version, prompt_hash FROM prompt_versions "
                     "WHERE name = 'chart_analysis' AND source = 'db' "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "ORDER BY CASE WHEN version ILIKE '%discord%' THEN 0 ELSE 1 END, "
+                    "created_at DESC LIMIT 1",
                 )
             except Exception as fetch_exc:
                 logger.warning("prompt_versions newest fetch failed: %s", fetch_exc)
