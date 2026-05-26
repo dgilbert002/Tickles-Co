@@ -220,6 +220,12 @@ async function renderUnifiedPage(){
     const statusEl=$('#unified-status');const sf=statusEl?.value||'';
     // Always exclude unclear + no-entry signals (commentary, not trade setups)
     rows=rows.filter(r=>r.direction&&r.direction!=='unclear'&&r.entry_price>0);
+    // Sanity: exclude mispriced entries (LLM read wrong decimal, e.g. $0.74 vs $656)
+    rows=rows.filter(r=>{
+      if(!r.current_price||r.current_price<=0)return true; // no live price, can't check
+      const ratio=r.entry_price/r.current_price;
+      return ratio>0.01&&ratio<100; // within 2 orders of magnitude
+    });
     if(sf==='history'){
       rows=rows.filter(r=>['closed','cancelled','expired','invalidated'].includes(r.position_status));
     }else if(!sf||sf===''){

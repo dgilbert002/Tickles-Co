@@ -1245,9 +1245,19 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
                 if cs and tr["current_price"] and cs not in prices:
                     prices[cs] = float(tr["current_price"])
 
-    # 3. Build enriched response
+    # 3. Build enriched response (skip mispriced entries)
     result: list = []
     for r in rows:
+        entry = float(r.get("entry_price") or 0)
+        sym = (r.get("instrument_symbol") or "").strip()
+        clean = raw_to_clean.get(sym, _clean_symbol(sym))
+        current = prices.get(clean)
+        # Skip if entry is 2+ orders of magnitude off from live price
+        # (old LLM misread — e.g. $0.74 instead of $656 for BNB)
+        if entry > 0 and current and current > 0:
+            ratio = entry / current
+            if ratio < 0.01 or ratio > 100:
+                continue
         raw_sym = (r.get("instrument_symbol") or "").strip()
         sym = raw_to_clean.get(raw_sym, _clean_symbol(raw_sym))
         entry = float(r.get("entry_price") or 0)
