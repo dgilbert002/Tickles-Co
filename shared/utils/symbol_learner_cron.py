@@ -32,6 +32,7 @@ async def main(dry_run: bool = False):
 
     # DatabasePool reads connection from env vars (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD)
     pool = DatabasePool(dbname="tickles_shared")
+    await pool.initialize()
 
     try:
         if dry_run:

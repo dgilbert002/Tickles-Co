@@ -973,9 +973,15 @@ async def run_prefilter(
     image_mime = _image_mime_type(image_path)
 
     prefilter_prompt = (
-        "You are a fast image classifier. Look at this chart image and decide: "
-        "is it a trade setup (clear entry/stop-loss/take-profit levels), commentary "
-        "(market discussion without levels), meme (joke/image macro), or unclear?\n\n"
+        "You are a fast image classifier. Look at this image and decide: "
+        "is it a financial chart (candlestick, line chart, or technical analysis "
+        "chart with indicators) — even if it's commentary-style or doesn't have "
+        "explicit entry/SL/TP levels drawn? Or is it a meme, screenshot of text, "
+        "photo, or non-financial image?\n\n"
+        "IMPORTANT: Charts with trendlines, support/resistance zones, or "
+        "annotations like arrows/circles ARE trade setups even without explicit "
+        "price-level labels. Commentary charts with ticker symbols visible ARE "
+        "trade_setup — the ticker alone is actionable.\n\n"
         "Respond ONLY with JSON:\n"
         "  {\n"
         "    \"is_trade_setup\": true | false,\n"
@@ -2402,6 +2408,7 @@ _TICKER_PATTERNS = [
     _re.compile(rf"\b({_FOREX_3LETTER})({_FOREX_3LETTER})\b"),
     _re.compile(r"\b([A-Z]{2,6})(USDT|USD|BUSD)\b"),               # BTCUSDT, ETHBUSD
     _re.compile(r"\$([A-Z]{2,6})\b"),                                # $BTC, $SOL
+    _re.compile(r"#([A-Z]{2,6})\b"),                                # #TAO, #HYPE
     _re.compile(r"\b(XAU|XAG)(USD)\b"),                              # XAUUSD, XAGUSD
 ]
 
@@ -2414,6 +2421,9 @@ _KNOWN_BASES = {
     "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "DOT", "AVAX", "LINK",
     "MATIC", "BNB", "LTC", "UNI", "AAVE", "NEAR", "APT", "SUI", "FTM",
     "OP", "ARB", "INJ", "TIA", "SEI", "JUP", "WIF", "PEPE", "BONK",
+    # Rose/DigiLeakBot frequent coins (May 2026)
+    "TAO", "HYPE", "ZEC", "TOWNS", "LPT", "RENDER", "ONDO", "FET",
+    "KAS", "VIRTUAL", "BEAM", "ICP", "ALGO", "BRETT", "WLD",
     # Wrapped / staked / stablecoins (treated as crypto bases too)
     "WBTC", "WETH", "STETH", "USDC", "DAI", "TUSD",
     # Forex majors and minors
@@ -2447,6 +2457,8 @@ _FOREX_BASES = {"EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "USD"}
 _BARE_CRYPTO_BASES = {
     "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "DOT", "AVAX", "LINK",
     "BNB", "LTC", "MATIC", "UNI", "AAVE", "NEAR", "APT", "SUI",
+    "TAO", "HYPE", "ZEC", "TOWNS", "LPT", "RENDER", "ONDO", "FET",
+    "KAS", "VIRTUAL", "BEAM", "ICP", "ALGO", "BRETT", "WLD",
 }
 
 
@@ -3940,24 +3952,36 @@ class InterpretationService:
             and isinstance(llm_result.reasoning, str)
             and llm_result.reasoning.startswith("pre-filter:")
         ):
-            reason_snippet = llm_result.reasoning[:240]
-            logger.info(
-                "media_id=%s: prefilter rejected — marking skipped_not_chart "
-                "(reason=%s)",
-                media_id, reason_snippet,
-            )
-            await update_media_status(
-                shared_pool,
-                media_id,
-                "skipped_not_chart",
-                error=f"prefilter: not a chart — {reason_snippet}"[:500],
-                expected_processed_at=claim_ts,
-            )
-            return {
-                "media_id": media_id,
-                "status": "skipped_not_chart",
-                "reason": reason_snippet,
-            }
+            # If we already have a valid symbol from text extraction
+            # (e.g. hashtag #TAO in Telegram headline), trust it and
+            # bypass the prefilter rejection. The prefilter may have
+            # missed the chart but the text symbol is authoritative.
+            if symbol and symbol != "UNKNOWN" and not symbol_from_llm:
+                logger.info(
+                    "media_id=%s: prefilter would reject but text symbol=%s "
+                    "— overriding, processing as chart",
+                    media_id, symbol,
+                )
+                # Fall through to normal processing below
+            else:
+                reason_snippet = llm_result.reasoning[:240]
+                logger.info(
+                    "media_id=%s: prefilter rejected — marking skipped_not_chart "
+                    "(reason=%s)",
+                    media_id, reason_snippet,
+                )
+                await update_media_status(
+                    shared_pool,
+                    media_id,
+                    "skipped_not_chart",
+                    error=f"prefilter: not a chart — {reason_snippet}"[:500],
+                    expected_processed_at=claim_ts,
+                )
+                return {
+                    "media_id": media_id,
+                    "status": "skipped_not_chart",
+                    "reason": reason_snippet,
+                }
 
         # --- Post-LLM instrument resolution ---
         # If the collector didn't provide an instrument, use what the LLM

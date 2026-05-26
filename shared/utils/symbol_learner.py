@@ -213,7 +213,7 @@ async def resolve_pending(pool: DatabasePool) -> int:
     # Store results
     resolved_count = 0
     for raw_symbol, mapping in resolved.items():
-        if mapping:
+        if mapping and mapping.get("symbol") and mapping.get("exchange"):
             # Insert into symbol_mappings
             await pool.execute(
                 """
