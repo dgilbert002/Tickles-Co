@@ -797,6 +797,21 @@ class LiveCopyTradeMonitor:
         except Exception:
             pass
         
+        # Fallback: for symbols with no candles, use tracked_positions.current_price
+        unpriced = [s for s in symbols if s not in prices]
+        if unpriced:
+            try:
+                async with pool.acquire() as conn:
+                    for sym in unpriced:
+                        row = await conn.fetchrow(
+                            "SELECT current_price FROM tracked_positions WHERE instrument_symbol = $1 AND current_price > 0 ORDER BY updated_at DESC LIMIT 1",
+                            sym,
+                        )
+                        if row:
+                            prices[sym] = float(row["current_price"])
+            except Exception:
+                pass
+        
         if not prices:
             return result
         
