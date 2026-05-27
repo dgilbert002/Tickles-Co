@@ -55,6 +55,7 @@ AGENTS = [
     ("Rose A: Spot Seq",  1.0, 1.0, "spot_seq_rose"),
     ("Rose B: Lev Par",   1.0, 1.0, "lev_parallel_rose"),
     ("Rose C: +BE Lock",  1.0, 1.0, "lev_be_lock_rose"),
+    ("D: 3% Lev Par",     1.0, 1.0, "lev_parallel_3pct"),
 ]
 
 # Display-name → DB-id mapping. Round-7 persistence migration (2026-05-24):
@@ -74,6 +75,7 @@ NAME_TO_ID = {
     "Rose A: Spot Seq":  "copy_rose_a",
     "Rose B: Lev Par":   "copy_rose_b",
     "Rose C: +BE Lock":  "copy_rose_c",
+    "D: 3% Lev Par":    "copy_lev_3pct",
 }
 ID_TO_NAME = {v: k for k, v in NAME_TO_ID.items()}
 
@@ -491,6 +493,16 @@ class LiveCopyTradeMonitor:
                 return
             allocated = agent["balance"]
             leverage = 3.0
+        elif mode == "lev_parallel_3pct":
+            # 3% risk per trade, max 33 concurrent
+            if len(agent["open_positions"]) >= 33:
+                return
+            allocated = agent["balance"] * 0.03
+            sl_dist = abs(entry - sl) / entry if entry > 0 else 0.05
+            if sl_dist < 0.005:
+                sl_dist = 0.005
+            raw_lev = (1.0 / sl_dist) * 0.97
+            leverage = min(raw_lev, 100.0)
         else:
             # Leveraged: 5% risk per trade, max 20 concurrent
             if len(agent["open_positions"]) >= 20:
