@@ -3995,7 +3995,10 @@ class InterpretationService:
                 )
                 # Clear the prefilter's direction='unclear' verdict so the
                 # consensus engine treats this as a fresh chart analysis.
-                llm_result = None
+                # Keep the llm_result (extracted levels) — only clear the
+                # direction so it doesn't short-circuit as prefilter rejection.
+                if llm_result is not None:
+                    llm_result.direction = ""  # clear prefilter verdict, keep levels
                 # Fall through to normal processing below
             else:
                 reason_snippet = llm_result.reasoning[:240]
