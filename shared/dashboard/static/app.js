@@ -1,6 +1,9 @@
 (()=>{
 /* Tickles v5 — competition inline expand, chart tabs in Discord drawer, trader usernames, compact rows. */
-console.log('Tickles Dashboard v5 loading');
+(function(){const t=localStorage.getItem('tickles.theme');if(t==='light')document.body.classList.add('light');updateThemeBtn()})();
+function toggleTheme(){document.body.classList.toggle('light');localStorage.setItem('tickles.theme',document.body.classList.contains('light')?'light':'dark');updateThemeBtn()}
+function updateThemeBtn(){const b=document.getElementById('theme-btn');if(b)b.textContent=document.body.classList.contains('light')?'☀️ Light':'🌙 Dark'}
+const state=
 const state={tab:'floor',company:'all',snap:null,competitions:null,learning:null,news:null,agentPerf:null,sort:{},charts:{},timer:null,expandedAgent:null,timeSpacing:localStorage.getItem('tickles.replay.spacing')||'contiguous'};
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
 const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
