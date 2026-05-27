@@ -369,6 +369,21 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
         )
         deduped_24h = await shared_conn.fetchval(dedup_query) or 0
 
+        # 2026-05-27: populate top actor for Trading Floor "Best Trader/Agent" card.
+        top_actor_name = None
+        top_actor_score = 0.0
+        try:
+            top_row = await shared_conn.fetchrow(
+                "SELECT agent_id, return_pct FROM contest_participants "
+                "WHERE return_pct IS NOT NULL AND return_pct > 0 "
+                "ORDER BY return_pct DESC LIMIT 1"
+            )
+            if top_row:
+                top_actor_name = top_row["agent_id"]
+                top_actor_score = float(top_row["return_pct"] or 0)
+        except Exception:
+            pass
+
     stats = {
         "signals_today_count": signals_today,
         "api_cost_today_usd": api_cost,
@@ -380,8 +395,10 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
         "open_positions_agent_count": agent_open,
         "ingest_depth": ingest_depth,
         "deduped_24h": deduped_24h,
+        "top_actor_name": top_actor_name,
+        "top_actor_score": top_actor_score,
     }
-    
+
     _SNAPSHOT_CACHE[cache_key] = (now, stats)
     return stats
 

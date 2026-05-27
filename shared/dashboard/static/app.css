@@ -248,6 +248,9 @@ body.drawer-resizing{cursor:ew-resize;user-select:none}
 .view-btn{background:transparent;border:none;color:var(--muted);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-family:var(--mono);transition:all .15s}
 .view-btn.active{background:var(--accent);color:#fff}
 .view-btn:hover:not(.active){color:var(--text);background:var(--hover)}
+/* Load more button */
+.load-more{text-align:center;padding:12px 0}
+.load-more .btn{padding:6px 20px}
 /* Competition inline expand */
 .comp-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
 .comp-scroll table{min-width:680px;white-space:nowrap}

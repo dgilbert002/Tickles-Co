@@ -23,8 +23,8 @@ const traderName=p=>{if(!p)return'trader';const name=p.actor_display||p.display_
 const dispSymbol=s=>{if(!s)return'UNKNOWN';const m=String(s).match(/^([A-Z0-9]+)\/([A-Z0-9]+)(?::([A-Z0-9]+))?$/);if(!m)return s;const base=m[1],quote=m[2],settle=m[3];return settle?`${base}${quote}.P`:`${base}${quote}`};
 
 async function api(path,opt={}){const u=new URL(path.replace(/^\//,''),document.baseURI);if(!opt.skipCompany&&state.company!=='all')u.searchParams.set('company',state.company);const r=await fetch(u);const j=await r.json();if(!r.ok)throw j;return j}
-async function load(){try{const needsSnap=['floor','radar','signals','positions','traders','ops'].includes(state.tab)||!state.snap;if(needsSnap)state.snap=await api('/api/snapshot');if(state.tab==='competition'||state.tab==='floor')state.competitions=await api('/api/competitions');if(state.tab==='learning'||state.tab==='floor'||state.tab==='traders')state.learning=await fetchLearning();if(state.tab==='news')state.news=await api('/api/news/feed?window=30d&source=discord&limit=120');else if(state.tab==='floor')state.news=await api('/api/news/feed?window=30d&limit=120');
-      if(state.tab==='telegram')state.telegram=await api('/api/news/feed?window=30d&limit=120&source=telegram');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');if(state.tab==='settings'){state.settings=null;await fetchSettings();}render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
+async function load(){try{const needsSnap=['floor','radar','signals','positions','traders','ops'].includes(state.tab)||!state.snap;if(needsSnap)state.snap=await api('/api/snapshot');if(state.tab==='competition'||state.tab==='floor')state.competitions=await api('/api/competitions');if(state.tab==='learning'||state.tab==='floor'||state.tab==='traders')state.learning=await fetchLearning();if(state.tab==='news')state.news=await api('/api/news/feed?window=30d&source=discord&limit=40');else if(state.tab==='floor')state.news=await api('/api/news/feed?window=30d&limit=40');
+      if(state.tab==='telegram')state.telegram=await api('/api/news/feed?window=30d&limit=40&source=telegram');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');if(state.tab==='settings'){state.settings=null;await fetchSettings();}render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
 async function fetchLearning(){const [skill,feed,brain,traders]=await Promise.all([api('/api/learning/skill-summary?window=1m'),api('/api/learning/memory-feed?window=1m'),api('/api/learning/agent-brain?window=1m'),api('/api/traders-intel')]);return{skill,feed,brain,traders}}
 function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings']};$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
 function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage()}
@@ -197,14 +197,36 @@ function renderAgentInline(agentId,d){
   });
 }
 
-/* ─── Discord feed — chart tabs drawer ─── */
-function renderNewsPage(){
-  let rows=state.news?.rows||[];
-  rows=rows.filter(r=>r.source==='discord');  // exclude Telegram
+/* ─── Discord feed — paginated ─── */
+const _newsState={offset:0,allRows:[],hasMore:false};
+async function renderNewsPage(reset){
+  if(reset){_newsState.offset=0;_newsState.allRows=[];_newsState.hasMore=false}
+  if(!_newsState.allRows.length){
+    try{
+      const d=await api('/api/news/feed?window=30d&source=discord&limit=40&offset='+_newsState.offset);
+      _newsState.allRows=(d.rows||[]).filter(r=>r.source==='discord');
+      _newsState.hasMore=_newsState.allRows.length>=40;
+      _newsState.offset+=40;
+    }catch(e){console.error(e);return}
+  }
+  let rows=_newsState.allRows;
   rows=filterRows(rows,$('#news-filter')?.value,['author','content','headline','channel_name']);
   if($('#news-media')?.value==='media')rows=rows.filter(r=>r.has_media);
   $('#news-list').innerHTML=rows.map(newsMsg).join('')||'<div class="empty">No messages</div>';
+  if(_newsState.hasMore&&!$('#news-filter')?.value&&!$('#news-media')?.value){
+    $('#news-list').innerHTML+='<div class="load-more"><button class="btn small" onclick="loadMoreNews()">Load more…</button></div>';
+  }
   $$('[data-newsrow]').forEach(el=>el.onclick=()=>openDiscordDrawer(el.dataset.newsrow,el.dataset.newssrc));
+}
+async function loadMoreNews(){
+  try{
+    const d=await api('/api/news/feed?window=30d&source=discord&limit=40&offset='+_newsState.offset);
+    const more=(d.rows||[]).filter(r=>r.source==='discord');
+    _newsState.allRows=_newsState.allRows.concat(more);
+    _newsState.hasMore=more.length>=40;
+    _newsState.offset+=40;
+    renderNewsPage();
+  }catch(e){console.error(e)}
 }
 
 /* ─── Unified Signals & Radar — single view with list/card toggle ─── */
@@ -514,21 +536,44 @@ function sourceBadge(src){
    tolerance/freshness/lookback knobs were retired. The Settings panel
    description in index.html documents the rule for the operator. */
 
-/* ─── Telegram feed — channel selector + messages ─── */
-function renderTelegramPage(){
-  let rows=state.telegram?.rows||[];
+/* ─── Telegram feed — paginated ─── */
+const _teleState={offset:0,allRows:[],hasMore:false};
+async function renderTelegramPage(reset){
+  if(reset){_teleState.offset=0;_teleState.allRows=[];_teleState.hasMore=false}
+  if(!_teleState.allRows.length){
+    try{
+      const d=await api('/api/news/feed?window=30d&limit=40&source=telegram&offset='+_teleState.offset);
+      _teleState.allRows=d.rows||[];
+      _teleState.hasMore=_teleState.allRows.length>=40;
+      _teleState.offset+=40;
+    }catch(e){console.error(e);return}
+  }
+  let rows=_teleState.allRows;
   const ch=$('#telegram-channel')?.value;
   if(ch)rows=rows.filter(r=>r.channel_name===ch||r.author===ch);
   rows=filterRows(rows,$('#telegram-filter')?.value,['author','content','headline','channel_name']);
   if($('#telegram-media')?.value==='media')rows=rows.filter(r=>r.has_media);
   $('#telegram-list').innerHTML=rows.map(newsMsg).join('')||'<div class="empty">No Telegram messages</div>';
+  if(_teleState.hasMore&&!$('#telegram-filter')?.value&&!$('#telegram-media')?.value){
+    $('#telegram-list').innerHTML+='<div class="load-more"><button class="btn small" onclick="loadMoreTelegram()">Load more…</button></div>';
+  }
   $$('#telegram-list [data-newsrow]').forEach(el=>el.onclick=()=>openDiscordDrawer(el.dataset.newsrow,el.dataset.newssrc));
   if(!document.getElementById('telegram-channel')._populated){
-    const channels=new Set((state.telegram?.rows||[]).map(r=>r.channel_name||r.author).filter(Boolean));
+    const channels=new Set((_teleState.allRows||[]).map(r=>r.channel_name||r.author).filter(Boolean));
     const sel=document.getElementById('telegram-channel');
     channels.forEach(c=>{const o=document.createElement('option');o.value=c;o.textContent=c;sel.appendChild(o)});
     sel._populated=true;
   }
+}
+async function loadMoreTelegram(){
+  try{
+    const d=await api('/api/news/feed?window=30d&limit=40&source=telegram&offset='+_teleState.offset);
+    const more=d.rows||[];
+    _teleState.allRows=_teleState.allRows.concat(more);
+    _teleState.hasMore=more.length>=40;
+    _teleState.offset+=40;
+    renderTelegramPage();
+  }catch(e){console.error(e)}
 }
 
 async function _putAPI(path,body){
@@ -992,7 +1037,7 @@ async function openDiscordDrawer(newsItemId,newsSrc){
 }
 
 function drawDiscordTabs(signals,res){
-  const msg=res.news||signals[0]||{};
+  const msg=res.news_item||res.news||signals[0]||{};
   const trader=traderName(signals[0])||msg.author||'trader';
   const src=res.source||signals[0]?.source||msg.source||'discord';
   const isTelegram=src==='telegram';
@@ -1662,6 +1707,7 @@ function wire(){
   ['floor-signal-filter','floor-position-filter'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=()=>renderFloor()});
   ['radar-filter','radar-age'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderRadarPage()});
   ['signals-filter','signals-status'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderSignalsPage()});
+  const uf=$('#unified-filter'); if(uf) uf.oninput=()=>renderUnifiedPage();
   const ust=$('#unified-status'); if(ust) ust.onchange=()=>renderUnifiedPage();
   // Round 11: Positions tab Live/Historic sub-tabs + filters.
   $$('#tab-positions .comp-dtab').forEach(b=>b.onclick=()=>{
@@ -1677,8 +1723,8 @@ function wire(){
   const moreBtn=$('#positions-historic-more');
   if(moreBtn) moreBtn.onclick=()=>renderPositionsHistoric(true);
   ['traders-filter','traders-sort'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderTradersPage()});
-  ['news-filter','news-media'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderNewsPage()});
-  ['telegram-filter','telegram-media','telegram-channel'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderTelegramPage()});
+  ['news-filter','news-media'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderNewsPage(true)});
+  ['telegram-filter','telegram-media','telegram-channel'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderTelegramPage(true)});
   // Settings sub-tabs
   $$('#tab-settings .subtab').forEach(b=>b.onclick=()=>{
     $$('#tab-settings .subtab').forEach(x=>x.classList.remove('active'));

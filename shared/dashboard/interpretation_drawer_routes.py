@@ -187,10 +187,10 @@ async def handle_drawer(request: web.Request) -> web.Response:
     }
     if media_gallery is not None:
         payload["media_gallery"] = _jsonify(media_gallery)
-    # Slice 1 §3.5 — only include the news_item header when there are no
-    # interpretation rows to render. The frontend uses this to render an
-    # informative empty state instead of "No interpretation found.".
-    if news_item_header is not None and not rows:
+    # Always include the news_item header so the frontend drawer can
+    # display author + message content alongside interpretation rows.
+    # (Previously only included when rows was empty — BUG 3a fix.)
+    if news_item_header is not None:
         payload["news_item"] = _jsonify(news_item_header)
 
     # Slice 2 §F — best-effort mem0 recall keyed off the first row's

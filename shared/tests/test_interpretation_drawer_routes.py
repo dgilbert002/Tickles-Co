@@ -550,13 +550,15 @@ async def test_drawer_empty_rows_surfaces_news_item_header(make_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_drawer_news_item_header_omitted_when_rows_present(make_client) -> None:
-    """When rows exist the news_item header is NOT surfaced.
+async def test_drawer_news_item_header_included_when_rows_present(make_client) -> None:
+    """When rows exist the news_item header IS surfaced (BUG 3a fix).
 
-    Slice 1 §3.5 only renders the header for the empty-drawer case;
-    when interpretations exist the frontend reads ``rows[0].news``.
+    The frontend ``drawDiscordTabs`` needs the header for author/message
+    content even when interpretation rows exist. Previously the header
+    was omitted when rows were present, causing Telegram drawers to show
+    empty content and "trader" as author.
     """
-    header = {"id": 5, "headline": "ignored", "media_count": 0}
+    header = {"id": 5, "headline": "BTC to the moon", "author": "telegram_bot", "media_count": 0, "source": "telegram"}
     prov = _MockDrawerProvider(
         by_news_payload=[{"id": 1, "news_item_id": 5}],
         media_payload=[],
@@ -567,7 +569,8 @@ async def test_drawer_news_item_header_omitted_when_rows_present(make_client) ->
     assert resp.status == 200
     body = await resp.json()
     assert body["rows"] == [{"id": 1, "news_item_id": 5}]
-    assert "news_item" not in body
+    assert "news_item" in body
+    assert body["news_item"]["headline"] == "BTC to the moon"
 
 
 @pytest.mark.asyncio
