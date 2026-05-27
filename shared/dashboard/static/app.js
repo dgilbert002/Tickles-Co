@@ -3,6 +3,7 @@
 function toggleTheme(){document.body.classList.toggle('light');localStorage.setItem('tickles.theme',document.body.classList.contains('light')?'light':'dark');updateThemeBtn()}
 function updateThemeBtn(){const b=document.getElementById('theme-btn');if(b)b.textContent=document.body.classList.contains('light')?'☀️ Light':'🌙 Dark'}
 window.toggleTheme=toggleTheme;window.updateThemeBtn=updateThemeBtn;
+document.addEventListener('DOMContentLoaded',function(){var b=document.getElementById('theme-btn');if(b){b.addEventListener('click',function(){var bd=document.body;bd.classList.toggle('light');var m=bd.classList.contains('light')?'light':'dark';localStorage.setItem('tickles.theme',m);b.textContent=m==='light'?'☀️ Light':'🌙 Dark'})}});
 const state={tab:'floor',company:'all',snap:null,competitions:null,learning:null,news:null,agentPerf:null,sort:{},charts:{},timer:null,expandedAgent:null,timeSpacing:localStorage.getItem('tickles.replay.spacing')||'contiguous'};
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
 const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
