@@ -1807,4 +1807,3 @@ function updateCompNumbers(){
   });
   $('#updated-at').textContent=new Date().toLocaleTimeString();
 }
-})();
