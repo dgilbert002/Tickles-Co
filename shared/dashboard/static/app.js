@@ -7,10 +7,10 @@ document.addEventListener('DOMContentLoaded',function(){var b=document.getElemen
 const state={tab:'floor',company:'all',snap:null,competitions:null,learning:null,news:null,agentPerf:null,sort:{},charts:{},timer:null,expandedAgent:null,timeSpacing:localStorage.getItem('tickles.replay.spacing')||'contiguous'};
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
 const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
-const n=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
+const Z=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
 const fmt=(v,d=2)=>{const x=Number(v);return Number.isFinite(x)?x.toFixed(d):'—'};
-const usd=v=>`${n(v)>=0?'+':'-'}$${Math.abs(n(v)).toFixed(2)}`;
-const pct=v=>`${n(v)>=0?'+':''}${fmt(v,2)}%`;
+const usd=v=>`${Z(v)>=0?'+':'-'}$${Math.abs(Z(v)).toFixed(2)}`;
+const pct=v=>`${Z(v)>=0?'+':''}${fmt(v,2)}%`;
 const rel=iso=>{if(!iso)return'—';const s=Math.max(0,Math.floor((Date.now()-new Date(iso))/1000));if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`};
 const fmtDate=iso=>{if(!iso)return'—';const d=new Date(iso);return d.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})};
 const initials=v=>(v||'?').split(/[\s._-]/).filter(Boolean).map(x=>x[0]).join('').slice(0,2).toUpperCase();
@@ -31,7 +31,7 @@ async function load(){try{const needsSnap=['floor','radar','signals','positions'
 async function fetchLearning(){const [skill,feed,brain,traders]=await Promise.all([api('/api/learning/skill-summary?window=1m'),api('/api/learning/memory-feed?window=1m'),api('/api/learning/agent-brain?window=1m'),api('/api/traders-intel')]);return{skill,feed,brain,traders}}
 function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings']};$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
 function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage()}
-function renderStats(){const s=state.snap||{};const pnl=n(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`edge ${fmt(s.top_actor_score,3)}`:'edge —';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
+function renderStats(){const s=state.snap||{};const pnl=Z(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`edge ${fmt(s.top_actor_score,3)}`:'edge —';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
 
 /* ─── row helpers ─── */
 function rowMain(sym,sub){return`<div class="main-cell"><div class="token-dot">${esc(initials(sym))}</div><div><div class="primary">${esc(sym)}</div><div class="secondary">${esc(sub||'')}</div></div></div>`}
@@ -41,8 +41,8 @@ async function renderCompetition(){
   const c=state.competitions?.competitions?.[0];
   if(!c){$('#competition-body').innerHTML='<div class="empty">No active competition</div>';return}
   const rows=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).map(p=>{
-    const eq=n(p.scores?.equity), unreal=n(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal, rpct=n(p.scores?.return_pct);
-    const starting=n(p.scores?.starting_balance_usd)||1000;
+    const eq=Z(p.scores?.equity), unreal=Z(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal, rpct=Z(p.scores?.return_pct);
+    const starting=Z(p.scores?.starting_balance_usd)||1000;
     const liveReturn=((liveEq/starting)-1)*100;
     return `<tr class="comp-row" data-agent="${esc(p.agent_id)}" id="comp-tr-${esc(p.agent_id)}">
       <td class="num rank">#${p.rank}</td>
@@ -52,7 +52,7 @@ async function renderCompetition(){
       <td class="num mono"><strong>$${fmt(liveEq,2)}</strong></td>
       <td class="num">${usd(p.scores?.total_realized_pnl_usd)}<br><span class="secondary small">unreal ${usd(p.scores?.unrealized_pnl_usd)}</span></td>
       <td class="num ${rpct>=0?'success':'danger'}">${pct(rpct)}<br><span class="secondary small">${pct(liveReturn)} live</span></td>
-      <td class="num">${fmt(n(p.scores?.win_rate)*100,1)}%</td>
+      <td class="num">${fmt(Z(p.scores?.win_rate)*100,1)}%</td>
       <td class="num">${p.scores?.total_trades||0}</td>
       <td class="num">${p.scores?.open_positions||0}</td>
     </tr>`;
@@ -105,7 +105,7 @@ function renderAgentInline(agentId,d){
   function buildLive(){
     if(!open.length)return'<tr><td colspan="11" class="empty">No open positions — waiting for new signals</td></tr>';
     return open.map((p,i)=>{
-      const upnl=n(p.unrealized_pnl), upct=n(p.unrealized_pnl_pct);
+      const upnl=Z(p.unrealized_pnl), upct=Z(p.unrealized_pnl_pct);
       const dir=(p.direction||'long').toLowerCase();
       const cur=p.current_price?fmt(p.current_price,4):'…';
       const tname=traderName(p);
@@ -128,7 +128,7 @@ function renderAgentInline(agentId,d){
   function buildHistory(){
     if(!hist.length)return'<tr><td colspan="10" class="empty">No trade history yet</td></tr>';
     return hist.map(p=>{
-      const pnl=n(p.pnl); const dir=(p.direction||'long').toLowerCase();
+      const pnl=Z(p.pnl); const dir=(p.direction||'long').toLowerCase();
       const tname=traderName(p);
       return `<tr class="pos-table-row ${pnl>=0?'win':'loss'}">
         <td><strong>${esc(p.symbol)}</strong></td>
@@ -145,8 +145,8 @@ function renderAgentInline(agentId,d){
     }).join('');
   }
 
-  const eq=n(a.equity_usd), unreal=n(a.unrealized_pnl_usd), liveEq=eq+unreal;
-  const starting=n(a.starting_balance_usd)||1000;
+  const eq=Z(a.equity_usd), unreal=Z(a.unrealized_pnl_usd), liveEq=eq+unreal;
+  const starting=Z(a.starting_balance_usd)||1000;
   const liveReturn=((liveEq/starting)-1)*100;
 
   const html=`<div class="comp-detail">
@@ -157,11 +157,11 @@ function renderAgentInline(agentId,d){
     <div class="comp-stats">
       <div><label>Balance</label><strong>$${fmt(eq,2)}</strong></div>
       <div><label>Live Equity</label><strong>$${fmt(liveEq,2)}</strong></div>
-      <div><label>Realized P&L</label><strong class="${n(a.realized_pnl_usd)>=0?'success':'danger'}">${usd(a.realized_pnl_usd)}</strong></div>
+      <div><label>Realized P&L</label><strong class="${Z(a.realized_pnl_usd)>=0?'success':'danger'}">${usd(a.realized_pnl_usd)}</strong></div>
       <div><label>Unrealized</label><strong class="${unreal>=0?'success':'danger'}">${usd(unreal)}</strong></div>
       <div><label>Return</label><strong>${fmt(a.return_pct,1)}%</strong></div>
       <div><label>Live Return</label><strong class="${liveReturn>=0?'success':'danger'}">${fmt(liveReturn,1)}%</strong></div>
-      <div><label>Win Rate</label><strong>${fmt(n(a.win_rate)*100,1)}%</strong></div>
+      <div><label>Win Rate</label><strong>${fmt(Z(a.win_rate)*100,1)}%</strong></div>
       <div><label>Trades</label><strong>${a.total_trades||0}</strong></div>
     </div>
     <div id="comp-live-panel" class="comp-panel">
@@ -321,8 +321,8 @@ async function renderPositionsLive(){
   wireRows();
 }
 function livePosRows(rows){return rows.map(p=>{
-  const pnl=n(p.unrealized_pnl_usd??p.pnl_usd);
-  const pnlPct=n(p.pnl_pct);
+  const pnl=Z(p.unrealized_pnl_usd??p.pnl_usd);
+  const pnlPct=Z(p.pnl_pct);
   // Round 12 (2026-05-24): PositionMonitor now mirrors distance_to_sl_pct /
   // distance_to_tp1_pct / time_in_trade_minutes from the snapshot back to
   // tracked_positions on every cycle, so the API row usually carries
@@ -418,7 +418,7 @@ async function renderPositionsHistoric(loadMore){
   wireRows();
 }
 function historicPosRows(rows){return rows.map(p=>{
-  const pnl=n(p.realized_pnl_usd_final??p.realized_pnl_usd??p.pnl_usd);
+  const pnl=Z(p.realized_pnl_usd_final??p.realized_pnl_usd??p.pnl_usd);
   const opened=p.opened_at||p.signal_timestamp;
   const closed=p.closed_at;
   let hold='—';
@@ -449,7 +449,7 @@ function renderLearningPage(){const l=state.learning||{feed:{rows:[]},skill:{row
 // lives on the Positions tab in phase 11.3.
 const POS_LIVE_STATUSES=new Set(['open','partial_exit']);
 async function renderFloor(){const s=state.snap||{};renderCompetitionMini();renderNewsMini();try{const d=await api('/api/unified-signals?limit=10');const sigs=filterRows(d.signals||[],$('#floor-signal-filter')?.value,['symbol','trader_display_name','headline']);table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(sigs,10)])}catch(e){console.warn('floor signals failed',e);const sigs=filterRows(s.signals||[],$('#floor-signal-filter')?.value,['instrument_symbol','trader_display_name','trader_handle_normalized','status']);table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(sigs,10)])}const live_positions=(s.positions||[]).filter(r=>POS_LIVE_STATUSES.has(String(r.status||'').toLowerCase()));const ps=filterRows(live_positions,$('#floor-position-filter')?.value,['instrument_symbol','actor_display','actor_handle','status']);table('#floor-positions',[{label:'Position'},{label:'Side'},{label:'Status'},{label:'Entry',num:1},{label:'Now',num:1},{label:'P&L',num:1},{label:'P&L %',num:1},{label:'Notional',num:1},{label:'Source'}],[posRows(ps,10)]);wireRows()}
-function renderCompetitionMini(){const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}const ps=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).slice(0,6);$('#floor-competition').innerHTML=`<div class="competition-card"><div class="secondary">${esc(c.name)} · ${esc(c.status)}</div><div class="leader-mini">${ps.map(p=>{const eq=n(p.scores?.equity);const start=n(p.scores?.starting_balance_usd)||1000;const livePnl=eq-start;return `<div class="leader-row"><div class="rank-badge">#${p.rank}</div><div><div class="primary">${esc(p.agent_id)}</div><div class="secondary">${esc(p.strategy_ref||'')} · ${livePnl>=0?'+':''}$${fmt(livePnl,2)}</div></div><div class="num ${eq>=start?'success':'danger'}">$${fmt(eq,2)}</div></div>`}).join('')}</div></div>`}
+function renderCompetitionMini(){const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}const ps=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).slice(0,6);$('#floor-competition').innerHTML=`<div class="competition-card"><div class="secondary">${esc(c.name)} · ${esc(c.status)}</div><div class="leader-mini">${ps.map(p=>{const eq=Z(p.scores?.equity);const start=Z(p.scores?.starting_balance_usd)||1000;const livePnl=eq-start;return `<div class="leader-row"><div class="rank-badge">#${p.rank}</div><div><div class="primary">${esc(p.agent_id)}</div><div class="secondary">${esc(p.strategy_ref||'')} · ${livePnl>=0?'+':''}$${fmt(livePnl,2)}</div></div><div class="num ${eq>=start?'success':'danger'}">$${fmt(eq,2)}</div></div>`}).join('')}</div></div>`}
 function renderNewsMini(){const rows=(state.news?.rows||[]).filter(r=>r.source==='discord');$('#floor-news').innerHTML=rows.slice(0,8).map(newsMsg).join('')||'<div class="empty">No Discord messages</div>'}
 // Bug 12 sibling — strip the leading `[Reply to @user]: <quoted parent>`
 // line so the dashboard News tab and floor mini-feed don't show the
@@ -475,13 +475,13 @@ function newsMsg(r){
 // the success/green class, which the user reads as "exactly at entry, in
 // your favour" — wrong. Now we detect the no-data case explicitly and
 // render '—' in the muted .secondary class. Real zero stays "+0.00%" green.
-function sigRows(rows,limit){const fmtOrDash=(v,d=6)=>{const x=Number(v);return Number.isFinite(x)&&x!==0?x.toFixed(d):'—'};return rows.slice(0,limit||rows.length).filter(s=>{const e=s.entry_price??s.levels?.entry;return e!=null&&Number(e)>0}).map(s=>{const sym=s.symbol||s.instrument_symbol||'';const dir=s.direction||s.consensus_direction;const trader=traderName(s);const liveRaw=s.current_price;const entryRaw=s.entry_price??s.levels?.entry;const distRaw=s.distance_to_entry_pct;const hasLive=liveRaw!=null&&Number.isFinite(Number(liveRaw))&&Number(liveRaw)>0;const hasEntry=entryRaw!=null&&Number.isFinite(Number(entryRaw))&&Number(entryRaw)>0;const hasStoredDist=distRaw!=null&&Number.isFinite(Number(distRaw))&&Number(distRaw)!==0;const computedDist=hasLive&&hasEntry?((Number(liveRaw)-Number(entryRaw))/Number(entryRaw)*100):null;const dist=computedDist!=null?computedDist:(hasStoredDist?Number(distRaw):null);const distCell=dist==null?'<span class="secondary">—</span>':`<span class="${dist>=0?'success':'danger'}">${pct(dist)}</span>`;const liveCell=hasLive?fmt(liveRaw,6):'<span class="secondary">—</span>';const status=s.position_status||s.status||'signal';const callId=s.signal_interpretation_id||s.id;return`<tr data-call="${esc(callId)}" data-news="${esc(s.news_item_id||'')}"><td>${rowMain(dispSymbol(sym),`${trader} · ${rel(s.signal_timestamp||s.created_at)}`)}</td><td>${pill(dir,dir)}</td><td class="num mono">${fmt(entryRaw,6)}</td><td class="num mono">${fmtOrDash(s.stop_loss||s.levels?.stop_loss,6)}</td><td class="num mono">${fmtOrDash(s.take_profit_1||s.levels?.take_profit_1,6)}</td><td class="num mono">${liveCell}</td><td class="num">${distCell}</td><td class="num">${fmt(n(s.consensus_confidence)*100,0)}%</td><td>${pill(status,status)}</td><td><div class="secondary">${esc((s.headline||s.raw_signal_text||s.news_content||s.news_headline||'').slice(0,60))}</div></td></tr>`}).join('')}
+function sigRows(rows,limit){const fmtOrDash=(v,d=6)=>{const x=Number(v);return Number.isFinite(x)&&x!==0?x.toFixed(d):'—'};return rows.slice(0,limit||rows.length).filter(s=>{const e=s.entry_price??s.levels?.entry;return e!=null&&Number(e)>0}).map(s=>{const sym=s.symbol||s.instrument_symbol||'';const dir=s.direction||s.consensus_direction;const trader=traderName(s);const liveRaw=s.current_price;const entryRaw=s.entry_price??s.levels?.entry;const distRaw=s.distance_to_entry_pct;const hasLive=liveRaw!=null&&Number.isFinite(Number(liveRaw))&&Number(liveRaw)>0;const hasEntry=entryRaw!=null&&Number.isFinite(Number(entryRaw))&&Number(entryRaw)>0;const hasStoredDist=distRaw!=null&&Number.isFinite(Number(distRaw))&&Number(distRaw)!==0;const computedDist=hasLive&&hasEntry?((Number(liveRaw)-Number(entryRaw))/Number(entryRaw)*100):null;const dist=computedDist!=null?computedDist:(hasStoredDist?Number(distRaw):null);const distCell=dist==null?'<span class="secondary">—</span>':`<span class="${dist>=0?'success':'danger'}">${pct(dist)}</span>`;const liveCell=hasLive?fmt(liveRaw,6):'<span class="secondary">—</span>';const status=s.position_status||s.status||'signal';const callId=s.signal_interpretation_id||s.id;return`<tr data-call="${esc(callId)}" data-news="${esc(s.news_item_id||'')}"><td>${rowMain(dispSymbol(sym),`${trader} · ${rel(s.signal_timestamp||s.created_at)}`)}</td><td>${pill(dir,dir)}</td><td class="num mono">${fmt(entryRaw,6)}</td><td class="num mono">${fmtOrDash(s.stop_loss||s.levels?.stop_loss,6)}</td><td class="num mono">${fmtOrDash(s.take_profit_1||s.levels?.take_profit_1,6)}</td><td class="num mono">${liveCell}</td><td class="num">${distCell}</td><td class="num">${fmt(Z(s.consensus_confidence)*100,0)}%</td><td>${pill(status,status)}</td><td><div class="secondary">${esc((s.headline||s.raw_signal_text||s.news_content||s.news_headline||'').slice(0,60))}</div></td></tr>`}).join('')}
 // Round 11 (2026-05-24): closed/expired/cancelled rows have realized_pnl_usd_final
 // populated and unrealized_pnl_usd null/zero. Branch on status so the P&L column
 // shows the correct number for both live and historic positions.
 const POS_CLOSED_STATUSES=new Set(['closed','expired','cancelled','invalidated','deleted']);
-function posRows(rows,limit){return rows.slice(0,limit||rows.length).map(p=>{const closed=POS_CLOSED_STATUSES.has(String(p.status||'').toLowerCase());const pnl=n(closed?(p.realized_pnl_usd_final??p.realized_pnl_usd??p.pnl_usd):(p.unrealized_pnl_usd??p.pnl_usd));return`<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}"><td>${rowMain(dispSymbol(p.instrument_symbol),`${traderName(p)} · ${rel(p.signal_timestamp||p.opened_at)}`)}</td><td>${pill(p.direction,p.direction)}</td><td>${pill(p.status,p.status)}</td><td class="num mono">${fmt(p.entry_price,6)}</td><td class="num mono">${fmt(p.current_price,6)}</td><td class="num ${pnl>=0?'success':'danger'}">${usd(pnl)}</td><td class="num ${n(p.pnl_pct)>=0?'success':'danger'}">${pct(n(p.pnl_pct)*100)}</td><td class="num">$${fmt(p.notional_usd,0)}</td><td>${esc(p.signal_source||p._source||'—')}</td></tr>`}).join('')}
-function renderOpsPage(){const s=state.snap||{};const c=chart('cost-chart');if(c)c.setOption({backgroundColor:'transparent',grid:{left:55,right:20,top:20,bottom:35},xAxis:{type:'category',data:['Spent','Remaining','Limit'],axisLabel:{color:'#8f8f9b'}},yAxis:{type:'value',axisLabel:{color:'#8f8f9b',formatter:v=>'$'+v},splitLine:{lineStyle:{color:'#2b2b34'}}},series:[{type:'bar',barWidth:34,data:[n(s.api_cost_today_usd),n(s.budget_remaining_usd||100),n(s.budget_limit_usd||100)],itemStyle:{borderRadius:[10,10,0,0],color:p=>['#fc72ff','#35d07f','#7a5cff'][p.dataIndex]}}]});$('#services-grid').innerHTML=(s.services||[]).map(x=>{const hb=x.heartbeat;let st='disabled';if(hb)st=hb.is_stale?'stale':'live';else if(x.enabled_on_vps)st='enabled';return`<div class="service"><strong>${esc(x.name)}</strong><span>${esc(x.kind||'daemon')} · ${st}</span></div>`}).join('')||'<div class="empty">Service registry not available</div>'}
+function posRows(rows,limit){return rows.slice(0,limit||rows.length).map(p=>{const closed=POS_CLOSED_STATUSES.has(String(p.status||'').toLowerCase());const pnl=Z(closed?(p.realized_pnl_usd_final??p.realized_pnl_usd??p.pnl_usd):(p.unrealized_pnl_usd??p.pnl_usd));return`<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}"><td>${rowMain(dispSymbol(p.instrument_symbol),`${traderName(p)} · ${rel(p.signal_timestamp||p.opened_at)}`)}</td><td>${pill(p.direction,p.direction)}</td><td>${pill(p.status,p.status)}</td><td class="num mono">${fmt(p.entry_price,6)}</td><td class="num mono">${fmt(p.current_price,6)}</td><td class="num ${pnl>=0?'success':'danger'}">${usd(pnl)}</td><td class="num ${Z(p.pnl_pct)>=0?'success':'danger'}">${pct(Z(p.pnl_pct)*100)}</td><td class="num">$${fmt(p.notional_usd,0)}</td><td>${esc(p.signal_source||p._source||'—')}</td></tr>`}).join('')}
+function renderOpsPage(){const s=state.snap||{};const c=chart('cost-chart');if(c)c.setOption({backgroundColor:'transparent',grid:{left:55,right:20,top:20,bottom:35},xAxis:{type:'category',data:['Spent','Remaining','Limit'],axisLabel:{color:'#8f8f9b'}},yAxis:{type:'value',axisLabel:{color:'#8f8f9b',formatter:v=>'$'+v},splitLine:{lineStyle:{color:'#2b2b34'}}},series:[{type:'bar',barWidth:34,data:[Z(s.api_cost_today_usd),Z(s.budget_remaining_usd||100),Z(s.budget_limit_usd||100)],itemStyle:{borderRadius:[10,10,0,0],color:p=>['#fc72ff','#35d07f','#7a5cff'][p.dataIndex]}}]});$('#services-grid').innerHTML=(s.services||[]).map(x=>{const hb=x.heartbeat;let st='disabled';if(hb)st=hb.is_stale?'stale':'live';else if(x.enabled_on_vps)st='enabled';return`<div class="service"><strong>${esc(x.name)}</strong><span>${esc(x.kind||'daemon')} · ${st}</span></div>`}).join('')||'<div class="empty">Service registry not available</div>'}
 
 /* ─── Round 10 (2026-05-24): Vision-model picker ─────────────────────────── */
 /* The Settings tab fetches /api/settings/vision-models, builds 3 dropdowns
@@ -995,7 +995,7 @@ function renderSignalsTable(rows){table('#signals-table',[{label:'Signal'},{labe
    Positions tab now uses Live/Historic split via renderPositionsLive() and
    renderPositionsHistoric(). The legacy single-table renderer had no callers
    after the Round 11 split. */
-async function renderTradersPage(){try{state.tradersIntel=await api('/api/traders-intel');}catch(e){console.warn('traders-intel failed',e);state.tradersIntel=null}let rows=state.tradersIntel?.traders||[];const q=$('#traders-filter')?.value;rows=filterRows(rows,q,['actor_id','display_name','platform','handle_normalized']);const sort=$('#traders-sort')?.value||'win_rate';rows.sort((a,b)=>{if(sort==='trades')return n(b.total_trades)-n(a.total_trades);if(sort==='pnl')return n(b.total_pnl)-n(a.total_pnl);if(sort==='freq')return n(b.trade_frequency_weekly)-n(a.trade_frequency_weekly);return n(b.win_rate)-n(a.win_rate)});const coinChips=(coins,limit=3)=>(coins||[]).slice(0,limit).map(c=>`<span class="coin-chip-mini ${n(c.pnl)>=0?'win':'loss'}" title="${esc(dispSymbol(c.symbol))}: ${c.trades}t, ${c.wins}w, ${usd(c.pnl)}">${esc(dispSymbol(c.symbol))}</span>`).join('')||'<span class="secondary">—</span>';const body=rows.map(t=>{const name=t.display_name||t.actor_id;const wr=t.win_rate;const wrDisplay=wr!=null?`${fmt(wr,1)}%`:'—%';return`<tr data-trader="${esc(t.actor_id)}"><td>${rowMain(name,`${t.platform||'discord'} · ${t.trader_type||'unknown'} · ${t.total_trades||0}t`)}</td><td class="num">${wrDisplay}</td><td class="num">${t.total_trades||0}</td><td class="num">${t.trade_frequency_weekly||'—'}/wk</td><td class="num success">${t.avg_win?usd(t.avg_win):'—'}</td><td class="num danger">${t.avg_loss?usd(t.avg_loss):'—'}</td><td class="num ${n(t.total_pnl)>=0?'success':'danger'}">${t.total_pnl!=null?usd(t.total_pnl):'—'}</td><td>${coinChips(t.most_traded_coins)}</td><td>${coinChips(t.most_profitable_coins)}</td></tr>`}).join('');table('#traders-table',[{label:'Discord / actor'},{label:'Win Rate',num:1},{label:'Trades',num:1},{label:'Freq',num:1},{label:'Avg Win',num:1},{label:'Avg Loss',num:1},{label:'Total P&L',num:1},{label:'Top Coins'},{label:'Best Coins'}],[body]);$$('#traders-table tr[data-trader]').forEach(tr=>tr.onclick=()=>openTrader(tr.dataset.trader))}
+async function renderTradersPage(){try{state.tradersIntel=await api('/api/traders-intel');}catch(e){console.warn('traders-intel failed',e);state.tradersIntel=null}let rows=state.tradersIntel?.traders||[];const q=$('#traders-filter')?.value;rows=filterRows(rows,q,['actor_id','display_name','platform','handle_normalized']);const sort=$('#traders-sort')?.value||'win_rate';rows.sort((a,b)=>{if(sort==='trades')return Z(b.total_trades)-Z(a.total_trades);if(sort==='pnl')return Z(b.total_pnl)-Z(a.total_pnl);if(sort==='freq')return Z(b.trade_frequency_weekly)-Z(a.trade_frequency_weekly);return Z(b.win_rate)-Z(a.win_rate)});const coinChips=(coins,limit=3)=>(coins||[]).slice(0,limit).map(c=>`<span class="coin-chip-mini ${Z(c.pnl)>=0?'win':'loss'}" title="${esc(dispSymbol(c.symbol))}: ${c.trades}t, ${c.wins}w, ${usd(c.pnl)}">${esc(dispSymbol(c.symbol))}</span>`).join('')||'<span class="secondary">—</span>';const body=rows.map(t=>{const name=t.display_name||t.actor_id;const wr=t.win_rate;const wrDisplay=wr!=null?`${fmt(wr,1)}%`:'—%';return`<tr data-trader="${esc(t.actor_id)}"><td>${rowMain(name,`${t.platform||'discord'} · ${t.trader_type||'unknown'} · ${t.total_trades||0}t`)}</td><td class="num">${wrDisplay}</td><td class="num">${t.total_trades||0}</td><td class="num">${t.trade_frequency_weekly||'—'}/wk</td><td class="num success">${t.avg_win?usd(t.avg_win):'—'}</td><td class="num danger">${t.avg_loss?usd(t.avg_loss):'—'}</td><td class="num ${Z(t.total_pnl)>=0?'success':'danger'}">${t.total_pnl!=null?usd(t.total_pnl):'—'}</td><td>${coinChips(t.most_traded_coins)}</td><td>${coinChips(t.most_profitable_coins)}</td></tr>`}).join('');table('#traders-table',[{label:'Discord / actor'},{label:'Win Rate',num:1},{label:'Trades',num:1},{label:'Freq',num:1},{label:'Avg Win',num:1},{label:'Avg Loss',num:1},{label:'Total P&L',num:1},{label:'Top Coins'},{label:'Best Coins'}],[body]);$$('#traders-table tr[data-trader]').forEach(tr=>tr.onclick=()=>openTrader(tr.dataset.trader))}
 
 /* ─── Discord drawer with per-chart tabs ─── */
 async function openDiscordDrawer(newsItemId,newsSrc){
@@ -1159,7 +1159,7 @@ function drawReplayInline(r,parentEl){
   const sig=r.signal||{}, pos=r.position||{}, levels=sig.levels||{}, trader=r.trader||{}, news=r.news||{};
   const traderName=trader.handle_raw||trader.display_name||trader.handle_normalized||news.author||'trader';
   const outcome=pos.outcome||pos.status||'tracking';
-  const pnl=n(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
+  const pnl=Z(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
   const media=r.media_url||r.annotated_chart_url;
   // Render the trader's call timestamp in the chart header so the viewer can
   // see exactly which moment the post lined up with on the candle replay.
@@ -1203,7 +1203,7 @@ function drawReplayInline(r,parentEl){
 }
 
 /* ─── Radar / Entry watch ─── */
-function signalDistance(s){if(Number.isFinite(s._liveDist))return s._liveDist;const live=n(s.current_price||s._livePrice);const entry=n(s.entry_price||s.levels?.entry);if(!entry)return 999999;if(live)return Math.abs((live-entry)/entry*100);const d=Math.abs(n(s.distance_to_entry_pct));return d?d:999999}
+function signalDistance(s){if(Number.isFinite(s._liveDist))return s._liveDist;const live=Z(s.current_price||s._livePrice);const entry=Z(s.entry_price||s.levels?.entry);if(!entry)return 999999;if(live)return Math.abs((live-entry)/entry*100);const d=Math.abs(Z(s.distance_to_entry_pct));return d?d:999999}
 // 2026-05-24 (Round 9) — Signal-source helper.
 // Returns a small inline badge that flags positions / radar cards where
 // the entry was inferred independently by ChartHacker (the AI vision
@@ -1215,7 +1215,7 @@ function aiInferredBadge(s){
   if(src!=='chart_hacker')return '';
   return '<span class="badge ai-inferred" title="Trade inferred independently by ChartHacker AI — trader did not explicitly mark this setup">AI INFERRED</span>';
 }
-function radarCard(s,i){const id=s.signal_interpretation_id||s.id;const sym=dispSymbol(s.symbol||s.instrument_symbol);const dir=(s.consensus_direction||s.direction||'').toLowerCase();const entry=n(s.entry_price||s.levels?.entry), sl=n(s.stop_loss||s.levels?.stop_loss), tp=n(s.take_profit_1||s.levels?.take_profit_1);const dist=signalDistance(s);const ageDays=(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000;const trader=traderName(s);const stale=ageDays>7?' stale':'';const rr=entry&&sl&&tp?Math.abs((tp-entry)/(entry-sl)):0;const live=(s.current_price||s._livePrice)?` · live ${fmt(s.current_price||s._livePrice,6)}`:'';const aiBadge=aiInferredBadge(s);return `<div class="radar-card${stale}" data-call="${esc(id)}" data-news="${esc(s.news_item_id||'')}" data-radar-idx="${i}"><div class="radar-top"><div>${rowMain(sym,`${trader} · ${(s.timeframe||'1m')} · ${rel(s.signal_timestamp||s.created_at)} old${live}`)}</div><div class="radar-top-right">${aiBadge}${pill(dir,dir)}</div></div><div class="mini-tv" id="mini-radar-${i}">${(!s._candles?.length&&s.media_url)?`<img class="mini-chart-img" src="${esc(s.media_url)}">`:''}<div class="riskbox ${dir==='short'?'short':'long'}"><i class="reward"></i><i class="risk"></i><b class="entry-line"></b></div><span class="mini-loading">${s._candles?.length?'':'chart snapshot / no local candles'}</span></div><div class="radar-metrics"><div><label>to entry</label><strong>${dist===999999?'—':fmt(dist,2)+'%'}</strong></div><div><label>entry</label><strong>${fmt(entry,6)}</strong></div><div><label>SL</label><strong>${fmt(sl,6)}</strong></div><div><label>TP1</label><strong>${fmt(tp,6)}</strong></div><div><label>R:R</label><strong>${rr?fmt(rr,2):'—'}</strong></div><div><label>TF</label><strong>${esc(s.timeframe||'1m')}</strong></div><div><label>age</label><strong>${fmt(ageDays,1)}d</strong></div></div></div>`}
+function radarCard(s,i){const id=s.signal_interpretation_id||s.id;const sym=dispSymbol(s.symbol||s.instrument_symbol);const dir=(s.consensus_direction||s.direction||'').toLowerCase();const entry=Z(s.entry_price||s.levels?.entry), sl=Z(s.stop_loss||s.levels?.stop_loss), tp=Z(s.take_profit_1||s.levels?.take_profit_1);const dist=signalDistance(s);const ageDays=(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000;const trader=traderName(s);const stale=ageDays>7?' stale':'';const rr=entry&&sl&&tp?Math.abs((tp-entry)/(entry-sl)):0;const live=(s.current_price||s._livePrice)?` · live ${fmt(s.current_price||s._livePrice,6)}`:'';const aiBadge=aiInferredBadge(s);return `<div class="radar-card${stale}" data-call="${esc(id)}" data-news="${esc(s.news_item_id||'')}" data-radar-idx="${i}"><div class="radar-top"><div>${rowMain(sym,`${trader} · ${(s.timeframe||'1m')} · ${rel(s.signal_timestamp||s.created_at)} old${live}`)}</div><div class="radar-top-right">${aiBadge}${pill(dir,dir)}</div></div><div class="mini-tv" id="mini-radar-${i}">${(!s._candles?.length&&s.media_url)?`<img class="mini-chart-img" src="${esc(s.media_url)}">`:''}<div class="riskbox ${dir==='short'?'short':'long'}"><i class="reward"></i><i class="risk"></i><b class="entry-line"></b></div><span class="mini-loading">${s._candles?.length?'':'chart snapshot / no local candles'}</span></div><div class="radar-metrics"><div><label>to entry</label><strong>${dist===999999?'—':fmt(dist,2)+'%'}</strong></div><div><label>entry</label><strong>${fmt(entry,6)}</strong></div><div><label>SL</label><strong>${fmt(sl,6)}</strong></div><div><label>TP1</label><strong>${fmt(tp,6)}</strong></div><div><label>R:R</label><strong>${rr?fmt(rr,2):'—'}</strong></div><div><label>TF</label><strong>${esc(s.timeframe||'1m')}</strong></div><div><label>age</label><strong>${fmt(ageDays,1)}d</strong></div></div></div>`}
 async function renderRadarPage(){
   const isFirstLoad = !$('#entry-radar').children.length || $('#entry-radar').querySelector('.empty');
   if(isFirstLoad) {
@@ -1230,7 +1230,7 @@ async function renderRadarPage(){
   }
   let rows=payload.rows||[];
   rows=filterRows(rows,$('#radar-filter')?.value,['instrument_symbol','symbol','handle_raw','handle_normalized','display_name','actor_id','news_content','news_headline']);
-  const maxAge=n($('#radar-age')?.value);
+  const maxAge=Z($('#radar-age')?.value);
   if(maxAge)rows=rows.filter(s=>(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000<=maxAge);
   rows.sort((a,b)=>signalDistance(a)-signalDistance(b));
   $('#entry-radar').innerHTML=rows.map(radarCard).join('')||`<div class="empty">No actionable waiting entries. Filtered out ${payload.excluded_count||0} calls that already hit entry / SL / TP.</div>`;
@@ -1238,7 +1238,7 @@ async function renderRadarPage(){
   $('#entry-radar').prepend(info);
   wireRows(); rows.forEach((s,i)=>drawMiniRadar(`mini-radar-${i}`,s.mini_candles||s._candles||[],s));
 }
-function drawMiniRadar(id,candles,s){const el=document.getElementById(id);if(!el||!candles.length||!window.echarts)return;const loading=el.querySelector('.mini-loading'); if(loading)loading.remove();const c=echarts.init(el);const labels=candles.map(x=>String(x.timestamp).slice(11,16));const data=candles.map(x=>[n(x.open),n(x.close),n(x.low),n(x.high)]);const levels=s.levels||{};const entry=n(s.entry_price||levels.entry), sl=n(s.stop_loss||levels.stop_loss), tp=n(s.take_profit_1||levels.take_profit_1);const lines=[];if(entry)lines.push({yAxis:entry,name:'E',lineStyle:{color:'#fc72ff',width:1}});if(sl)lines.push({yAxis:sl,name:'SL',lineStyle:{color:'#ff5f72',width:1,type:'dashed'}});if(tp)lines.push({yAxis:tp,name:'TP',lineStyle:{color:'#35d07f',width:1,type:'dashed'}});c.setOption({animation:false,grid:{left:0,right:0,top:4,bottom:0},xAxis:{type:'category',data:labels,show:false},yAxis:{scale:true,show:false},series:[{type:'candlestick',data,itemStyle:{color:'#35d07f',color0:'#ff5f72',borderColor:'#35d07f',borderColor0:'#ff5f72'},markLine:{symbol:'none',label:{show:false},data:lines}}]})}
+function drawMiniRadar(id,candles,s){const el=document.getElementById(id);if(!el||!candles.length||!window.echarts)return;const loading=el.querySelector('.mini-loading'); if(loading)loading.remove();const c=echarts.init(el);const labels=candles.map(x=>String(x.timestamp).slice(11,16));const data=candles.map(x=>[Z(x.open),Z(x.close),Z(x.low),Z(x.high)]);const levels=s.levels||{};const entry=Z(s.entry_price||levels.entry), sl=Z(s.stop_loss||levels.stop_loss), tp=Z(s.take_profit_1||levels.take_profit_1);const lines=[];if(entry)lines.push({yAxis:entry,name:'E',lineStyle:{color:'#fc72ff',width:1}});if(sl)lines.push({yAxis:sl,name:'SL',lineStyle:{color:'#ff5f72',width:1,type:'dashed'}});if(tp)lines.push({yAxis:tp,name:'TP',lineStyle:{color:'#35d07f',width:1,type:'dashed'}});c.setOption({animation:false,grid:{left:0,right:0,top:4,bottom:0},xAxis:{type:'category',data:labels,show:false},yAxis:{scale:true,show:false},series:[{type:'candlestick',data,itemStyle:{color:'#35d07f',color0:'#ff5f72',borderColor:'#35d07f',borderColor0:'#ff5f72'},markLine:{symbol:'none',label:{show:false},data:lines}}]})}
 
 /* ─── Signal intelligence drawer (standalone call) ─── */
 function levelCards(levels){
@@ -1299,7 +1299,7 @@ function drawReplay(r){
   $('#drawer-kicker').textContent=`CALL DETAIL | INTERP ID: ${r.id}${pos.id ? ` · POS ID: ${pos.id}` : ''}${srcTag}`;
   const traderName=trader.handle_raw||trader.display_name||trader.handle_normalized||news.author||'trader';
   const outcome=pos.outcome||pos.status||'tracking';
-  const pnl=n(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
+  const pnl=Z(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
   const media=r.media_url||r.annotated_chart_url;
   $('#drawer-body').innerHTML=`
     <div class="replay-layout">
@@ -1331,9 +1331,9 @@ function drawReplay(r){
     renderReplayChart(r);
   });
 }
-function candleSeries(candles){return (candles||[]).map(c=>[c.timestamp,n(c.open),n(c.close),n(c.low),n(c.high)])}
+function candleSeries(candles){return (candles||[]).map(c=>[c.timestamp,Z(c.open),Z(c.close),Z(c.low),Z(c.high)])}
 function markLines(levels){
-  const data=[]; const add=(name,val,color)=>{if(n(val))data.push({yAxis:n(val),name,lineStyle:{color,type:'dashed',width:1.4},label:{formatter:name,color}})};
+  const data=[]; const add=(name,val,color)=>{if(Z(val))data.push({yAxis:Z(val),name,lineStyle:{color,type:'dashed',width:1.4},label:{formatter:name,color}})};
   add('ENTRY',levels?.entry,'#fc72ff'); add('SL',levels?.stop_loss,'#ff5f72');
   ['take_profit_1','take_profit_2','take_profit_3','take_profit_4','take_profit_5','take_profit_6'].forEach((k,i)=>add(`TP${i+1}`,levels?.[k],'#35d07f'));
   return data;
@@ -1382,7 +1382,7 @@ function renderReplayChart(r,chartId='replay-chart',upto=null){
   let yMin=null,yMax=null;
   let dataMin=Infinity,dataMax=-Infinity;
   for(const c of (candles||[])){
-    const lo=n(c.low),hi=n(c.high),op=n(c.open),cl=n(c.close);
+    const lo=Z(c.low),hi=Z(c.high),op=Z(c.open),cl=Z(c.close);
     if(lo>0&&lo<dataMin)dataMin=lo;
     if(op>0&&op<dataMin)dataMin=op;
     if(cl>0&&cl<dataMin)dataMin=cl;
@@ -1456,7 +1456,7 @@ async function openTrader(actor){openDrawer(actor,'TRADER INTEL','<div class="em
 /* ─── Trader drawer — stats + Active/History tabs + AI learnings ─── */
 function renderTraderDrawer(d,actor){
   const s=d.stats||{};
-  const pnlOk=n(s.total_pnl)>=0;
+  const pnlOk=Z(s.total_pnl)>=0;
   let html='';
 
   // ── Stats summary grid ──
@@ -1478,8 +1478,8 @@ function renderTraderDrawer(d,actor){
   // ── Most traded / Most profitable coins ──
   if((s.most_traded||[]).length||(s.most_profitable||[]).length){
     html+=`<div class="trader-coins-grid">`;
-    html+=`<div><h3>Most Traded</h3><div class="coin-list">${(s.most_traded||[]).map(c=>`<span class="coin-chip ${n(c.pnl)>=0?'win':'loss'}">${esc(dispSymbol(c.symbol))} <em>${c.trades}t · ${c.wins}w · ${usd(c.pnl)}</em></span>`).join('')||'<span class="secondary">—</span>'}</div></div>`;
-    html+=`<div><h3>Most Profitable</h3><div class="coin-list">${(s.most_profitable||[]).map(c=>`<span class="coin-chip ${n(c.pnl)>=0?'win':'loss'}">${esc(dispSymbol(c.symbol))} <em>${usd(c.pnl)} · ${c.win_rate}%</em></span>`).join('')||'<span class="secondary">—</span>'}</div></div>`;
+    html+=`<div><h3>Most Traded</h3><div class="coin-list">${(s.most_traded||[]).map(c=>`<span class="coin-chip ${Z(c.pnl)>=0?'win':'loss'}">${esc(dispSymbol(c.symbol))} <em>${c.trades}t · ${c.wins}w · ${usd(c.pnl)}</em></span>`).join('')||'<span class="secondary">—</span>'}</div></div>`;
+    html+=`<div><h3>Most Profitable</h3><div class="coin-list">${(s.most_profitable||[]).map(c=>`<span class="coin-chip ${Z(c.pnl)>=0?'win':'loss'}">${esc(dispSymbol(c.symbol))} <em>${usd(c.pnl)} · ${c.win_rate}%</em></span>`).join('')||'<span class="secondary">—</span>'}</div></div>`;
     html+=`</div>`;
   }
 
@@ -1517,10 +1517,10 @@ function renderTraderDrawer(d,actor){
     return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Symbol</th><th>Direction</th><th>Entry</th><th>Exit</th><th>Status</th><th class="num">P&L</th><th>Outcome</th><th>Opened</th></tr></thead><tbody>${rows.map(r=>{
       const sym=dispSymbol(r.instrument_symbol);
       const dir=r.direction||'';
-      const entry=n(r.entry_price);
-      const exit=n(r.exit_price);
+      const entry=Z(r.entry_price);
+      const exit=Z(r.exit_price);
       const status=r.status||'';
-      const pnl=n(r.realized_pnl_usd||r.unrealized_pnl_usd);
+      const pnl=Z(r.realized_pnl_usd||r.unrealized_pnl_usd);
       const outcome=r.outcome||'';
       const opened=r.signal_timestamp||r.created_at||'';
       return `<tr><td>${esc(sym)}</td><td>${dirPill(dir)}</td><td>${fmt(entry,4)}</td><td>${exit?fmt(exit,4):'—'}</td><td>${pill(status,status)}</td><td class="num ${pnl>=0?'success':'danger'}">${pnl!==0?usd(pnl):'—'}</td><td>${esc(outcome||status)}</td><td>${fmtDate(opened)}</td></tr>`;
@@ -1792,8 +1792,8 @@ function updateCompNumbers(){
   (c.participants||[]).forEach(p=>{
     const tr=document.getElementById('comp-tr-'+p.agent_id);
     if(!tr)return;
-    const eq=n(p.scores?.equity), unreal=n(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal;
-    const rpct=n(p.scores?.return_pct), starting=n(p.scores?.starting_balance_usd)||1000;
+    const eq=Z(p.scores?.equity), unreal=Z(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal;
+    const rpct=Z(p.scores?.return_pct), starting=Z(p.scores?.starting_balance_usd)||1000;
     const liveReturn=((liveEq/starting)-1)*100;
     const cells=tr.querySelectorAll('td');
     if(cells.length>=8){
@@ -1801,7 +1801,7 @@ function updateCompNumbers(){
       cells[3].innerHTML='<strong>$'+fmt(liveEq,2)+'</strong>'; // Live Equity
       cells[4].innerHTML=usd(p.scores?.total_realized_pnl_usd)+'<br><span class="secondary small">unreal '+usd(p.scores?.unrealized_pnl_usd)+'</span>'; // P&L
       cells[5].innerHTML='<span class="'+(rpct>=0?'success':'danger')+'">'+pct(rpct)+'</span><br><span class="secondary small">'+pct(liveReturn)+' live</span>'; // Return
-      cells[6].textContent=fmt(n(p.scores?.win_rate)*100,1)+'%'; // Win
+      cells[6].textContent=fmt(Z(p.scores?.win_rate)*100,1)+'%'; // Win
       cells[7].textContent=p.scores?.total_trades||0;      // Trades
       cells[8].textContent=p.scores?.open_positions||0;    // Open
     }
