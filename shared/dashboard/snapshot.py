@@ -308,47 +308,36 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
     ingest_depth = 0
     signals_today = 0
 
+    # Open P&L fix (2026-05-29): the strip used to count ONLY positions_current
+    # (a single demo broker fill), so it showed "1 open position · +$0.00". Now
+    # it sums the SAME live union the Positions tab + Floor show
+    # (aggregate_live_positions = trader signals + paper-agent copies + broker
+    # fills), so Open P&L reflects everything actually in play.
+    try:
+        live_rows = await aggregate_live_positions(company_filter, limit=500)
+        total_open = len(live_rows)
+        total_pnl = sum(float(r.get("unrealized_pnl_usd") or 0.0) for r in live_rows)
+        agent_open = sum(1 for r in live_rows if r.get("_source") == "competition_trades")
+        trader_open = total_open - agent_open
+    except Exception as exc:
+        LOG.warning("[stats] live aggregation failed, falling back: %s", exc)
+
     async with shared_pool.acquire() as shared_conn:
-        # Open positions: prefer the positions_current view (it joins to
-        # the live exchange ledger via the position monitor) and fall
-        # back to tracked_positions WHERE status='open' if the view is
-        # missing or empty. positions_current uses 'unrealised_pnl_usd'
-        # (British spelling); tracked_positions uses the American one.
-        try:
-            pc_rows = await shared_conn.fetch(
-                "SELECT company_id, direction, "
-                "COALESCE(unrealised_pnl_usd, 0) AS pnl "
-                "FROM positions_current"
-            )
-        except Exception:
-            pc_rows = []
-        if pc_rows:
-            for r in pc_rows:
-                if company_filter and company_filter != "all" and r["company_id"] != company_filter:
-                    continue
-                total_open += 1
-                total_pnl += float(r["pnl"] or 0.0)
-            # positions_current doesn't carry actor_type — best-effort:
-            # split is captured in detailed Positions tab, not the strip.
-            trader_open = total_open
-            agent_open = 0
-        else:
-            pos_query = """
-                SELECT actor_type, company_id, COUNT(*) as cnt, SUM(COALESCE(unrealized_pnl_usd, 0)) as pnl
-                FROM tracked_positions
-                WHERE status IN ('open', 'pending')
-                GROUP BY actor_type, company_id
-            """
-            pos_rows = await shared_conn.fetch(pos_query)
-            for r in pos_rows:
-                if company_filter and company_filter != "all" and r["company_id"] != company_filter:
-                    continue
-                total_open += r["cnt"]
-                total_pnl += float(r["pnl"] or 0.0)
-                if r["actor_type"] == "trader":
-                    trader_open += r["cnt"]
-                else:
-                    agent_open += r["cnt"]
+        if total_open == 0:
+            # Fallback to the legacy positions_current count if the live
+            # aggregation returned nothing (e.g. cold pool).
+            try:
+                pc_rows = await shared_conn.fetch(
+                    "SELECT company_id, COALESCE(unrealised_pnl_usd, 0) AS pnl FROM positions_current"
+                )
+                for r in pc_rows:
+                    if company_filter and company_filter != "all" and r["company_id"] != company_filter:
+                        continue
+                    total_open += 1
+                    total_pnl += float(r["pnl"] or 0.0)
+                    trader_open = total_open
+            except Exception:
+                pass
 
         # Ingest depth (shared table)
         depth_query = "SELECT COUNT(*) FROM news_items WHERE enrichment_status='pending'"
@@ -369,18 +358,20 @@ async def get_overview_stats(company_filter: str | None = None) -> Dict[str, Any
         )
         deduped_24h = await shared_conn.fetchval(dedup_query) or 0
 
-        # 2026-05-27: populate top actor for Trading Floor "Best Trader/Agent" card.
+        # Best Trader/Agent (2026-05-29): rank by live EQUITY (closed balance +
+        # unrealized P&L), not return_pct — the user wants "highest equity".
         top_actor_name = None
         top_actor_score = 0.0
         try:
             top_row = await shared_conn.fetchrow(
-                "SELECT agent_id, return_pct FROM contest_participants "
-                "WHERE return_pct IS NOT NULL AND return_pct > 0 "
-                "ORDER BY return_pct DESC LIMIT 1"
+                "SELECT agent_id, "
+                "(COALESCE(equity_usd,0) + COALESCE(unrealized_pnl_usd,0)) AS live_equity "
+                "FROM contest_participants "
+                "ORDER BY live_equity DESC NULLS LAST LIMIT 1"
             )
             if top_row:
                 top_actor_name = top_row["agent_id"]
-                top_actor_score = float(top_row["return_pct"] or 0)
+                top_actor_score = float(top_row["live_equity"] or 0)
         except Exception:
             pass
 
@@ -578,6 +569,41 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
         status_reason = None
         news_item_id = None
         price_updated_at = None
+    elif source == "competition_trades":
+        # Phase 4 (2026-05-29): paper-agent positions. One row per agent's open
+        # copy. agent_id is the actor; sl_price/tp_price/allocated map onto the
+        # canonical level/notional fields. current_price + unrealized P&L are
+        # enriched downstream from the live price map.
+        symbol = d.get("symbol")
+        entry = _f(d.get("entry_price"))
+        size = None
+        upnl = _f(d.get("unrealized_pnl_usd"))  # filled by enrichment pass
+        rpnl = None
+        rpnl_final = None
+        opened_at = d.get("entered_at")
+        closed_at = d.get("exited_at")
+        status = "open" if d.get("exited_at") is None else "closed"
+        actor_id = d.get("agent_id")
+        signal_source = "paper_agent"
+        detection_method = None
+        entry_price_source = None
+        signal_interpretation_id = d.get("signal_interpretation_id")
+        trader_profile_id = None
+        current_price = _f(d.get("current_price"))
+        pnl_pct = _f(d.get("pnl_pct"))
+        stop_loss = _f(d.get("sl_price"))
+        take_profit_1 = _f(d.get("tp_price"))
+        take_profit_2 = None
+        take_profit_3 = None
+        distance_to_sl_pct = None
+        distance_to_tp1_pct = None
+        time_in_trade_minutes = None
+        outcome = None
+        exit_price = _f(d.get("exit_price"))
+        exit_reason = d.get("exit_reason")
+        status_reason = None
+        news_item_id = None
+        price_updated_at = d.get("price_updated_at")
     else:
         symbol = d.get("instrument_symbol_normalised") or d.get("instrument_symbol")
         entry = _f(d.get("entry_price"))
@@ -615,8 +641,25 @@ def _normalise_position_row(d: Dict[str, Any], source: str) -> Dict[str, Any]:
 
     pnl_usd = upnl if upnl is not None else (rpnl if rpnl is not None else 0.0)
 
+    # Phase 4 (2026-05-29): origin label so the Live tab can show WHICH actor /
+    # account each row belongs to (paper agent, broker account, or signal).
+    _adapter = d.get("adapter") or d.get("exchange") or d.get("exchange_name")
+    _account = d.get("account_id_external") or d.get("exchange_account")
+    if source == "competition_trades":
+        origin = d.get("agent_id") or "paper-agent"
+        origin_kind = "paper"
+    elif source == "positions_current":
+        origin = (f"{_adapter or 'broker'} · {_account}" if _account else (_adapter or "broker"))
+        origin_kind = "broker"
+    else:
+        origin = "signal"
+        origin_kind = "signal"
+
     return {
         "id": d.get("id"),
+        "origin": origin,
+        "origin_kind": origin_kind,
+        "exchange": _adapter,
         "company_id": d.get("company_id"),
         "_company": d.get("company_id"),
         "instrument_symbol": symbol,
@@ -908,6 +951,7 @@ async def aggregate_live_positions(
 
     pc_rows: List[Dict[str, Any]] = []
     tp_open_rows: List[Dict[str, Any]] = []
+    ct_rows: List[Dict[str, Any]] = []
 
     async with shared_pool.acquire() as conn:
         # ---- positions_current ------------------------------------------
@@ -928,6 +972,35 @@ async def aggregate_live_positions(
                 pc_rows.append(_normalise_position_row(dict(r), "positions_current"))
         except Exception as exc:
             LOG.warning("[live] positions_current read failed: %s", exc)
+
+        # ---- competition_trades: open paper-agent positions -------------
+        # Phase 4 (2026-05-29): the 7 paper agents' open copies live HERE, not in
+        # tracked_positions / positions_current. exited_at IS NULL == open. We
+        # join tracked_positions for a live current_price (the monitor keeps it
+        # fresh) and surface one row PER AGENT (no dedupe) so "everything in play
+        # across all agents" is literally true.
+        try:
+            ct_params: List[Any] = []
+            ct_sql = (
+                "SELECT ct.id, ct.contest_id, ct.agent_id, ct.company_id, ct.symbol, "
+                "ct.direction, ct.entry_price, ct.exit_price, ct.sl_price, ct.tp_price, "
+                "ct.allocated AS notional_usd, ct.leverage, ct.pnl, ct.fees, ct.exit_reason, "
+                "ct.entered_at, ct.exited_at, ct.tracked_position_id, ct.signal_interpretation_id, "
+                "ct.exchange_name, ct.exchange_account, "
+                "tp.current_price, tp.price_updated_at "
+                "FROM competition_trades ct "
+                "LEFT JOIN tracked_positions tp ON tp.id = ct.tracked_position_id "
+                "WHERE ct.exited_at IS NULL"
+            )
+            if company_filter and company_filter != "all":
+                ct_sql += " AND ct.company_id = $1"
+                ct_params.append(company_filter)
+            ct_sql += " ORDER BY ct.entered_at DESC NULLS LAST LIMIT 300"
+            ct = await conn.fetch(ct_sql, *ct_params)
+            for r in ct:
+                ct_rows.append(_normalise_position_row(dict(r), "competition_trades"))
+        except Exception as exc:
+            LOG.warning("[live] competition_trades read failed: %s", exc)
 
         # ---- tracked_positions: open + partial_exit ---------------------
         try:
@@ -968,7 +1041,28 @@ async def aggregate_live_positions(
             if not existing.get(fld) and row.get(fld) is not None:
                 existing[fld] = row.get(fld)
 
-    rows = list(by_key.values())
+    # Phase 4 (2026-05-29): paper-agent rows are NOT de-duped — every agent's
+    # open copy is its own row. Enrich move% + $ P&L from entry/current.
+    for row in ct_rows:
+        if not row.get("actor_display"):
+            row["actor_display"] = row.get("actor_id")
+        ent = row.get("entry_price")
+        cur = row.get("current_price")
+        lev = float(row.get("leverage") or 1.0)
+        alloc = row.get("notional_usd")  # = competition_trades.allocated
+        if ent and cur and ent != 0:
+            sign = 1.0 if str(row.get("direction") or "").lower() == "long" else -1.0
+            move = (cur - ent) / ent * sign
+            row["pnl_pct"] = move
+            if alloc:
+                # notional = allocated × leverage matches the copy-trade monitor's
+                # own per-agent unrealized figure (verified vs contest_participants).
+                notional = float(alloc) * lev
+                row["notional_usd"] = notional
+                row["unrealized_pnl_usd"] = move * notional
+                row["pnl_usd"] = row["unrealized_pnl_usd"]
+
+    rows = list(by_key.values()) + ct_rows
 
     def _opened_key(r: Dict[str, Any]) -> Tuple[int, float]:
         ts = r.get("opened_at")

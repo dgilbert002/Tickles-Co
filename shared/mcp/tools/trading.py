@@ -151,13 +151,10 @@ async def _get_pool() -> Any:
 
 
 async def _get_router() -> Any:
-    """Lazy-initialize the paper-only ExecutionRouter singleton.
-
-    Creates a PaperExecutionAdapter and ExecutionRouter on first call.
-    Subsequent calls return the cached router.
+    """Lazy-initialize the ExecutionRouter with paper + demo adapters.
 
     Returns:
-        The shared ExecutionRouter instance.
+        The shared ExecutionRouter instance with both paper and demo adapters.
     """
     global _ROUTER
     if _ROUTER is not None:
@@ -167,6 +164,7 @@ async def _get_router() -> Any:
             return _ROUTER
         from shared.execution.paper import PaperExecutionAdapter
         from shared.execution.router import ExecutionRouter
+        from shared.execution.ccxt_adapter import CcxtExecutionAdapter
 
         pool = await _get_pool()
         paper = PaperExecutionAdapter(
@@ -174,12 +172,13 @@ async def _get_router() -> Any:
             maker_fee_bps=_PAPER_MAKER_FEE_BPS,
             slippage_bps=_PAPER_SLIPPAGE_BPS,
         )
+        demo = CcxtExecutionAdapter(demo_trading=True)
         _ROUTER = ExecutionRouter(
             pool,
-            adapters={"paper": paper},
+            adapters={"paper": paper, "demo": demo},
             default_adapter="paper",
         )
-        logger.info("paper execution router initialized")
+        logger.info("execution router initialized (adapters: paper, demo)")
         return _ROUTER
 
 
@@ -191,35 +190,40 @@ async def _get_router() -> Any:
 def _get_latest_price(symbol: str, venue: str) -> Optional[Dict[str, Any]]:
     """Read the latest candle close price for a symbol/venue.
 
-    Bid/ask are approximated from close with a 0.02% half-spread
-    (0.01% each side), suitable for paper trading.
+    Tries multiple symbol forms: with/without :USDT settlement suffix.
 
     Args:
-        symbol: Trading pair (e.g. 'BTC/USDT').
+        symbol: Trading pair (e.g. 'BTC/USDT' or 'BTC/USDT:USDT').
         venue: Exchange name (e.g. 'bybit').
 
     Returns:
         Dict with keys price, bid, ask, ts — or None if no data.
     """
-    iid = db_helper.resolve_instrument_id(symbol, venue)
-    if iid is None:
-        return None
-    rows = db_helper.query(
-        "SELECT close, timestamp FROM candles "
-        "WHERE instrument_id = %s AND timeframe = '1m' "
-        "ORDER BY timestamp DESC LIMIT 1",
-        (iid,),
-    )
-    if not rows:
-        return None
-    close = float(rows[0]["close"])
-    half_spread = close * 0.0001
-    return {
-        "price": close,
-        "bid": close - half_spread,
-        "ask": close + half_spread,
-        "ts": rows[0]["timestamp"],
-    }
+    # Try exact match first, then fall back to stripped form
+    candidates = [symbol]
+    if ':' in symbol:
+        candidates.append(symbol.split(':')[0])
+    
+    for sym in candidates:
+        iid = db_helper.resolve_instrument_id(sym, venue)
+        if iid is None:
+            continue
+        rows = db_helper.query(
+            "SELECT close, timestamp FROM candles "
+            "WHERE instrument_id = %s AND timeframe = '1m' "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (iid,),
+        )
+        if rows:
+            close = float(rows[0]["close"])
+            half_spread = close * 0.0001
+            return {
+                "price": close,
+                "bid": close - half_spread,
+                "ask": close + half_spread,
+                "ts": rows[0]["timestamp"],
+            }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -533,19 +537,18 @@ async def _treasury_evaluate(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _execution_submit(p: Dict[str, Any]) -> Dict[str, Any]:
-    """Submit an order (paper-only in M2, dryRun=true by default).
+    """Submit an order (paper or demo, dryRun=true by default).
 
     Flow:
       - dryRun=true (default): simulate fill, no DB writes.
-      - dryRun=false + I_am_paper=true: submit through paper adapter.
-      - dryRun=false + I_am_paper absent: reject (live not unlocked).
+      - dryRun=false + adapter='paper': submit through paper adapter.
+      - dryRun=false + adapter='demo': submit through CCXT demo adapter.
+      - I_am_paper=true is deprecated — use adapter='paper' instead.
 
     Args:
-        p: MCP tool params with companyId, agentId, symbol, side, and
-           optional quantity/notionalUsd, venue, orderType, etc.
-
-    Returns:
-        Dict with order details or simulated fill preview.
+        p: MCP tool params with companyId, agentId, symbol, side,
+           optional adapter (paper|demo), stopLoss, takeProfit, leverage,
+           quantity/notionalUsd, venue, orderType, etc.
     """
     try:
         cid = str(p["companyId"])
@@ -559,9 +562,13 @@ async def _execution_submit(p: Dict[str, Any]) -> Dict[str, Any]:
         limit_price = p.get("limitPrice")
         tif = str(p.get("timeInForce", "gtc")).lower()
         dry_run = p.get("dryRun", True)
-        i_am_paper = p.get("I_am_paper", False)
+        adapter_name = str(p.get("adapter", "paper"))
+        i_am_paper = p.get("I_am_paper", False)  # legacy, still supported
         strategy_ref = p.get("strategyRef")
         account_name = str(p.get("accountName", "main"))
+        stop_loss = p.get("stopLoss")
+        take_profit = p.get("takeProfit")
+        leverage = p.get("leverage")
 
         direction = _side_to_direction(side)
 
@@ -625,20 +632,24 @@ async def _execution_submit(p: Dict[str, Any]) -> Dict[str, Any]:
                 "message": "dryRun=true — no order was submitted.",
             }
 
-        # --- Non-dry-run: must explicitly opt into paper trading ---
-        if not i_am_paper:
+        # --- Non-dry-run: must explicitly opt into paper or demo ---
+        if adapter_name == "demo":
+            pass  # allowed — demo adapter available
+        elif i_am_paper or adapter_name == "paper":
+            pass  # allowed — legacy or paper
+        else:
             return {
                 "status": "error",
                 "message": (
-                    "Live trading is not unlocked in M2. Set I_am_paper=true "
-                    "to submit a paper trade, or dryRun=true to simulate."
+                    "Live trading is not unlocked. Set adapter='demo' to submit a demo trade, "
+                    "adapter='paper' for paper, or dryRun=true to simulate."
                 ),
             }
 
-        # --- Submit through paper ExecutionRouter ---
+        # --- Submit through ExecutionRouter ---
         from shared.execution.protocol import ExecutionIntent, MarketTick
 
-        account_id = _paper_account_id(cid, aid, venue)
+        account_id = _paper_account_id(cid, aid, venue) if adapter_name == "paper" else f"demo_{cid}_{aid}_{venue}"
         client_order_id = _generate_client_order_id(cid, aid, symbol, direction)
         intent = ExecutionIntent(
             company_id=cid,
@@ -651,11 +662,14 @@ async def _execution_submit(p: Dict[str, Any]) -> Dict[str, Any]:
             order_type=order_type,
             quantity=quantity,
             requested_price=float(limit_price) if limit_price else None,
+            stop_loss=float(stop_loss) if stop_loss is not None else None,
+            take_profit=float(take_profit) if take_profit is not None else None,
+            leverage=int(leverage) if leverage is not None else None,
             time_in_force=tif,
             client_order_id=client_order_id,
             metadata={
                 "source": "mcp",
-                "I_am_paper": True,
+                "I_am_paper": adapter_name == "paper",
                 "accountName": account_name,
             },
         )
@@ -668,7 +682,7 @@ async def _execution_submit(p: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         router = await _get_router()
-        snapshot = await router.submit(intent, adapter="paper", market=tick)
+        snapshot = await router.submit(intent, adapter=adapter_name, market=tick)
 
         return {
             "status": "ok",
@@ -1008,62 +1022,33 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
     t_execution_submit = McpTool(
         name="execution.submit",
         description=(
-            "Submit an order via the paper execution adapter. dryRun=true "
-            "(default) simulates the fill without submitting. To actually "
-            "submit a paper trade, set dryRun=false AND I_am_paper=true. "
-            "Live trading is not unlocked in M2."
+            "Submit an order via paper or demo execution adapter. dryRun=true "
+            "(default) simulates the fill without submitting. Set adapter='demo' "
+            "to trade on Bybit demo accounts, or adapter='paper' for paper trading. "
+            "Supports stopLoss, takeProfit, and leverage for demo orders."
         ),
-        version="2",
+        version="3",
         input_schema={
             "type": "object",
             "properties": {
                 "companyId": {"type": "string"},
                 "agentId": {"type": "string"},
-                "venue": {
-                    "type": "string",
-                    "default": "bybit",
-                },
+                "venue": {"type": "string", "default": "bybit"},
                 "symbol": {"type": "string"},
                 "side": {"type": "string", "enum": ["buy", "sell"]},
-                "orderType": {
-                    "type": "string",
-                    "enum": ["market", "limit"],
-                    "default": "market",
-                },
-                "quantity": {
-                    "type": "number",
-                    "exclusiveMinimum": 0,
-                    "description": "Order quantity in base currency",
-                },
-                "notionalUsd": {
-                    "type": "number",
-                    "exclusiveMinimum": 0,
-                    "description": (
-                        "Alternative to quantity: specify USD amount. "
-                        "Quantity is calculated from market price."
-                    ),
-                },
+                "orderType": {"type": "string", "enum": ["market", "limit"], "default": "market"},
+                "quantity": {"type": "number", "exclusiveMinimum": 0, "description": "Order quantity in base currency"},
+                "notionalUsd": {"type": "number", "exclusiveMinimum": 0, "description": "Alternative: USD amount, quantity calculated from market price"},
                 "limitPrice": {"type": "number"},
-                "timeInForce": {
-                    "type": "string",
-                    "enum": ["gtc", "ioc", "fok"],
-                    "default": "gtc",
-                },
-                "dryRun": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "If true, simulate without submitting",
-                },
-                "I_am_paper": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": (
-                        "Required=true when dryRun=false to confirm "
-                        "paper trading intent"
-                    ),
-                },
+                "stopLoss": {"type": "number", "description": "Stop-loss trigger price (demo only)"},
+                "takeProfit": {"type": "number", "description": "Take-profit trigger price (demo only)"},
+                "leverage": {"type": "integer", "minimum": 1, "maximum": 125, "description": "Leverage multiplier (demo only)"},
+                "timeInForce": {"type": "string", "enum": ["gtc", "ioc", "fok"], "default": "gtc"},
+                "dryRun": {"type": "boolean", "default": True, "description": "If true, simulate without submitting"},
+                "adapter": {"type": "string", "enum": ["paper", "demo"], "default": "paper", "description": "Execution adapter: paper (simulated) or demo (Bybit CCXT)"},
+                "I_am_paper": {"type": "boolean", "default": False, "description": "Legacy: use adapter='paper' instead"},
                 "strategyRef": {"type": "string"},
-                "accountName": {"type": "string", "default": "main"},
+                "accountName": {"type": "string", "default": "main", "description": "Exchange account name from exchange_accounts table"},
             },
             "required": ["companyId", "agentId", "symbol", "side"],
         },

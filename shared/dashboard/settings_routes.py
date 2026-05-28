@@ -448,6 +448,53 @@ async def handle_set_dedup(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/settings/copy-sizing  (Phase 1.5, 2026-05-29)
+# ---------------------------------------------------------------------------
+async def handle_get_copy_sizing(request: web.Request) -> web.Response:
+    """Return the full state of every copy-trade agent sizing knob."""
+    try:
+        from shared.intelligence.copy_sizing_config import get_all
+        knobs = await get_all()
+    except Exception as exc:
+        logger.exception("settings_routes: get_copy_sizing failed")
+        return _err(f"failed to read copy-sizing state: {exc}", status=500)
+    return _json_response({"ok": True, "knobs": knobs})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/settings/copy-sizing  (Phase 1.5, 2026-05-29)
+# ---------------------------------------------------------------------------
+async def handle_set_copy_sizing(request: web.Request) -> web.Response:
+    """Persist one copy-trade sizing knob to system_config.
+
+    Body: ``{"key": "risk_pct_5", "value": 5.0}``. Bounds enforced by
+    ``copy_sizing_config.set_value``.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+    if not isinstance(body, dict):
+        return _err("body must be a JSON object")
+    key = (body.get("key") or "").strip()
+    value = body.get("value")
+    if not key:
+        return _err("key is required")
+    if value is None:
+        return _err("value is required")
+    try:
+        from shared.intelligence.copy_sizing_config import set_value, get_all
+        result = await set_value(key, value, actor_label=_actor_label(request))
+    except ValueError as exc:
+        return _err(str(exc), status=400)
+    except Exception as exc:
+        logger.exception("settings_routes: set_copy_sizing failed")
+        return _err(f"failed to persist: {exc}", status=500)
+    knobs = await get_all()
+    return _json_response({"ok": True, "changed": result, "knobs": knobs})
+
+
+# ---------------------------------------------------------------------------
 # GET /api/settings/sources — tree of sources→channels→users
 # ---------------------------------------------------------------------------
 async def handle_get_sources(request: web.Request) -> web.Response:
@@ -828,6 +875,9 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     # Round 13.5 — dedup knobs
     app.router.add_get(f"{prefix}/api/settings/dedup", handle_get_dedup)
     app.router.add_post(f"{prefix}/api/settings/dedup", handle_set_dedup)
+
+    app.router.add_get(f"{prefix}/api/settings/copy-sizing", handle_get_copy_sizing)
+    app.router.add_post(f"{prefix}/api/settings/copy-sizing", handle_set_copy_sizing)
     # Prompt library + source tracking
     app.router.add_get(f"{prefix}/api/settings/sources", handle_get_sources)
     app.router.add_put(f"{prefix}/api/settings/track", handle_put_track)

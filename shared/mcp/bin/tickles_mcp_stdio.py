@@ -17,7 +17,9 @@ from ..server import McpServer
 from ..store import InvocationStore
 from ..tools import (
     ToolContext,
+    accounts,
     backtest,
+    competitions,
     contest,
     data,
     intelligence,
@@ -60,6 +62,8 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     intelligence.register(reg, ctx)
     routing.register(reg, ctx)
     symbols.register(reg, ctx)
+    accounts.register(reg, ctx)
+    competitions.register(reg, ctx)
     register_builtin_providers(reg, LOG)
     return reg
 

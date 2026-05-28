@@ -1025,7 +1025,7 @@ async def run_prefilter(
     model = await _runtime_get_model(SLOT_PREFILTER)
 
     # Phase 3: compute prompt metadata for audit trail
-    prompt_version = compute_prompt_version(_load_prompts())
+    prompt_version = "prefilter:" + (prefilter_version_label or "unknown")
     prompt_hash = compute_prompt_hash(prefilter_prompt, user_text)
 
     try:
@@ -1180,9 +1180,10 @@ async def run_llm_track(
         if recall_context:
             user_text += "\n\n" + recall_context
 
-    # Phase 3: compute prompt metadata for audit trail
-    prompt_version = compute_prompt_version(_load_prompts())
+    # Phase 3: compute prompt metadata for audit trail — use the DB-loaded prompts_full
+    prompt_version = str(prompts_full.get("_prompt_key", compute_prompt_version(prompts_full)))
     prompt_hash = compute_prompt_hash(system_prompt, user_text)
+    prompt_source = str(prompts_full.get("_prompt_source", ""))
 
     # Round 10: resolve primary/fallback fresh per call so dashboard
     # dropdown changes propagate within the model_config cache window (60s).
@@ -3805,7 +3806,6 @@ class InterpretationService:
                         async with session.get(source_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                             if resp.status == 200:
                                 import tempfile
-                                import os
                                 suffix = ".png" if ".png" in source_url else ".jpg"
                                 fd, tmp_path = tempfile.mkstemp(suffix=suffix)
                                 tmp_holder[0] = tmp_path
@@ -3815,6 +3815,21 @@ class InterpretationService:
                                 finally:
                                     os.close(fd)
                                 logger.debug("Downloaded CDN image to %s", local_path)
+                                # Persist to permanent storage and update DB
+                                try:
+                                    import shutil
+                                    media_dir = "/opt/tickles/data/media"
+                                    os.makedirs(media_dir, exist_ok=True)
+                                    perm_path = os.path.join(media_dir, f"{media_id}{suffix}")
+                                    shutil.move(local_path, perm_path)
+                                    local_path = perm_path
+                                    await shared_pool.execute(
+                                        "UPDATE public.media_items SET local_path = $1, file_size_bytes = $2 WHERE id = $3",
+                                        (perm_path, os.path.getsize(perm_path), media_id),
+                                    )
+                                    logger.info("Persisted media #%d to %s (%d bytes)", media_id, perm_path, os.path.getsize(perm_path))
+                                except Exception as pe:
+                                    logger.warning("Failed to persist media #%d: %s", media_id, pe)
                             else:
                                 logger.warning(
                                     "CDN download failed HTTP %d for %s",

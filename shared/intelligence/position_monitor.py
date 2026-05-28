@@ -1765,7 +1765,13 @@ class PositionMonitor:
                         status_reason = $4,
                         current_price = $1,
                         price_updated_at = $2,
-                        updated_at = $2
+                        updated_at = $2,
+                        -- Phase 3 (2026-05-29): stamp the fill moment exactly
+                        -- once, to the candle timestamp that touched entry.
+                        -- COALESCE keeps the first activation if a race or
+                        -- re-run revisits the row. Powers the radar
+                        -- "JUST FILLED" view + the 24h supply stats.
+                        activated_at = COALESCE(activated_at, $2)
                     WHERE id = $3
                       AND status = 'pending'
                     """,

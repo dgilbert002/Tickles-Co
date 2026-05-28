@@ -29,9 +29,9 @@ async function api(path,opt={}){const u=new URL(path.replace(/^\//,''),document.
 async function load(){try{const needsSnap=['floor','radar','signals','positions','traders','ops'].includes(state.tab)||!state.snap;if(needsSnap)state.snap=await api('/api/snapshot');if(state.tab==='competition'||state.tab==='floor')state.competitions=await api('/api/competitions');if(state.tab==='learning'||state.tab==='floor'||state.tab==='traders')state.learning=await fetchLearning();if(state.tab==='news')state.news=await api('/api/news/feed?window=30d&source=discord&limit=40');else if(state.tab==='floor')state.news=await api('/api/news/feed?window=30d&limit=40');
       if(state.tab==='telegram')state.telegram=await api('/api/news/feed?window=30d&limit=40&source=telegram');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');if(state.tab==='settings'){state.settings=null;await fetchSettings();}render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
 async function fetchLearning(){const [skill,feed,brain,traders]=await Promise.all([api('/api/learning/skill-summary?window=1m'),api('/api/learning/memory-feed?window=1m'),api('/api/learning/agent-brain?window=1m'),api('/api/traders-intel')]);return{skill,feed,brain,traders}}
-function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings']};$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
-function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage()}
-function renderStats(){const s=state.snap||{};const pnl=Z(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`edge ${fmt(s.top_actor_score,3)}`:'edge —';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
+function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings'],exchanges:['EXCHANGE MANAGEMENT','Exchange Accounts'],paperdemo:['PAPER vs DEMO','Paper vs Demo']};if(!names[tab])return;$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
+function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage();if(state.tab==='exchanges'){renderExchangeAccounts();renderMirrorConfig()}if(state.tab==='paperdemo')renderPaperDemo()}
+function renderStats(){const s=state.snap||{};const pnl=Z(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`$${fmt(s.top_actor_score,2)} equity`:'—';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
 
 /* ─── row helpers ─── */
 function rowMain(sym,sub){return`<div class="main-cell"><div class="token-dot">${esc(initials(sym))}</div><div><div class="primary">${esc(sym)}</div><div class="secondary">${esc(sub||'')}</div></div></div>`}
@@ -233,7 +233,7 @@ async function loadMoreNews(){
 }
 
 /* ─── Unified Signals & Radar — single view with list/card toggle ─── */
-const _unifiedView=localStorage.getItem('tickles.unified.view')||'list';
+let _unifiedView=localStorage.getItem('tickles.unified.view')||'list';
 async function renderUnifiedPage(){
   const view=_unifiedView;
   $$('#unified-toggle .view-btn').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
@@ -253,19 +253,44 @@ async function renderUnifiedPage(){
       const ratio=r.entry_price/r.current_price;
       return ratio>0.1&&ratio<10; // within 1 order of magnitude
     });
-    if(sf==='history'){
-      rows=rows.filter(r=>['closed','cancelled','expired','invalidated'].includes(r.position_status));
-    }else if(!sf||sf===''){
-      rows=rows.filter(r=>!['closed','cancelled','expired','invalidated'].includes(r.position_status));
+    // Phase 3B (2026-05-29): Signals & Radar is now APPROACHING-ONLY. Closed /
+    // cancelled / expired / invalidated history lives in the Positions tab. The
+    // status dropdown offers "Approaching entry" (default) and "All active".
+    const DEAD=['closed','cancelled','expired','invalidated'];
+    if(sf==='all'){
+      // All still-active signals (open + pending + signal/pre-entry).
+      rows=rows.filter(r=>!DEAD.includes(r.position_status));
+    }else{
+      // Approaching = pre-entry (pending/signal) + just-filled flash. No open
+      // positions that filled long ago, no history.
+      rows=rows.filter(r=>!DEAD.includes(r.position_status)&&(isPreEntry(r)||isJustFilled(r)));
     }
     if(view==='card'){
-      const sorted=[...rows].sort((a,b)=>signalDistance(a)-signalDistance(b));
-      $('#unified-card-panel').innerHTML=sorted.map(radarCard).join('')||'<div class=empty>No signals</div>';
+      // Phase 3 (2026-05-29): the CARD view is the Entry Radar — it shows
+      // pre-entry setups (pending / signal, waiting to trigger) plus anything
+      // that JUST FILLED in the last 30 min. Long-ago open positions live in
+      // the Positions tab, not the radar. The LIST view (renderUnifiedTable)
+      // remains the full browse surface and is unchanged.
+      const radarRows=rows.filter(s=>isPreEntry(s)||isJustFilled(s))
+        .sort((a,b)=>signalDistance(a)-signalDistance(b));
+      $('#unified-card-panel').innerHTML=radarRows.map(radarCard).join('')||radarEmptyState(d.radar_meta);
+      // Phase 3B (2026-05-29): the card branch never wired clicks, so radar
+      // cards were dead. wireRows() binds [data-call] -> openCall (the unified
+      // drawer). drawMiniRadar fills any card that carries candle data.
+      wireRows();
+      radarRows.forEach((s,i)=>{const cs=s.mini_candles||s._candles;if(cs&&cs.length)drawMiniRadar(`mini-radar-${i}`,cs,s)});
     }else{
       renderUnifiedTable(rows);
     }
   }catch(e){console.warn('unified signals failed',e)}
 }
+// Phase 3 (2026-05-29): radar membership helpers.
+// Pre-entry = waiting to trigger (pending/signal/no-position-yet).
+function isPreEntry(s){const st=String(s.position_status||'').toLowerCase();return st===''||st==='pending'||st==='signal';}
+// Just-filled = activated (pending->open) within the last 30 min.
+function isJustFilled(s){if(String(s.position_status||'').toLowerCase()!=='open')return false;const t=s.position_activated_at?Date.parse(s.position_activated_at):NaN;return Number.isFinite(t)&&(Date.now()-t)<30*60*1000;}
+// Honest empty-state: explains WHY nothing is waiting instead of "No signals".
+function radarEmptyState(m){m=m||{};return `<div class="empty radar-empty"><strong>No setups waiting to trigger right now.</strong><div class="secondary" style="margin-top:6px">Last 24h: <b>${m.filled_24h||0}</b> reached a trade · <b>${m.cancelled_24h||0}</b> filtered out (${m.no_setup_24h||0} no-setup AI charts, ${m.dupes_24h||0} duplicates, ${m.unsupported_24h||0} unsupported symbols).</div><div class="secondary" style="margin-top:6px">New trader setups appear here the instant the interpreter reads them and stay until price reaches the entry.</div></div>`;}
 function renderUnifiedTable(rows){
   let r=rows;const f=$('#unified-filter')?.value;if(f)r=filterRows(r,f,['symbol','trader_display_name','trader_handle_normalized','position_status','headline']);
   table('#unified-list-table',[
@@ -284,6 +309,7 @@ function renderSignalsPage(){renderUnifiedPage()}
 // unchanged: row → openCall(signal_interpretation_id, news_item_id).
 const _positionsState={
   sub: 'live',
+  view: (()=>{try{return localStorage.getItem('tickles.live.view')||'agent'}catch(e){return 'agent'}})(),
   live: { rows: null, loading: false },
   historic: {
     rows: [], cursor: null, has_more: false, loading: false,
@@ -307,18 +333,69 @@ async function renderPositionsLive(){
   }catch(e){console.warn('positions/live failed',e);_positionsState.live.rows=[]}
   _positionsState.live.loading=false;
   let rows=_positionsState.live.rows||[];
-  rows=filterRows(rows,$('#positions-live-filter')?.value,['instrument_symbol','actor_display','actor_handle','status','signal_source']);
+  rows=filterRows(rows,$('#positions-live-filter')?.value,['instrument_symbol','actor_display','actor_handle','status','signal_source','origin']);
   const st=$('#positions-live-status')?.value;
   if(st)rows=rows.filter(r=>r.status===st);
-  const cols=[
-    {label:'Position'},{label:'Side'},{label:'Status'},
-    {label:'Entry',num:1},{label:'Now',num:1},
-    {label:'P&L',num:1},{label:'P&L %',num:1},
-    {label:'Dist SL',num:1},{label:'Dist TP1',num:1},
-    {label:'Age',num:1},{label:'Source'},
-  ];
-  table('#positions-live-table',cols,[livePosRows(rows)]);
+  const view=_positionsState.view||'agent';
+  $$('#positions-live-view .view-btn').forEach(b=>b.classList.toggle('active',b.dataset.pview===view));
+  if(view==='grouped'){
+    renderLiveGrouped(rows);
+  }else{
+    const cols=[
+      {label:'Position'},{label:'Side'},{label:'Status'},{label:'Origin'},
+      {label:'Entry',num:1},{label:'Now',num:1},
+      {label:'P&L',num:1},{label:'P&L %',num:1},
+      {label:'Dist SL',num:1},{label:'Dist TP1',num:1},
+      {label:'Age',num:1},{label:'Source'},
+    ];
+    table('#positions-live-table',cols,[livePosRows(rows)]);
+  }
   wireRows();
+  flashLivePnl();
+}
+function setLiveView(v){_positionsState.view=v;try{localStorage.setItem('tickles.live.view',v)}catch(e){}renderPositionsLive()}
+// Phase 4 (2026-05-29): grouped view — one row per (symbol, direction) showing
+// how many agents hold it, aggregate P&L/notional, and the list of holders.
+function renderLiveGrouped(rows){
+  const groups={};
+  rows.forEach(p=>{const k=(dispSymbol(p.instrument_symbol)||'')+'|'+(p.direction||'');(groups[k]=groups[k]||[]).push(p)});
+  const cols=[
+    {label:'Position'},{label:'Side'},{label:'Holders',num:1},
+    {label:'Avg entry',num:1},{label:'Now',num:1},
+    {label:'Total P&L',num:1},{label:'Notional',num:1},{label:'Who'},
+  ];
+  const body=Object.values(groups).sort((a,b)=>b.length-a.length).map(ps=>{
+    const sym=ps[0].instrument_symbol, dir=ps[0].direction, n=ps.length;
+    const avgEnt=ps.reduce((s,p)=>s+Z(p.entry_price),0)/n;
+    const cur=Z((ps.find(p=>Z(p.current_price))||{}).current_price);
+    const totPnl=ps.reduce((s,p)=>s+Z(p.unrealized_pnl_usd??p.pnl_usd),0);
+    const totNot=ps.reduce((s,p)=>s+Z(p.notional_usd),0);
+    const who=ps.map(p=>esc(p.origin||p.actor_display||traderName(p))).join(', ');
+    const callId=(ps.find(p=>p.signal_interpretation_id)||{}).signal_interpretation_id||'';
+    return `<tr data-call="${esc(callId)}"><td>${rowMain(dispSymbol(sym),n+' holder'+(n>1?'s':''))}</td>`
+      +`<td>${pill(dir,dir)}</td><td class="num">${n}</td>`
+      +`<td class="num mono">${fmt(avgEnt,6)}</td><td class="num mono">${fmt(cur,6)}</td>`
+      +`<td class="num ${totPnl>=0?'success':'danger'}">${usd(totPnl)}</td>`
+      +`<td class="num">$${fmt(totNot,0)}</td><td class="secondary small">${who}</td></tr>`;
+  }).join('');
+  table('#positions-live-table',cols,[body]);
+}
+// Competition-style flash: highlight P&L cells whose value changed since the
+// last 5s tick (green = improved, red = worsened).
+let _livePnlPrev={};
+function flashLivePnl(){
+  const next={};
+  $$('#positions-live-table tr[data-posid]').forEach(tr=>{
+    const id=tr.dataset.posid; const v=Number(tr.dataset.pnl);
+    if(!id||!Number.isFinite(v))return;
+    next[id]=v;
+    const prev=_livePnlPrev[id];
+    if(prev!=null&&v!==prev){
+      const cell=tr.querySelector('.pnl-cell');
+      if(cell){const cls=v>prev?'flash-up':'flash-down';cell.classList.remove('flash-up','flash-down');void cell.offsetWidth;cell.classList.add(cls)}
+    }
+  });
+  _livePnlPrev=next;
 }
 function livePosRows(rows){return rows.map(p=>{
   const pnl=Z(p.unrealized_pnl_usd??p.pnl_usd);
@@ -355,14 +432,23 @@ function livePosRows(rows){return rows.map(p=>{
     if(ts){const m=(Date.now()-new Date(ts))/60000;if(Number.isFinite(m)&&m>=0)ageMin=m;}
   }
   const ageStr=ageMin!=null&&Number.isFinite(ageMin)?(ageMin>=1440?Math.round(ageMin/1440)+'d':ageMin>=60?Math.round(ageMin/60)+'h':Math.round(ageMin)+'m'):rel(p.signal_timestamp||p.opened_at);
-  return `<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}">`
+  // Phase 4 (2026-05-29): origin label + kind tag (paper agent / broker /
+  // signal) so multi-agent rows are distinguishable; data-posid/data-pnl power
+  // the flash-on-change pulse.
+  const origin=p.origin||p.actor_display||'signal';
+  const okind=p.origin_kind||'signal';
+  const originPill=`<span class="origin-tag origin-${esc(okind)}" title="${esc(okind)}">${esc(origin)}</span>`;
+  const posKey=`${p._source||''}:${p.id||p.signal_interpretation_id||''}`;
+  const hasPnl=(p.unrealized_pnl_usd!=null)||(p.pnl_usd!=null);
+  return `<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}" data-posid="${esc(posKey)}" data-pnl="${hasPnl?pnl:''}">`
     +`<td>${rowMain(dispSymbol(p.instrument_symbol),`${traderName(p)} · ${rel(p.signal_timestamp||p.opened_at)}`)}</td>`
     +`<td>${pill(p.direction,p.direction)}</td>`
     +`<td>${pill(p.status,p.status)}</td>`
+    +`<td>${originPill}</td>`
     +`<td class="num mono">${fmt(p.entry_price,6)}</td>`
     +`<td class="num mono ${stale?'secondary':''}">${fmt(p.current_price,6)}${stale?' <span title="stale price >5min">·</span>':''}</td>`
-    +`<td class="num ${pnl>=0?'success':'danger'}">${usd(pnl)}</td>`
-    +`<td class="num ${pnlPct>=0?'success':'danger'}">${pct(pnlPct*100)}</td>`
+    +`<td class="num pnl-cell ${pnl>=0?'success':'danger'}">${hasPnl?usd(pnl):'—'}</td>`
+    +`<td class="num ${pnlPct>=0?'success':'danger'}">${pnlPct?pct(pnlPct*100):'—'}</td>`
     +`<td class="num">${distSl==null?'—':fmt(Math.abs(distSl),2)+'%'}</td>`
     +`<td class="num">${distTp==null?'—':fmt(Math.abs(distTp),2)+'%'}</td>`
     +`<td class="num secondary">${ageStr}</td>`
@@ -448,8 +534,78 @@ function renderLearningPage(){const l=state.learning||{feed:{rows:[]},skill:{row
 // is open + partial_exit. Keeping it minimal here; full live/historic split
 // lives on the Positions tab in phase 11.3.
 const POS_LIVE_STATUSES=new Set(['open','partial_exit']);
-async function renderFloor(){const s=state.snap||{};renderCompetitionMini();renderNewsMini();try{const d=await api('/api/unified-signals?limit=10');const sigs=filterRows(d.signals||[],$('#floor-signal-filter')?.value,['symbol','trader_display_name','headline']);table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(sigs,10)])}catch(e){console.warn('floor signals failed',e);const sigs=filterRows(s.signals||[],$('#floor-signal-filter')?.value,['instrument_symbol','trader_display_name','trader_handle_normalized','status']);table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(sigs,10)])}const live_positions=(s.positions||[]).filter(r=>POS_LIVE_STATUSES.has(String(r.status||'').toLowerCase()));const ps=filterRows(live_positions,$('#floor-position-filter')?.value,['instrument_symbol','actor_display','actor_handle','status']);table('#floor-positions',[{label:'Position'},{label:'Side'},{label:'Status'},{label:'Entry',num:1},{label:'Now',num:1},{label:'P&L',num:1},{label:'P&L %',num:1},{label:'Notional',num:1},{label:'Source'}],[posRows(ps,10)]);wireRows()}
-function renderCompetitionMini(){const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}const ps=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).slice(0,6);$('#floor-competition').innerHTML=`<div class="competition-card"><div class="secondary">${esc(c.name)} · ${esc(c.status)}</div><div class="leader-mini">${ps.map(p=>{const eq=Z(p.scores?.equity);const start=Z(p.scores?.starting_balance_usd)||1000;const livePnl=eq-start;return `<div class="leader-row"><div class="rank-badge">#${p.rank}</div><div><div class="primary">${esc(p.agent_id)}</div><div class="secondary">${esc(p.strategy_ref||'')} · ${livePnl>=0?'+':''}$${fmt(livePnl,2)}</div></div><div class="num ${eq>=start?'success':'danger'}">$${fmt(eq,2)}</div></div>`}).join('')}</div></div>`}
+async function renderFloor(){
+  renderCompetitionMini();renderNewsMini();
+  // Placeholders so panels never sit blank while the (slower) signal fetch runs.
+  if(!$('#floor-signals').children.length)$('#floor-signals').innerHTML='<div class="empty">Loading…</div>';
+  if(!$('#floor-positions').children.length)$('#floor-positions').innerHTML='<div class="empty">Loading…</div>';
+  // Run both sections independently/parallel — the slow signals fetch must NOT
+  // block the fast positions render.
+  renderFloorPositions();
+  renderFloorSignals();
+}
+// ── Signals approaching entry (mirror the radar) ──
+// Phase 5 (2026-05-29): only setups APPROACHING entry, closest-first. If none,
+// show the last few that HIT and which exchange they routed to.
+async function renderFloorSignals(){
+  try{
+    const d=await api('/api/unified-signals?limit=60');
+    const all=(d.signals||[]).filter(r=>r.direction&&r.direction!=='unclear'&&Number(r.entry_price)>0);
+    let appr=all.filter(r=>isPreEntry(r)||isJustFilled(r)).sort((a,b)=>signalDistance(a)-signalDistance(b));
+    appr=filterRows(appr,$('#floor-signal-filter')?.value,['symbol','instrument_symbol','trader_display_name','headline']);
+    if(appr.length){
+      table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(appr,12)]);
+    }else{
+      const hit=all.filter(r=>String(r.position_status||'').toLowerCase()==='open'&&r.position_activated_at)
+        .sort((a,b)=>Date.parse(b.position_activated_at)-Date.parse(a.position_activated_at)).slice(0,3);
+      const hitHtml=hit.length?'<div class="secondary" style="margin-top:8px">Last to hit: '+hit.map(h=>`<b>${esc(dispSymbol(h.symbol||h.instrument_symbol))}</b> ${esc(h.direction||'')} → ${esc(h.exchange||h.instrument_exchange||'?')} <span class="secondary">(${rel(h.position_activated_at)})</span>`).join(' · ')+'</div>':'';
+      $('#floor-signals').innerHTML=`<div class="empty" style="text-align:left">Nothing approaching entry right now.${hitHtml}</div>`;
+    }
+    wireRows();
+  }catch(e){console.warn('floor signals failed',e)}
+}
+// ── Live positions = everything in play across ALL agents/exchanges ──
+async function renderFloorPositions(){
+  const cols=[{label:'Position'},{label:'Side'},{label:'Status'},{label:'Origin'},{label:'Entry',num:1},{label:'Now',num:1},{label:'P&L',num:1},{label:'P&L %',num:1},{label:'Notional',num:1}];
+  try{
+    const pdata=await api('/api/positions/live?company=all&limit=200');
+    let ps=filterRows(pdata.positions||[],$('#floor-position-filter')?.value,['instrument_symbol','actor_display','actor_handle','status','origin']);
+    table('#floor-positions',cols,[floorPosRows(ps,30)]);
+  }catch(e){
+    console.warn('floor positions failed',e);
+    const live_positions=((state.snap||{}).positions||[]).filter(r=>POS_LIVE_STATUSES.has(String(r.status||'').toLowerCase()));
+    table('#floor-positions',cols,[floorPosRows(live_positions,30)]);
+  }
+  wireRows();flashLivePnl();
+}
+function floorPosRows(rows,limit){return rows.slice(0,limit||rows.length).map(p=>{
+  const closed=POS_CLOSED_STATUSES.has(String(p.status||'').toLowerCase());
+  const pnl=Z(closed?(p.realized_pnl_usd_final??p.realized_pnl_usd??p.pnl_usd):(p.unrealized_pnl_usd??p.pnl_usd));
+  const hasPnl=(p.unrealized_pnl_usd!=null)||(p.pnl_usd!=null);
+  const origin=p.origin||p.actor_display||'signal';const okind=p.origin_kind||'signal';
+  const posKey=`${p._source||''}:${p.id||p.signal_interpretation_id||''}`;
+  return `<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}" data-posid="${esc(posKey)}" data-pnl="${hasPnl?pnl:''}">`
+    +`<td>${rowMain(dispSymbol(p.instrument_symbol),`${traderName(p)} · ${rel(p.signal_timestamp||p.opened_at)}`)}</td>`
+    +`<td>${pill(p.direction,p.direction)}</td><td>${pill(p.status,p.status)}</td>`
+    +`<td><span class="origin-tag origin-${esc(okind)}">${esc(origin)}</span></td>`
+    +`<td class="num mono">${fmt(p.entry_price,6)}</td><td class="num mono">${fmt(p.current_price,6)}</td>`
+    +`<td class="num pnl-cell ${pnl>=0?'success':'danger'}">${hasPnl?usd(pnl):'—'}</td>`
+    +`<td class="num ${Z(p.pnl_pct)>=0?'success':'danger'}">${p.pnl_pct?pct(Z(p.pnl_pct)*100):'—'}</td>`
+    +`<td class="num">$${fmt(p.notional_usd,0)}</td></tr>`;
+}).join('')}
+function renderCompetitionMini(){const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}
+  // Phase 5 (2026-05-29): show ALL participants (scrollable), ranked by LIVE
+  // EQUITY (closed balance + unrealized), and surface both closed + equity.
+  const ps=(c.participants||[]).slice().sort((a,b)=>{
+    const ea=Z(a.scores?.equity)+Z(a.scores?.unrealized_pnl_usd);
+    const eb=Z(b.scores?.equity)+Z(b.scores?.unrealized_pnl_usd);
+    return eb-ea;
+  });
+  $('#floor-competition').innerHTML=`<div class="competition-card"><div class="secondary">${esc(c.name)} · ${esc(c.status)} · ${ps.length} agents</div><div class="leader-mini scroll">${ps.map((p,i)=>{
+    const eq=Z(p.scores?.equity);const unreal=Z(p.scores?.unrealized_pnl_usd);const liveEq=eq+unreal;
+    const start=Z(p.scores?.starting_balance_usd)||1000;const closedPnl=eq-start;
+    return `<div class="leader-row"><div class="rank-badge">#${i+1}</div><div><div class="primary">${esc(p.agent_id)}</div><div class="secondary">closed ${closedPnl>=0?'+':''}$${fmt(closedPnl,2)} · unreal ${unreal>=0?'+':''}$${fmt(unreal,2)}</div></div><div class="num ${liveEq>=start?'success':'danger'}" title="live equity = balance + unrealized">$${fmt(liveEq,2)}</div></div>`;
+  }).join('')}</div></div>`}
 function renderNewsMini(){const rows=(state.news?.rows||[]).filter(r=>r.source==='discord');$('#floor-news').innerHTML=rows.slice(0,8).map(newsMsg).join('')||'<div class="empty">No Discord messages</div>'}
 // Bug 12 sibling — strip the leading `[Reply to @user]: <quoted parent>`
 // line so the dashboard News tab and floor mini-feed don't show the
@@ -895,6 +1051,9 @@ function renderSettingsPage(){
   }).join('');
   body.innerHTML=cards;
 
+  /* Agent sizing knobs (Phase 1.5) */
+  renderSizingPanel();
+
   /* Sources & Prompts section */
   fetchSourcesAndPrompts();
 
@@ -905,6 +1064,68 @@ function renderSettingsPage(){
   $('#settings-history').innerHTML=`<table class="data-table"><thead><tr><th>When</th><th>Slot</th><th>Old</th><th>New</th><th>Actor</th></tr></thead><tbody>${histBody}</tbody></table>`;
 
   wireSettings();
+}
+
+/* Phase 1.5 (2026-05-29): operator-tunable agent sizing knobs.
+   Reads /api/settings/copy-sizing, renders one number input per knob, and
+   POSTs the change back. Mirrors the vision-model save UX (60s effect). */
+async function renderSizingPanel(){
+  const el=$('#settings-sizing-body');
+  if(!el)return;
+  el.innerHTML='<div class="empty">Loading sizing knobs\u2026</div>';
+  let knobs={};
+  try{
+    const r=await fetch(new URL('api/settings/copy-sizing',document.baseURI));
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw j;
+    knobs=j.knobs||{};
+  }catch(e){
+    el.innerHTML=`<div class="empty">Could not load sizing knobs: ${esc(String(e.error||e.message||e))}</div>`;
+    return;
+  }
+  const order=['risk_pct_5','risk_pct_3','max_concurrent_5','max_concurrent_3','leverage_cap','spot_lev_3x'];
+  const cards=order.filter(k=>knobs[k]).map(k=>{
+    const m=knobs[k];
+    const step=(m.type==='int')?'1':'0.1';
+    return `<div class="settings-card" data-knob="${k}">
+      <div class="settings-card-head">
+        <h3>${esc(m.label)} ${sourceBadge(m.source)}</h3>
+        <p class="secondary">${esc(m.description)}</p>
+      </div>
+      <label class="settings-label">Value
+        <input class="input wide sizing-input" type="number" step="${step}" data-knob="${k}" value="${esc(String(m.value))}">
+      </label>
+      <div class="settings-actions">
+        <button class="pill-btn sizing-save-btn" data-knob="${k}">Save</button>
+        <span class="settings-test-status" id="sizing-status-${k}"></span>
+        <span class="secondary small">default ${esc(String(m.default))}</span>
+      </div>
+    </div>`;
+  }).join('');
+  el.innerHTML=cards||'<div class="empty">No sizing knobs available.</div>';
+  $$('.sizing-save-btn').forEach(btn=>{
+    btn.onclick=async ()=>{
+      const key=btn.dataset.knob;
+      const input=$(`input.sizing-input[data-knob="${key}"]`);
+      const value=input?parseFloat(input.value):null;
+      const status=$(`#sizing-status-${key}`);
+      if(value==null||isNaN(value)){if(status)status.textContent='\u26a0 enter a number';return;}
+      if(status)status.textContent='Saving\u2026';
+      btn.disabled=true;
+      try{
+        const r=await fetch(new URL('api/settings/copy-sizing',document.baseURI),{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({key,value})
+        });
+        const j=await r.json();
+        if(!r.ok||!j.ok)throw j;
+        if(status)status.textContent='Saved \u2014 effective within 60 s.';
+        setTimeout(()=>renderSizingPanel(),1500);
+      }catch(e){
+        if(status)status.textContent=`\u26a0 ${(e.error||e.message||'save failed')}`;
+      }finally{btn.disabled=false;}
+    };
+  });
 }
 
 function wireSettings(){
@@ -1203,7 +1424,13 @@ function drawReplayInline(r,parentEl){
 }
 
 /* ─── Radar / Entry watch ─── */
-function signalDistance(s){if(Number.isFinite(s._liveDist))return s._liveDist;const live=Z(s.current_price||s._livePrice);const entry=Z(s.entry_price||s.levels?.entry);if(!entry)return 999999;if(live)return Math.abs((live-entry)/entry*100);const d=Math.abs(Z(s.distance_to_entry_pct));return d?d:999999}
+// Phase 2 (2026-05-29): single source of truth for distance-to-entry.
+// signalDistanceSigned() returns the SIGNED % (live-entry)/entry — positive =
+// price ABOVE entry, negative = BELOW. signalDistance() is its absolute value,
+// used purely for "closest first" sorting. Display everywhere (Floor + Radar)
+// uses the signed value so the same symbol shows the same number on every tab.
+function signalDistanceSigned(s){const live=Z(s.current_price||s._livePrice);const entry=Z(s.entry_price||s.levels?.entry);if(entry&&live)return (live-entry)/entry*100;const d=Z(s.distance_to_entry_pct);return Number.isFinite(d)&&d!==0?d:null}
+function signalDistance(s){const sd=signalDistanceSigned(s);return sd==null?999999:Math.abs(sd)}
 // 2026-05-24 (Round 9) — Signal-source helper.
 // Returns a small inline badge that flags positions / radar cards where
 // the entry was inferred independently by ChartHacker (the AI vision
@@ -1215,7 +1442,13 @@ function aiInferredBadge(s){
   if(src!=='chart_hacker')return '';
   return '<span class="badge ai-inferred" title="Trade inferred independently by ChartHacker AI — trader did not explicitly mark this setup">AI INFERRED</span>';
 }
-function radarCard(s,i){const id=s.signal_interpretation_id||s.id;const sym=dispSymbol(s.symbol||s.instrument_symbol);const dir=(s.consensus_direction||s.direction||'').toLowerCase();const entry=Z(s.entry_price||s.levels?.entry), sl=Z(s.stop_loss||s.levels?.stop_loss), tp=Z(s.take_profit_1||s.levels?.take_profit_1);const dist=signalDistance(s);const ageDays=(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000;const trader=traderName(s);const stale=ageDays>7?' stale':'';const rr=entry&&sl&&tp?Math.abs((tp-entry)/(entry-sl)):0;const live=(s.current_price||s._livePrice)?` · live ${fmt(s.current_price||s._livePrice,6)}`:'';const aiBadge=aiInferredBadge(s);return `<div class="radar-card${stale}" data-call="${esc(id)}" data-news="${esc(s.news_item_id||'')}" data-radar-idx="${i}"><div class="radar-top"><div>${rowMain(sym,`${trader} · ${(s.timeframe||'1m')} · ${rel(s.signal_timestamp||s.created_at)} old${live}`)}</div><div class="radar-top-right">${aiBadge}${pill(dir,dir)}</div></div><div class="mini-tv" id="mini-radar-${i}">${(!s._candles?.length&&s.media_url)?`<img class="mini-chart-img" src="${esc(s.media_url)}">`:''}<div class="riskbox ${dir==='short'?'short':'long'}"><i class="reward"></i><i class="risk"></i><b class="entry-line"></b></div><span class="mini-loading">${s._candles?.length?'':'chart snapshot / no local candles'}</span></div><div class="radar-metrics"><div><label>to entry</label><strong>${dist===999999?'—':fmt(dist,2)+'%'}</strong></div><div><label>entry</label><strong>${fmt(entry,6)}</strong></div><div><label>SL</label><strong>${fmt(sl,6)}</strong></div><div><label>TP1</label><strong>${fmt(tp,6)}</strong></div><div><label>R:R</label><strong>${rr?fmt(rr,2):'—'}</strong></div><div><label>TF</label><strong>${esc(s.timeframe||'1m')}</strong></div><div><label>age</label><strong>${fmt(ageDays,1)}d</strong></div></div></div>`}
+function radarCard(s,i){const id=s.signal_interpretation_id||s.id;const sym=dispSymbol(s.symbol||s.instrument_symbol);const dir=(s.consensus_direction||s.direction||'').toLowerCase();const entry=Z(s.entry_price||s.levels?.entry), sl=Z(s.stop_loss||s.levels?.stop_loss), tp=Z(s.take_profit_1||s.levels?.take_profit_1);const distSigned=signalDistanceSigned(s);const ageDays=(Date.now()-new Date(s.signal_timestamp||s.created_at))/86400000;const trader=traderName(s);const stale=ageDays>7?' stale':'';const rr=entry&&sl&&tp?Math.abs((tp-entry)/(entry-sl)):0;const live=(s.current_price||s._livePrice)?` · live ${fmt(s.current_price||s._livePrice,6)}`:'';const aiBadge=aiInferredBadge(s);const filledBadge=isJustFilled(s)?'<span class="badge just-filled" title="Entry was reached in the last 30 minutes — this setup just became an open position">JUST FILLED</span>':'';return `<div class="radar-card${stale}${filledBadge?' just-filled-card':''}" data-call="${esc(id)}" data-news="${esc(s.news_item_id||'')}" data-radar-idx="${i}"><div class="radar-top"><div>${rowMain(sym,`${trader} · ${(s.timeframe||'1m')} · ${rel(s.signal_timestamp||s.created_at)} old${live}`)}</div><div class="radar-top-right">${filledBadge}${aiBadge}${pill(dir,dir)}</div></div><div class="mini-tv" id="mini-radar-${i}">${(!s._candles?.length&&s.media_url)?`<img class="mini-chart-img" src="${esc(s.media_url)}">`:''}<div class="riskbox ${dir==='short'?'short':'long'}"><i class="reward"></i><i class="risk"></i><b class="entry-line"></b></div><span class="mini-loading">${s._candles?.length?'':'chart snapshot / no local candles'}</span></div><div class="radar-metrics"><div><label>to entry</label>${distSigned==null?'<strong class="secondary">—</strong>':`<strong class="${distSigned>=0?'success':'danger'}">${pct(distSigned)}</strong>`}</div><div><label>entry</label><strong>${fmt(entry,6)}</strong></div><div><label>SL</label><strong>${fmt(sl,6)}</strong></div><div><label>TP1</label><strong>${fmt(tp,6)}</strong></div><div><label>R:R</label><strong>${rr?fmt(rr,2):'—'}</strong></div><div><label>TF</label><strong>${esc(s.timeframe||'1m')}</strong></div><div><label>age</label><strong>${fmt(ageDays,1)}d</strong></div></div></div>`}
+// Phase 2 (2026-05-29): LEGACY / UNUSED. The standalone Entry-Radar tab was
+// folded into the unified Signals & Radar tab (renderUnifiedPage card view).
+// This function targets #entry-radar / #radar-filter / #radar-age, which no
+// longer exist in index.html, and is no longer wired to any event or the tab
+// router (render() routes the 'radar' tab to renderUnifiedPage). Kept intact
+// for rollback and as a reference for the /api/entry-radar endpoint contract.
 async function renderRadarPage(){
   const isFirstLoad = !$('#entry-radar').children.length || $('#entry-radar').querySelector('.empty');
   if(isFirstLoad) {
@@ -1243,7 +1476,9 @@ function drawMiniRadar(id,candles,s){const el=document.getElementById(id);if(!el
 /* ─── Signal intelligence drawer (standalone call) ─── */
 function levelCards(levels){
   return ['entry','stop_loss','take_profit_1','take_profit_2','take_profit_3','take_profit_4','take_profit_5','take_profit_6']
+    .filter(k=>{const v=Number(levels?.[k]);return Number.isFinite(v)&&v>0})
     .map(k=>`<div class="level"><label>${k.replaceAll('_',' ')}</label><strong>${fmt(levels?.[k],6)}</strong></div>`).join('')
+    ||'<div class="empty">No levels extracted from this chart</div>'
 }
 // Render the Discord call body with explicit handling for reply-only posts.
 // When the only content is a `[Reply to @user]: <quoted text>` block, the
@@ -1339,6 +1574,7 @@ function markLines(levels){
   return data;
 }
 function renderReplayChart(r,chartId='replay-chart',upto=null){
+  try {
   const c=chart(chartId); if(!c)return;
   const candles=upto?(r.candles||[]).slice(0,upto):(r.candles||[]);
   const series=candleSeries(candles);
@@ -1368,7 +1604,8 @@ function renderReplayChart(r,chartId='replay-chart',upto=null){
   }
 
   const levels=r.signal?.levels||r.levels||{};
-  const lvlVals=Object.values(levels).map(n).filter(x=>x>0);
+  let lvlVals=[];
+  try{lvlVals=Object.values(levels).map(n).filter(x=>x>0)}catch(e){lvlVals=[]}
   // 2026-05-24: Compute y-axis bounds explicitly in JS. The previous version
   // passed `min`/`max` as ECharts CALLBACKS — that path interacted badly with
   // markLine auto-extents and produced a stuck "9999999" max tick on the
@@ -1436,6 +1673,7 @@ function renderReplayChart(r,chartId='replay-chart',upto=null){
       markLine:{symbol:'none',data:markData,silent:true}
     }]
   },true);
+  } catch (e) { console.error("renderReplayChart blocked by SES:", e); }
 }
 function animateReplay(r,chartId='replay-chart'){
   const total=(r.candles||[]).length; if(!total)return;
@@ -1588,7 +1826,7 @@ function chart(id){const el=document.getElementById(id);if(!el||!window.echarts)
   try{const stale=window.echarts.getInstanceByDom(el); if(stale){stale.dispose()}}catch(e){}
   // Wipe the inner HTML for a guaranteed clean canvas slot.
   el.innerHTML='';
-  const c=echarts.init(el);state.charts[id]=c;setTimeout(()=>c.resize(),50);return c}
+  try{const c=echarts.init(el);state.charts[id]=c;setTimeout(()=>c.resize(),50);return c}catch(e){console.error('echarts init blocked by SES:', e);return null}}
 
 /* ─── Trade journey (Round 12, 2026-05-24) ───
    Async fetch /api/position-journey/{id} and render an ECharts dual-grid
@@ -1708,7 +1946,12 @@ function wire(){
   // — typing in the radar filter did nothing. Split so each tab's filters call
   // its own renderer.
   ['floor-signal-filter','floor-position-filter'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=()=>renderFloor()});
-  ['radar-filter','radar-age'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderRadarPage()});
+  // Phase 2 (2026-05-29): DEAD WIRING REMOVED. The standalone Radar tab
+  // (#entry-radar / #radar-filter / #radar-age DOM) was merged into the
+  // unified Signals & Radar tab (card view) months ago; those element ids no
+  // longer exist in index.html, so this wiring was a permanent no-op pointing
+  // at the legacy renderRadarPage(). Left commented for rollback reference.
+  // ['radar-filter','radar-age'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderRadarPage()});
   ['signals-filter','signals-status'].forEach(id=>{const el=$('#'+id); if(el) el.oninput=el.onchange=()=>renderSignalsPage()});
   const uf=$('#unified-filter'); if(uf) uf.oninput=()=>renderUnifiedPage();
   const ust=$('#unified-status'); if(ust) ust.onchange=()=>renderUnifiedPage();
@@ -1773,7 +2016,7 @@ async function pulseUpdate(){
     }
     if(['floor','radar','signals'].includes(state.tab)||!state.snap){
       state.snap=await api('/api/snapshot');
-      if(state.tab==='floor'){updateCompNumbers();renderStats();}
+      if(state.tab==='floor'){renderStats();renderCompetitionMini();renderFloorPositions();if((state._floorTick=(state._floorTick||0)+1)%4===0)renderFloorSignals();}
       if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();
     }
     // Refresh expanded agent if present

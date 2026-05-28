@@ -116,6 +116,9 @@ class ExecutionIntent:
     quantity: float = 0.0
     requested_price: Optional[float] = None
     stop_price: Optional[float] = None
+    stop_loss: Optional[float] = None       # SL trigger price (risk management)
+    take_profit: Optional[float] = None     # TP trigger price (risk management)
+    leverage: Optional[int] = None          # desired leverage (exchange-native)
     time_in_force: str = TIF_GTC
     client_order_id: Optional[str] = None  # router will fill if None
     requested_notional_usd: Optional[float] = None
@@ -133,7 +136,7 @@ class ExecutionIntent:
             f"{self.exchange}|{self.account_id_external}|{self.symbol}|"
             f"{self.direction}|{self.order_type}|{self.quantity}|"
             f"{self.requested_price}|{self.intent_hash}|{time.time_ns()}|"
-            f"{counter}|{id(self)}"
+            f"{counter}"
         )
         return "tk-" + hashlib.sha256(material.encode()).hexdigest()[:24]
 

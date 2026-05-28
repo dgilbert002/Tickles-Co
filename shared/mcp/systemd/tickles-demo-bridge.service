@@ -1,0 +1,18 @@
+[Unit]
+Description=Tickles Demo Bridge — mirrors paper competition trades to demo exchange accounts
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+Environment="PYTHONUNBUFFERED=1"
+Environment="DEMO_BRIDGE_POLL_S=30"
+ExecStart=/usr/bin/python3 -m shared.daemons.demo_bridge
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tickles/demo-bridge.log
+StandardError=append:/var/log/tickles/demo-bridge.log
+
+[Install]
+WantedBy=multi-user.target

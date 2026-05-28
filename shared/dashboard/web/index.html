@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <script src="static/echarts.min.js"></script>
-  <link rel="stylesheet" href="static/app.css?v=20260524-round13f-noriskbox">
+  <link rel="stylesheet" href="static/app.css?v=20260529-floor-equity">
 </head>
 <body><script>if(localStorage.getItem('tickles.theme')==='light')document.body.classList.add('light');</script>
 <div id="app" class="app-shell">
@@ -33,6 +33,8 @@
       <button class="nav-link" data-tab="learning"><span>✦</span>AI Learning</button>
       <button class="nav-link" data-tab="ops"><span>$</span>Ops & Cost</button>
       <button class="nav-link" data-tab="settings"><span>⚙</span>Settings</button>
+      <button class="nav-link" data-tab="exchanges"><span>💱</span>Exchange Accounts</button>
+      <button class="nav-link" data-tab="paperdemo"><span>⚖</span>Paper vs Demo</button>
     </nav>
     <button class="theme-toggle" id="theme-btn">🌙 Dark</button>
     <div class="side-status"><i></i><span id="status-text">connecting</span></div>
@@ -65,17 +67,16 @@
 
     <section id="tab-unified" class="tab">
       <div class="panel full">
-        <div class="panel-head"><div><h2>Signals & Radar</h2><p>All detected chart signals with live prices and distance to entry.</p></div>
+        <div class="panel-head"><div><h2>Signals &amp; Radar</h2><p>Setups <em>approaching</em> entry — live distance to target. When price reaches entry it becomes a Position (see the Positions tab for live &amp; closed history).</p></div>
         <div class="filters">
           <div id="unified-toggle" class="view-toggle">
             <button class="view-btn active" data-view="list" onclick="setUnifiedView('list')">☰ List</button>
             <button class="view-btn" data-view="card" onclick="setUnifiedView('card')">▦ Cards</button>
           </div>
-          <input id="unified-filter" class="input wide" placeholder="symbol / trader / status">
+          <input id="unified-filter" class="input wide" placeholder="symbol / trader">
           <select id="unified-status" class="select small">
-            <option value="">Trade setups</option>
-            <option value="all">All signals</option>
-            <option value="history">History only</option>
+            <option value="">Approaching entry</option>
+            <option value="all">All active signals</option>
           </select>
         </div></div>
         <div id="unified-list-panel"><div id="unified-list-table" class="table-wrap"></div></div>
@@ -97,12 +98,16 @@
         <!-- LIVE sub-tab -->
         <div id="positions-live-panel" class="positions-panel">
           <div class="filters">
-            <input id="positions-live-filter" class="input wide" placeholder="symbol / trader / source">
+            <input id="positions-live-filter" class="input wide" placeholder="symbol / trader / agent / source">
             <select id="positions-live-status" class="select small">
               <option value="" selected>All live</option>
               <option value="open">Open only</option>
               <option value="partial_exit">Partial exit</option>
             </select>
+            <div id="positions-live-view" class="view-toggle">
+              <button class="view-btn active" data-pview="agent" onclick="setLiveView('agent')">Per agent</button>
+              <button class="view-btn" data-pview="grouped" onclick="setLiveView('grouped')">Grouped</button>
+            </div>
           </div>
           <div id="positions-live-table" class="table-wrap"></div>
         </div>
@@ -174,6 +179,12 @@
         </div>
       </div>
       <div class="panel full">
+        <div class="panel-head">
+          <div><h2>Agent position sizing</h2><p>Risk per trade, max concurrent positions, and leverage caps for the copy-trade competition agents. Changes take effect within 60 seconds — no restart. Defaults reproduce the original behaviour.</p></div>
+        </div>
+        <div id="settings-sizing-body" class="settings-body"></div>
+      </div>
+      <div class="panel full">
         <div class="panel-head"><h2>Recent model changes</h2><p>Audit trail of every model swap, newest first.</p></div>
         <div id="settings-history" class="table-wrap"></div>
       </div>
@@ -200,11 +211,36 @@
       </div>
       </div>
     </section>
+
+    <section id="tab-paperdemo" class="tab">
+      <div class="panel full">
+        <div class="panel-head"><h2>Paper vs Demo</h2><p>Side-by-side comparison of paper competition trades and demo exchange execution.</p></div>
+        <div class="stats-row" id="paperdemo-stats"></div>
+        <div class="table-wrap" id="paperdemo-table"></div>
+      </div>
+    </section>
+
+    <section id="tab-exchanges" class="tab">
+      <div class="panel full">
+        <div class="panel-head">
+          <div><h2>Exchange Accounts</h2><p>Manage API keys, test connectivity, sync markets.</p></div>
+          <button class="pill-btn" id="btn-add-account">+ Add Account</button>
+        </div>
+        <div class="table-wrap" id="exchange-accounts-table"></div>
+      </div>
+      <div class="panel full" style="margin-top:16px">
+        <div class="panel-head">
+          <div><h2>Mirror Agents</h2><p>Select which paper competition agents trade on which demo accounts. Leave empty = paper only.</p></div>
+        </div>
+        <div class="table-wrap" id="mirror-config-table"></div>
+      </div>
+    </section>
   </main>
 
   <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
   <aside id="drawer" class="drawer hidden"><div id="drawer-resizer" title="Drag to resize"></div><div class="drawer-head"><div><div id="drawer-kicker" class="eyebrow">DETAIL</div><h2 id="drawer-title">Signal intelligence</h2></div><button id="drawer-close" class="drawer-close">×</button></div><div id="drawer-body" class="drawer-body"></div></aside>
 </div>
-<script src="static/app.js?v=3"></script>
+<script src="static/app.js?v=22-floor-parallel"></script>
+<script src="static/mirror.js?v=3"></script>
 </body>
 </html>

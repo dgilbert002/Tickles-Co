@@ -42,6 +42,18 @@ POLL_INTERVAL_S = int(os.environ.get("COPY_TRADE_POLL_S", "30"))
 # and refreshed each tick so the auto-optimizer cron can update them live.
 OPTIMAL: Dict[str, tuple] = {}
 
+# Phase 1.5 (2026-05-29): operator-tunable sizing knobs (risk %, max-concurrent,
+# leverage cap, spot-3x). Refreshed each tick from copy_sizing_config (DB → env →
+# default). Defaults reproduce the old hardcoded behaviour exactly, so this is a
+# no-op until the operator changes a value in Settings.
+SIZING: Dict[str, Any] = {}
+
+
+def _sizing(key: str, default: Any) -> Any:
+    """Read a refreshed sizing knob with a safe fallback to the old constant."""
+    v = SIZING.get(key)
+    return v if v is not None else default
+
 # Agent configurations
 AGENTS = [
     ("A: Spot Seq",      1.0, 1.0, "spot_seq"),
@@ -488,31 +500,31 @@ class LiveCopyTradeMonitor:
             allocated = agent["balance"]
             leverage = 1.0
         elif mode == "spot_lev_3x":
-            # Full balance, sequential, 3x leverage
+            # Full balance, sequential, configurable leverage (default 3x)
             if agent["open_positions"]:
                 return
             allocated = agent["balance"]
-            leverage = 3.0
+            leverage = float(_sizing("spot_lev_3x", 3.0))
         elif mode == "lev_parallel_3pct":
-            # 3% risk per trade, max 33 concurrent
-            if len(agent["open_positions"]) >= 33:
+            # Configurable risk % per trade (default 3%), configurable max concurrent (default 33)
+            if len(agent["open_positions"]) >= int(_sizing("max_concurrent_3", 33)):
                 return
-            allocated = agent["balance"] * 0.03
+            allocated = agent["balance"] * (float(_sizing("risk_pct_3", 3.0)) / 100.0)
             sl_dist = abs(entry - sl) / entry if entry > 0 else 0.05
             if sl_dist < 0.005:
                 sl_dist = 0.005
             raw_lev = (1.0 / sl_dist) * 0.97
-            leverage = min(raw_lev, 100.0)
+            leverage = min(raw_lev, float(_sizing("leverage_cap", 100.0)))
         else:
-            # Leveraged: 5% risk per trade, max 20 concurrent
-            if len(agent["open_positions"]) >= 20:
+            # Leveraged: configurable risk % per trade (default 5%), max concurrent (default 20)
+            if len(agent["open_positions"]) >= int(_sizing("max_concurrent_5", 20)):
                 return
-            allocated = agent["balance"] * 0.05
+            allocated = agent["balance"] * (float(_sizing("risk_pct_5", 5.0)) / 100.0)
             sl_dist = abs(entry - sl) / entry if entry > 0 else 0.05
             if sl_dist < 0.005:
                 sl_dist = 0.005
             raw_lev = (1.0 / sl_dist) * 0.97
-            leverage = min(raw_lev, 100.0)
+            leverage = min(raw_lev, float(_sizing("leverage_cap", 100.0)))
 
         if agent_name.startswith("CH:"):
             logger.info("CH entering %s dir=%s entry=%s sl=%s tp=%s", sym, direction, entry, sl, tp)
@@ -864,6 +876,19 @@ class LiveCopyTradeMonitor:
         except Exception:
             pass  # use whatever was loaded previously
 
+    async def _load_sizing_knobs(self):
+        """Phase 1.5 (2026-05-29): refresh operator-tunable sizing knobs from
+        system_config (namespace=copy_sizing) into the module-level SIZING dict.
+        Safe: on any failure we keep the previous values / hardcoded defaults."""
+        try:
+            from shared.intelligence.copy_sizing_config import get_all
+            pool = await self._ensure_pool()
+            knobs = await get_all(pool=pool)
+            for k, meta in knobs.items():
+                SIZING[k] = meta["value"]
+        except Exception as exc:
+            logger.debug("could not refresh sizing knobs (%s); using prior/defaults", exc)
+
     async def _load_instrument_fees(self, symbol: str) -> dict:
         """Load maker/taker fees and funding rates for a symbol from instruments table.
 
@@ -901,6 +926,8 @@ class LiveCopyTradeMonitor:
         logger.info("Tick start")
         # 0. Refresh optimal multipliers from DB
         await self._load_optimal_multipliers()
+        # 0.1 Refresh operator-tunable sizing knobs (risk %, caps, leverage)
+        await self._load_sizing_knobs()
         # 0.5 Sync SL/TP from tracked_positions (may have been updated by LLM re-extraction)
         await self._sync_sl_tp()
         # 1. Enter new trader positions

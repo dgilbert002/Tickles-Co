@@ -454,6 +454,9 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
           mi.id AS media_id, mi.local_path AS media_local_path, mi.source_url AS media_source_url,
           mi.thumbnail_path AS media_thumbnail_path, mi.media_type AS media_type, mi.mime_type AS mime_type,
           tp.id AS position_id, tp.status AS position_status, tp.current_price,
+          tp.entry_price AS tp_entry_price, tp.stop_loss AS tp_stop_loss,
+          tp.take_profit_1 AS tp_take_profit_1, tp.take_profit_2 AS tp_take_profit_2,
+          tp.take_profit_3 AS tp_take_profit_3,
           tp.signal_timestamp, tp.created_at AS opened_at, tp.closed_at, tp.exit_timestamp,
           tp.unrealized_pnl_usd, tp.realized_pnl_usd, tp.realized_pnl_usd_final,
           tp.unrealized_pnl_pct, tp.realized_pnl_pct, tp.outcome, tp.exit_reason,
@@ -510,12 +513,32 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
             (int(row["position_id"]),),
         )
 
+    # Drawer accuracy fix (2026-05-29): the drawer used to read levels ONLY from
+    # signal_interpretations (si.*), which are frequently NULL for AI-inferred /
+    # entry-only signals — so the drawer rendered 0.000 even though the real
+    # tracked_position (tp.*) carried the true levels. Coalesce the two,
+    # preferring a non-null / non-zero si value, then falling back to tp.
+    def _lvl(*keys: str) -> Any:
+        first_non_null: Any = None
+        for k in keys:
+            v = row.get(k)
+            if v is None:
+                continue
+            if first_non_null is None:
+                first_non_null = v
+            try:
+                if float(v) != 0.0:
+                    return v
+            except (TypeError, ValueError):
+                return v
+        return first_non_null
+
     levels = {
-        "entry": row.get("entry_price"),
-        "stop_loss": row.get("stop_loss"),
-        "take_profit_1": row.get("take_profit_1"),
-        "take_profit_2": row.get("take_profit_2"),
-        "take_profit_3": row.get("take_profit_3"),
+        "entry": _lvl("entry_price", "tp_entry_price"),
+        "stop_loss": _lvl("stop_loss", "tp_stop_loss"),
+        "take_profit_1": _lvl("take_profit_1", "tp_take_profit_1"),
+        "take_profit_2": _lvl("take_profit_2", "tp_take_profit_2"),
+        "take_profit_3": _lvl("take_profit_3", "tp_take_profit_3"),
         "take_profit_4": row.get("take_profit_4"),
         "take_profit_5": row.get("take_profit_5"),
         "take_profit_6": row.get("take_profit_6"),
@@ -624,7 +647,11 @@ def _classify_signal_path(row: dict[str, Any], candles: list[dict[str, Any]]) ->
     tp = float(row["take_profit_1"]) if row.get("take_profit_1") is not None else None
     first_close = float(candles[0]["close"])
     last_close = float(candles[-1]["close"])
-    dist = abs((last_close - entry_f) / entry_f * 100.0) if entry_f else None
+    # Phase 2 (2026-05-29): SIGNED distance — (current - entry)/entry. Positive =
+    # price is ABOVE entry, negative = BELOW. Standardised across every endpoint
+    # so the Trading Floor and the Radar agree on the same number for a symbol.
+    # Sorting "closest to entry" is done frontend-side via Math.abs().
+    dist = ((last_close - entry_f) / entry_f * 100.0) if entry_f else None
     approaching = abs(last_close - entry_f) < abs(first_close - entry_f) if entry_f else False
 
     hit_idx = None
@@ -799,7 +826,9 @@ async def _radar_live_price_one(
             return None
 
 
-async def _enrich_radar_with_live_prices(rows: list[dict[str, Any]]) -> int:
+async def _enrich_radar_with_live_prices(
+    rows: list[dict[str, Any]], *, max_probes: int | None = None
+) -> int:
     """Mutate ``rows`` in place, filling ``current_price`` from CCXT.
 
     Strategy:
@@ -827,7 +856,10 @@ async def _enrich_radar_with_live_prices(rows: list[dict[str, Any]]) -> int:
         if r.get("entry_price") is None:
             continue
         sym = r.get("symbol") or r.get("instrument_symbol")
-        ex = (r.get("instrument_exchange") or "bybit").lower()
+        # Phase 2 (2026-05-29): unified-signals result rows carry the exchange
+        # under "exchange"; radar rows carry it under "instrument_exchange".
+        # Accept either so this helper works for both callers.
+        ex = (r.get("instrument_exchange") or r.get("exchange") or "bybit").lower()
         if not sym:
             continue
         by_pair.setdefault((str(ex), str(sym)), []).append(idx)
@@ -837,6 +869,11 @@ async def _enrich_radar_with_live_prices(rows: list[dict[str, Any]]) -> int:
 
     sem = asyncio.Semaphore(_RADAR_LIVE_PRICE_CONCURRENCY)
     pairs = list(by_pair.items())
+    # Phase 2 (2026-05-29): bound the probe count for high-volume callers
+    # (unified-signals can return 120 rows). Insertion order == row order, so
+    # the cap keeps the most-recent signals' symbols.
+    if max_probes is not None and len(pairs) > max_probes:
+        pairs = pairs[:max_probes]
     coros = [_radar_live_price_one(sem, sym, ex) for (ex, sym), _ in pairs]
     results = await asyncio.gather(*coros, return_exceptions=False)
 
@@ -1183,6 +1220,7 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
                tr.handle_raw, tr.handle_normalized, tr.display_name, tr.platform,
                mi.id AS media_id, mi.local_path AS media_local_path, mi.source_url AS media_source_url,
                tp.id AS position_id, tp.status AS position_status,
+               tp.activated_at AS position_activated_at,
                tp.signal_timestamp, tp.current_price AS tp_current_price,
                tp.distance_to_entry_pct AS tp_distance_to_entry_pct,
                tp.actor_id, tp.signal_source, tp.detection_method
@@ -1192,9 +1230,16 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
         LEFT JOIN public.trader_profiles tr ON tr.id = si.trader_profile_id
         LEFT JOIN public.media_items mi ON mi.id = si.media_item_id
         WHERE si.created_at > now() - interval '30 days'
-        """ + status_filter_sql + f" ORDER BY si.id, si.created_at DESC LIMIT {limit_sql}",
+        """ + status_filter_sql + f" ORDER BY si.id DESC, tp.id DESC NULLS LAST LIMIT {limit_sql}",
         (),
     )
+    # Phase 3 (2026-05-29) ROOT-CAUSE FIX: the LIMIT used to order by `si.id`
+    # ASCENDING, so it returned the OLDEST 120 interpretations (whose positions
+    # are long closed/expired) and never the recent ones — the radar was
+    # perpetually stale/empty regardless of any frontend filtering. We now order
+    # `si.id DESC` (newest first) and break DISTINCT ON ties by the newest
+    # tracked_position (`tp.id DESC`), so recent pending + just-filled setups
+    # are actually fetched.
 
     # 2. Collect unique symbols and batch-fetch latest prices
     # Build a lookup map: every raw symbol form → cleaned canonical form
@@ -1264,7 +1309,10 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
         current = prices.get(sym)  # lookup by cleaned symbol
         distance_to_entry = None
         if current and entry > 0:
-            distance_to_entry = round(abs((current - entry) / entry * 100), 2)
+            # Phase 2 (2026-05-29): SIGNED distance (was abs()). Positive = price
+            # above entry, negative = below. Matches _classify_signal_path and the
+            # live-price fallback so the Floor and Radar never disagree.
+            distance_to_entry = round((current - entry) / entry * 100, 2)
 
         result.append({
             "id": r["id"],
@@ -1283,6 +1331,7 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
             "current_price": current,
             "distance_to_entry_pct": distance_to_entry,
             "position_status": r.get("position_status") or "signal",
+            "position_activated_at": r.get("position_activated_at").isoformat() if r.get("position_activated_at") else None,
             "signal_timestamp": (r.get("signal_timestamp") or r.get("created_at")).isoformat() if (r.get("signal_timestamp") or r.get("created_at")) else None,
             "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
             "author": r.get("author") or "",
@@ -1297,10 +1346,65 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
             "media_url": _media_url(r.get("media_id"), r.get("media_local_path"), r.get("media_source_url")),
         })
 
+    # Phase 2 (2026-05-29): live-price CCXT fallback. Rows whose symbol has no
+    # local 1m candles (exotic / brand-new perps) arrive here with
+    # current_price=None and would render "TO ENTRY: —". Probe CCXT for those
+    # (bounded) so the Floor + Radar show a real distance. Same helper the
+    # entry-radar endpoint uses, so the price source is identical everywhere.
+    try:
+        await _enrich_radar_with_live_prices(result, max_probes=40)
+        # Round the live-filled distances to match the candle-path precision.
+        for r in result:
+            d = r.get("distance_to_entry_pct")
+            if isinstance(d, float):
+                r["distance_to_entry_pct"] = round(d, 2)
+    except Exception as exc:  # pragma: no cover - never block the tab on this
+        logger.warning("unified-signals live-price fallback raised: %s", exc)
+
+    # Phase 3 (2026-05-29): radar supply stats for the honest empty-state. When
+    # 0 setups are waiting, the radar shows "nothing pending — last 24h: X
+    # filled, Y cancelled (Z no-setup, W dupes)" instead of looking broken.
+    # Cheap: a single grouped COUNT over a 30-day slice.
+    radar_meta: dict[str, int] = {
+        "pending": 0, "filled_24h": 0, "cancelled_24h": 0,
+        "no_setup_24h": 0, "dupes_24h": 0, "unsupported_24h": 0,
+        "just_filled_30m": 0,
+    }
+    try:
+        meta = await pool.fetch_one(
+            """
+            SELECT
+                count(*) FILTER (WHERE status = 'pending') AS pending,
+                count(*) FILTER (WHERE status IN ('open','closed')
+                                 AND created_at > now() - interval '24 hours') AS filled_24h,
+                count(*) FILTER (WHERE status = 'cancelled'
+                                 AND updated_at > now() - interval '24 hours') AS cancelled_24h,
+                count(*) FILTER (WHERE status = 'cancelled'
+                                 AND updated_at > now() - interval '24 hours'
+                                 AND status_reason LIKE 'round9_no_explicit_setup%') AS no_setup_24h,
+                count(*) FILTER (WHERE status = 'cancelled'
+                                 AND updated_at > now() - interval '24 hours'
+                                 AND status_reason LIKE 'deduped:%') AS dupes_24h,
+                count(*) FILTER (WHERE status = 'cancelled'
+                                 AND updated_at > now() - interval '24 hours'
+                                 AND status_reason LIKE 'unsupported:%') AS unsupported_24h,
+                count(*) FILTER (WHERE status = 'open'
+                                 AND activated_at > now() - interval '30 minutes') AS just_filled_30m
+            FROM public.tracked_positions
+            WHERE created_at > now() - interval '30 days'
+            """,
+        )
+        if meta:
+            for k in radar_meta:
+                radar_meta[k] = int(meta.get(k) or 0)
+    except Exception as exc:  # pragma: no cover - never block the tab on this
+        logger.warning("unified-signals radar_meta query raised: %s", exc)
+
     return web.json_response({
         "ok": True,
         "count": len(result),
         "signals": result,
+        "radar_meta": radar_meta,
     })
 
 
@@ -1431,6 +1535,391 @@ async def handle_traders_intel(request: web.Request) -> web.Response:
     return _json({"ok": True, "traders": result})
 
 
+# ---------------------------------------------------------------------------
+# Exchange Accounts API (Phase Demo Bridge)
+# ---------------------------------------------------------------------------
+
+async def handle_exchange_accounts(request: web.Request) -> web.Response:
+    """GET/POST /api/exchange-accounts — list all or add new."""
+    pool = await get_shared_pool()
+    
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            return _err(400, "invalid JSON body")
+        
+        exchange = (body.get("exchange") or "").strip().lower()
+        account_name = (body.get("accountName") or "").strip()
+        if not exchange or not account_name:
+            return _err(400, "exchange and accountName required")
+        
+        api_key = body.get("apiKey", "")
+        api_secret = body.get("apiSecret", "")
+        if not api_key or not api_secret:
+            return _err(400, "apiKey and apiSecret required")
+        
+        row = await pool.fetch_one(
+            "SELECT id FROM public.exchange_accounts WHERE exchange = $1 AND account_name = $2",
+            (exchange, account_name),
+        )
+        
+        cols = ["exchange", "account_name", "account_type", "description", "api_key", "api_secret", "api_passphrase"]
+        vals = {
+            "exchange": exchange,
+            "account_name": account_name,
+            "account_type": body.get("accountType", "demo"),
+            "description": body.get("description", ""),
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "api_passphrase": body.get("apiPassphrase", ""),
+        }
+        
+        if row:
+            await pool.execute(
+                "UPDATE public.exchange_accounts SET exchange = %s, account_name = %s, account_type = %s, "
+                "description = %s, api_key = %s, api_secret = %s, api_passphrase = %s, updated_at = NOW() WHERE id = %s",
+                (exchange, account_name, body.get("accountType", "demo"), body.get("description", ""),
+                 api_key, api_secret, body.get("apiPassphrase", ""), row["id"]),
+            )
+            return _json({"ok": True, "id": row["id"], "message": "Account updated."})
+        else:
+            new_id = await pool.fetch_val(
+                "INSERT INTO public.exchange_accounts "
+                "(exchange, account_name, account_type, description, api_key, api_secret, api_passphrase) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (exchange, account_name, body.get("accountType", "demo"), body.get("description", ""),
+                 api_key, api_secret, body.get("apiPassphrase", "")),
+            )
+            return _json({"ok": True, "id": new_id, "message": "Account added."}, status=201)
+    
+    # GET — list all
+    rows = await pool.fetch_all(
+        "SELECT id, exchange, account_name, account_type, description, is_active, "
+        "last_tested_at, last_balance, last_error, metadata, created_at, updated_at "
+        "FROM public.exchange_accounts ORDER BY exchange, account_name"
+    )
+    accounts = []
+    for r in rows:
+        accounts.append({
+            "id": r["id"],
+            "exchange": r["exchange"],
+            "accountName": r["account_name"],
+            "accountType": r["account_type"],
+            "description": r["description"],
+            "isActive": r["is_active"],
+            "lastTestedAt": r["last_tested_at"].isoformat() if r.get("last_tested_at") else None,
+            "lastBalance": float(r["last_balance"]) if r.get("last_balance") else None,
+            "lastError": r.get("last_error"),
+            "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return _json({"ok": True, "accounts": accounts})
+
+
+async def handle_exchange_account(request: web.Request) -> web.Response:
+    """GET/PUT/DELETE /api/exchange-accounts/{id}."""
+    account_id = int(request.match_info["id"])
+    pool = await get_shared_pool()
+    
+    if request.method == "GET":
+        r = await pool.fetch_one(
+            "SELECT * FROM public.exchange_accounts WHERE id = $1", (account_id,)
+        )
+        if not r:
+            return _err(404, f"Account #{account_id} not found")
+        return _json({"ok": True, "account": {
+            "id": r["id"], "exchange": r["exchange"], "accountName": r["account_name"],
+            "accountType": r["account_type"], "description": r["description"],
+            "apiKey": r["api_key"], "apiSecret": r["api_secret"],
+            "apiPassphrase": r.get("api_passphrase") or "",
+            "isActive": r["is_active"],
+            "lastTestedAt": r["last_tested_at"].isoformat() if r.get("last_tested_at") else None,
+            "lastBalance": float(r["last_balance"]) if r.get("last_balance") else None,
+        }})
+    
+    existing = await pool.fetch_one(
+        "SELECT id FROM public.exchange_accounts WHERE id = $1", (account_id,)
+    )
+    if not existing:
+        return _err(404, f"Account #{account_id} not found")
+    
+    if request.method == "DELETE":
+        assigned = await pool.fetch_val(
+            "SELECT COUNT(*) FROM public.competition_agent_exchanges WHERE exchange_account_id = $1 AND is_active = TRUE",
+            (account_id,),
+        )
+        if assigned and int(assigned) > 0:
+            return _err(409, f"Account is assigned to {assigned} active competition agents. Remove those first.")
+        await pool.execute("DELETE FROM public.exchange_accounts WHERE id = $1", (account_id,))
+        return _json({"ok": True, "message": "Account removed."})
+    
+    # PUT — update
+    try:
+        body = await request.json()
+    except Exception:
+        return _err(400, "invalid JSON body")
+    
+    sets = []
+    params = []
+    for col, field in [("description", "description"), ("account_type", "accountType"),
+                        ("api_key", "apiKey"), ("api_secret", "apiSecret"),
+                        ("api_passphrase", "apiPassphrase"), ("is_active", "isActive")]:
+        if field in body and body[field] is not None:
+            sets.append(f"{col} = %s")
+            params.append(body[field])
+    
+    if not sets:
+        return _err(400, "No fields to update")
+    
+    sets.append("updated_at = NOW()")
+    params.append(account_id)
+    await pool.execute(
+        "UPDATE public.exchange_accounts SET " + ", ".join(sets) + " WHERE id = %s",
+        tuple(params),
+    )
+    return _json({"ok": True, "message": "Account updated."})
+
+
+async def handle_exchange_account_test(request: web.Request) -> web.Response:
+    """POST /api/exchange-accounts/{id}/test — test connectivity."""
+    account_id = int(request.match_info["id"])
+    
+    try:
+        from shared.mcp.tools.accounts import _handle_test_account
+        result = await _handle_test_account({"id": account_id})
+        return _json(result)
+    except Exception as exc:
+        return _err(500, str(exc))
+
+
+async def handle_exchange_account_sync(request: web.Request) -> web.Response:
+    """POST /api/exchange-accounts/{id}/sync-markets — sync perpetuals."""
+    account_id = int(request.match_info["id"])
+    try:
+        from shared.mcp.tools.accounts import _handle_sync_markets
+        result = await _handle_sync_markets({"id": account_id})
+        return _json(result)
+    except Exception as exc:
+        return _err(500, str(exc))
+
+
+async def handle_media(request: web.Request) -> web.Response:
+    """GET /api/media/{id} — serve local chart image from media_items table."""
+    import os, aiofiles
+    try:
+        media_id = int(request.match_info["id"])
+    except Exception:
+        return _err(400, "invalid id")
+    pool = await get_shared_pool()
+    row = await pool.fetch_one(
+        "SELECT local_path, mime_type FROM public.media_items WHERE id = $1", (media_id,)
+    )
+    if not row or not row["local_path"]:
+        return _err(404, f"media #{media_id} not available (no local file)")
+    path = row["local_path"]
+    if not os.path.exists(path):
+        return _err(404, f"file missing on disk: {path}")
+    mime = row.get("mime_type") or "image/jpeg"
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        return web.Response(body=data, content_type=mime)
+    except Exception as exc:
+        return _err(500, str(exc))
+
+
+async def handle_paper_vs_demo(request: web.Request) -> web.Response:
+    """GET /api/paper-vs-demo — paper vs demo comparison data."""
+    pool = await get_shared_pool()
+    
+    # Summary stats
+    paper = await pool.fetch_one("""
+        SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE exit_price IS NOT NULL) as closed,
+               COALESCE(SUM(pnl), 0) as pnl
+        FROM public.competition_trades
+        WHERE contest_id = 'copy-trade-scenarios'
+    """)
+    
+    # Phase 1 (2026-05-29): added filled_notional + demo_pnl so the frontend
+    # "Demo Orders $" KPI is real data instead of a hardcoded $0.
+    demo = await pool.fetch_one("""
+        SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'filled') as filled,
+               COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
+               COUNT(*) FILTER (WHERE status = 'pending') as pending,
+               COALESCE(SUM(notional_usd) FILTER (WHERE status = 'filled'), 0) as filled_notional,
+               COALESCE(SUM(demo_pnl) FILTER (WHERE demo_pnl IS NOT NULL), 0) as demo_pnl
+        FROM public.demo_orders
+    """) or {"total": 0, "filled": 0, "rejected": 0, "pending": 0,
+             "filled_notional": 0, "demo_pnl": 0}
+
+    # Phase 1 (2026-05-29): DRIFT = (paper P&L − demo P&L) over MATCHED filled
+    # pairs only (apples-to-apples). Comparing total paper P&L across all 388
+    # historical trades against forward-only demo orders would be meaningless,
+    # so we only sum trades that have BOTH a paper leg and a filled demo leg.
+    # Returns NULL (frontend shows "—") until at least one demo order fills.
+    drift_row = await pool.fetch_one("""
+        SELECT COALESCE(SUM(ct.pnl), 0) AS paper_pnl_matched,
+               COALESCE(SUM(dmo.demo_pnl), 0) AS demo_pnl_matched,
+               COUNT(*) AS matched
+        FROM public.competition_trades ct
+        JOIN public.demo_orders dmo
+          ON dmo.tracked_position_id = ct.tracked_position_id
+        WHERE ct.contest_id = 'copy-trade-scenarios'
+          AND dmo.status = 'filled'
+          AND dmo.demo_pnl IS NOT NULL
+    """) or {"paper_pnl_matched": 0, "demo_pnl_matched": 0, "matched": 0}
+    drift = None
+    if drift_row["matched"] and int(drift_row["matched"]) > 0:
+        drift = float(drift_row["paper_pnl_matched"]) - float(drift_row["demo_pnl_matched"])
+
+    # Joined comparison rows.
+    # Phase 1 (2026-05-29) FIX: join demo_orders on tracked_position_id, NOT
+    # competition_trade_id. The demo_bridge only ever writes tracked_position_id
+    # (competition_trade_id is always NULL), so the old join matched zero rows
+    # and the Demo column was permanently blank. Both competition_trades and
+    # demo_orders reference the same upstream signal via tracked_position_id, so
+    # that is the correct, stable join key.
+    rows = await pool.fetch_all("""
+        SELECT ct.id, ct.symbol, ct.direction, ct.entry_price as paper_entry,
+               ct.exit_price as paper_exit, ct.sl_price, ct.tp_price,
+               ct.pnl as paper_pnl, ct.allocated, ct.leverage, ct.agent_id,
+               ct.entered_at, ct.exited_at, ct.exit_reason,
+               dmo.exchange, dmo.account_name, dmo.exchange_order_id,
+               dmo.demo_entry, dmo.status as demo_status, dmo.error_message,
+               dmo.demo_pnl, dmo.ordered_at, dmo.filled_at,
+               tp.actor_id, tp.instrument_symbol,
+               si.id as signal_id
+        FROM public.competition_trades ct
+        LEFT JOIN public.demo_orders dmo ON dmo.tracked_position_id = ct.tracked_position_id
+        LEFT JOIN public.tracked_positions tp ON tp.id = ct.tracked_position_id
+        LEFT JOIN public.signal_interpretations si ON si.id = tp.signal_interpretation_id
+        WHERE ct.contest_id = 'copy-trade-scenarios'
+        ORDER BY ct.entered_at DESC
+        LIMIT 100
+    """)
+    
+    trades = []
+    for r in rows:
+        trades.append({
+            "id": r["id"], "symbol": r["symbol"], "direction": r["direction"],
+            "agent_id": r["agent_id"], "actor_id": r["actor_id"],
+            "paper_entry": float(r["paper_entry"]) if r["paper_entry"] else None,
+            "paper_exit": float(r["paper_exit"]) if r["paper_exit"] else None,
+            "paper_pnl": float(r["paper_pnl"]) if r["paper_pnl"] else None,
+            "sl": float(r["sl_price"]) if r["sl_price"] else None,
+            "tp": float(r["tp_price"]) if r["tp_price"] else None,
+            "leverage": int(r["leverage"]) if r["leverage"] else None,
+            "allocated": float(r["allocated"]) if r["allocated"] else None,
+            "entered_at": r["entered_at"].isoformat() if r["entered_at"] else None,
+            "exited_at": r["exited_at"].isoformat() if r["exited_at"] else None,
+            "exit_reason": r["exit_reason"],
+            "demo_exchange": r["exchange"],
+            "demo_account": r["account_name"],
+            "demo_order_id": r["exchange_order_id"],
+            "demo_entry": float(r["demo_entry"]) if r["demo_entry"] else None,
+            "demo_status": r["demo_status"],
+            "demo_error": r["error_message"],
+            "demo_pnl": float(r["demo_pnl"]) if r["demo_pnl"] is not None else None,
+            "demo_ordered_at": r["ordered_at"].isoformat() if r["ordered_at"] else None,
+            "demo_filled_at": r["filled_at"].isoformat() if r["filled_at"] else None,
+            "signal_id": r["signal_id"],
+            "orphan": False,
+        })
+
+    # Phase 1 (2026-05-29): surface ORPHAN demo orders — demo orders the bridge
+    # placed for a signal that NO paper agent actually traded (e.g. the lone
+    # "rejected" DOT order). With only a paper-driven join these were invisible,
+    # which is exactly why "1 rejected" was a mystery. We list them with empty
+    # paper columns so the operator can see *every* demo order and its reason.
+    orphans = await pool.fetch_all("""
+        SELECT dmo.id, dmo.symbol, dmo.direction, dmo.exchange, dmo.account_name,
+               dmo.exchange_order_id, dmo.demo_entry, dmo.status, dmo.error_message,
+               dmo.demo_pnl, dmo.paper_entry, dmo.paper_sl, dmo.paper_tp,
+               dmo.leverage, dmo.ordered_at, dmo.filled_at, dmo.tracked_position_id
+        FROM public.demo_orders dmo
+        WHERE NOT EXISTS (
+            SELECT 1 FROM public.competition_trades ct
+            WHERE ct.tracked_position_id = dmo.tracked_position_id
+              AND ct.contest_id = 'copy-trade-scenarios'
+        )
+        ORDER BY dmo.ordered_at DESC
+        LIMIT 100
+    """)
+    for r in orphans:
+        trades.append({
+            "id": f"demo-{r['id']}", "symbol": r["symbol"], "direction": r["direction"],
+            "agent_id": None, "actor_id": None,
+            # paper leg is empty — no paper agent took this signal
+            "paper_entry": float(r["paper_entry"]) if r["paper_entry"] else None,
+            "paper_exit": None, "paper_pnl": None,
+            "sl": float(r["paper_sl"]) if r["paper_sl"] else None,
+            "tp": float(r["paper_tp"]) if r["paper_tp"] else None,
+            "leverage": int(r["leverage"]) if r["leverage"] else None,
+            "allocated": None, "entered_at": None, "exited_at": None, "exit_reason": None,
+            "demo_exchange": r["exchange"], "demo_account": r["account_name"],
+            "demo_order_id": r["exchange_order_id"],
+            "demo_entry": float(r["demo_entry"]) if r["demo_entry"] else None,
+            "demo_status": r["status"], "demo_error": r["error_message"],
+            "demo_pnl": float(r["demo_pnl"]) if r["demo_pnl"] is not None else None,
+            "demo_ordered_at": r["ordered_at"].isoformat() if r["ordered_at"] else None,
+            "demo_filled_at": r["filled_at"].isoformat() if r["filled_at"] else None,
+            "signal_id": None,
+            "orphan": True,
+        })
+
+    return _json({
+        "ok": True,
+        "summary": {
+            "paper_total": paper["total"], "paper_closed": paper["closed"],
+            "paper_pnl": float(paper["pnl"] or 0),
+            "demo_total": demo["total"], "demo_filled": demo["filled"],
+            "demo_rejected": demo["rejected"], "demo_pending": demo["pending"],
+            # Phase 1 (2026-05-29): real demo $ + drift (were hardcoded stubs)
+            "demo_notional": float(demo["filled_notional"] or 0),
+            "demo_pnl": float(demo["demo_pnl"] or 0),
+            "drift": drift,
+        },
+        "trades": trades,
+    })
+
+
+async def handle_mirror_config(request: web.Request) -> web.Response:
+    """GET/POST/DELETE /api/mirror-config — agent to demo account assignments."""
+    pool = await get_shared_pool()
+    if request.method == "GET":
+        rows = await pool.fetch_all("""
+            SELECT cae.agent_id, ea.account_name, ea.id as account_id, ea.exchange
+            FROM public.competition_agent_exchanges cae
+            JOIN public.exchange_accounts ea ON ea.id = cae.exchange_account_id
+            WHERE cae.is_active = TRUE AND ea.is_active = TRUE
+            ORDER BY cae.agent_id, cae.priority
+        """)
+        return _json({"ok": True, "mappings": [
+            {"agent_id": r["agent_id"], "account_name": r["account_name"],
+             "account_id": r["account_id"], "exchange": r["exchange"]}
+            for r in rows
+        ]})
+    if request.method == "DELETE":
+        cid = request.query.get("competitionId", "copy-trade-scenarios")
+        aid = request.query.get("agentId", "")
+        acid = request.query.get("exchangeAccountId", "")
+        await pool.execute(
+            "UPDATE public.competition_agent_exchanges SET is_active = FALSE "
+            "WHERE competition_id = $1 AND agent_id = $2 AND exchange_account_id = $3",
+            (cid, aid, int(acid)))
+        return _json({"ok": True})
+    try: body = await request.json()
+    except Exception: return _err(400, "invalid JSON")
+    await pool.execute(
+        "INSERT INTO public.competition_agent_exchanges "
+        "(competition_id, agent_id, exchange_account_id, priority, is_active) "
+        "VALUES ($1,$2,$3,$4,TRUE) ON CONFLICT (competition_id, agent_id, exchange_account_id) "
+        "DO UPDATE SET priority=$4, is_active=TRUE",
+        (body.get("competitionId","copy-trade-scenarios"), body.get("agentId",""),
+         int(body.get("exchangeAccountId",0)), int(body.get("priority",0))))
+    return _json({"ok": True, "message": "Assigned"})
+
+
 def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(prefix + "/api/candles", handle_candles)
     app.router.add_get(prefix + "/api/signal-replay", handle_signal_replay)
@@ -1438,3 +1927,17 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(prefix + "/api/unified-signals", handle_unified_signals)
     app.router.add_get(prefix + "/api/competition-agent", handle_competition_agent)
     app.router.add_get(prefix + "/api/traders-intel", handle_traders_intel)
+    # Exchange accounts (Phase Demo Bridge)
+    app.router.add_get(prefix + "/api/media/{id}", handle_media)
+    app.router.add_get(prefix + "/api/paper-vs-demo", handle_paper_vs_demo)
+    app.router.add_get(prefix + "/api/exchange-accounts", handle_exchange_accounts)
+    app.router.add_post(prefix + "/api/exchange-accounts", handle_exchange_accounts)
+    app.router.add_get(prefix + "/api/exchange-accounts/{id}", handle_exchange_account)
+    app.router.add_put(prefix + "/api/exchange-accounts/{id}", handle_exchange_account)
+    app.router.add_delete(prefix + "/api/exchange-accounts/{id}", handle_exchange_account)
+    app.router.add_post(prefix + "/api/exchange-accounts/{id}/test", handle_exchange_account_test)
+    app.router.add_post(prefix + "/api/exchange-accounts/{id}/sync-markets", handle_exchange_account_sync)
+    # Mirror config
+    app.router.add_get(prefix + "/api/mirror-config", handle_mirror_config)
+    app.router.add_post(prefix + "/api/mirror-config", handle_mirror_config)
+    app.router.add_delete(prefix + "/api/mirror-config", handle_mirror_config)
