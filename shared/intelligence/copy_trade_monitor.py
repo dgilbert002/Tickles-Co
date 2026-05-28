@@ -605,14 +605,19 @@ class LiveCopyTradeMonitor:
                         break
                     # Check BE lock threshold (+5%)
                     if not pos["be_locked"]:
+                        triggered = False
                         if pos["direction"] == "long" and hi >= pos["be_price"]:
-                            pos["be_locked"] = True
+                            triggered = True
                             pos["sl"] = pos["entry"] * 1.001  # SL→BE+fees
-                            pos["leverage"] = 100.0
                         elif pos["direction"] == "short" and lo <= pos["be_price"]:
+                            triggered = True
+                            pos["sl"] = pos["entry"] * 0.999  # SL→BE+fees
+                        if triggered:
+                            # Keep notional constant: adjust allocated when leverage jumps to 100x
+                            old_lev = pos["leverage"]
                             pos["be_locked"] = True
-                            pos["sl"] = pos["entry"] * 0.999
                             pos["leverage"] = 100.0
+                            pos["allocated"] = pos["allocated"] * (old_lev / 100.0)
 
             for pos, exit_px, reason, ts in to_close:
                 await self._close_agent_position(agent_name, pos, exit_px, reason)
