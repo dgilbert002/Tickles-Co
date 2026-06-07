@@ -261,8 +261,20 @@ async def arm_legs_from_llm(
             instrument_exchange=exchange,
             direction=direction,
             entry_price=entry_p,
-            stop_loss=_parse_price_level(trade.get("stop_loss")),
-            take_profit_1=_parse_price_level(trade.get("tp1") or trade.get("take_profit")),
+            stop_loss=_parse_price_level(
+                # The chart-analysis prompt asks for "stop_loss" but the LLM
+                # sometimes returns "stop" (bare) or nests it inside
+                # trade.levels.stop — accept all three forms.
+                trade.get("stop_loss")
+                or trade.get("stop")
+                or (trade.get("levels") or {}).get("stop")
+                or (trade.get("levels") or {}).get("stop_loss")
+            ),
+            take_profit_1=_parse_price_level(
+                trade.get("tp1")
+                or trade.get("take_profit")
+                or trade.get("target")
+            ),
             detection_method="llm_vision",
             detection_confidence=float(
                 trade.get("confidence") or trade.get("trader_confidence") or consensus.confidence or 0.0

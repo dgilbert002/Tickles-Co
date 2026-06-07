@@ -2323,7 +2323,9 @@ def _flatten_llm_levels(levels: Optional[Dict[str, Any]]) -> Dict[str, Optional[
     if not isinstance(levels, dict):
         return out
     out["entry_price"] = _coerce_level(levels.get("entry"))
-    out["stop_loss"] = _coerce_level(levels.get("stop_loss"))
+    out["stop_loss"] = _coerce_level(
+        levels.get("stop_loss") or levels.get("stop")
+    )
     # The chart-analysis prompt asks the LLM for a SINGULAR `take_profit`
     # (see prompts/chart_analysis.json + system_prompt strings). However we
     # store TP1..TP6 separately in the DB. Map the singular key into TP1
