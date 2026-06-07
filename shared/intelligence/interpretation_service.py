@@ -31,6 +31,11 @@ Hardening:
 
 from __future__ import annotations
 
+import re as _re
+
+# Options suffix regex: strips date-strike-type tails like -260531-90-P
+_OPTIONS_SUFFIX_RE = _re.compile(r"-\d{6}-\d+-[PC]$")
+
 import asyncio
 import base64
 import hashlib
@@ -131,6 +136,11 @@ class InterpretationConfig:
     fallback_model: str = FALLBACK_MODEL
     freshness_threshold_s: float = FRESHNESS_THRESHOLD_S
     media_retention_days: float = MEDIA_RETENTION_DAYS
+
+
+def _clean_instrument(symbol: str) -> str:
+    """Strip options-contract suffixes from LLM-returned instrument names."""
+    return _OPTIONS_SUFFIX_RE.sub("", symbol)
 
 
 @dataclass
@@ -1359,7 +1369,7 @@ async def run_llm_track(
                     confidence=legacy_confidence,
                     reasoning=legacy_reasoning,
                     levels=legacy_levels,
-                    instrument=str(parsed.get("instrument", "")).strip(),
+                    instrument=_clean_instrument(str(parsed.get("instrument", "")).strip()),
                     timeframe=str(parsed.get("timeframe", "")).strip(),
                     trader_trades=trader_trades,
                     chart_hacker_trades=chart_hacker_trades,

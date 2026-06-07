@@ -92,6 +92,19 @@ def _image_to_base64(path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+class _BlankDefaultDict(dict):
+    """dict that renders missing ``str.format_map`` keys as empty strings.
+
+    The configured prompt template may carry optional placeholders
+    (``{context}``, ``{recall_context}``, …). This lets the handler format
+    it without supplying every key, so editing the prompt file can never
+    crash the MCP tool with a ``KeyError``.
+    """
+
+    def __missing__(self, key: str) -> str:  # noqa: D401
+        return ""
+
+
 def _load_prompts() -> Dict[str, Any]:
     """Load chart analysis prompts from external JSON config.
 
@@ -263,6 +276,329 @@ def _extract_json_block(text: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_reinterpret_target(p: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Resolve media row + local image path for reinterpret.
+
+    Returns (context_dict, error_message).
+    """
+    media_id = p.get("mediaId") or p.get("media_id")
+    interp_id = p.get("interpretationId") or p.get("interpretation_id")
+    image_path = str(p.get("imagePath") or p.get("image_path") or "").strip()
+
+    if media_id is not None:
+        try:
+            media_id = int(media_id)
+        except (TypeError, ValueError):
+            return None, "mediaId must be an integer"
+    if interp_id is not None:
+        try:
+            interp_id = int(interp_id)
+        except (TypeError, ValueError):
+            return None, "interpretationId must be an integer"
+
+    if not media_id and not interp_id and not image_path:
+        return None, "one of mediaId, interpretationId, or imagePath is required"
+
+    pool = await _get_pool()
+
+    if media_id or interp_id:
+        if interp_id:
+            row = await pool.fetch_one(
+                """
+                SELECT
+                  m.id AS media_id, m.local_path, m.source_url, m.mime_type,
+                  n.id AS news_item_id, n.headline, n.content, n.source,
+                  n.author, n.channel_name, n.instruments, n.source_id,
+                  n.context_window,
+                  si.id AS interpretation_id,
+                  si.trader_profile_id,
+                  si.instrument_symbol AS prior_symbol,
+                  si.exchange AS prior_exchange,
+                  si.timeframe AS prior_timeframe,
+                  si.created_at AS interp_created_at,
+                  si.prompt_version AS prior_prompt_version,
+                  n.published_at AS news_published_at
+                FROM public.signal_interpretations si
+                JOIN public.media_items m ON m.id = si.media_item_id
+                JOIN public.news_items n ON n.id = si.news_item_id
+                WHERE si.id = $1
+                """,
+                (interp_id,),
+            )
+        else:
+            row = await pool.fetch_one(
+                """
+                SELECT
+                  m.id AS media_id, m.local_path, m.source_url, m.mime_type,
+                  n.id AS news_item_id, n.headline, n.content, n.source,
+                  n.author, n.channel_name, n.instruments, n.source_id,
+                  n.context_window,
+                  si.id AS interpretation_id,
+                  si.trader_profile_id,
+                  si.instrument_symbol AS prior_symbol,
+                  si.exchange AS prior_exchange,
+                  si.timeframe AS prior_timeframe,
+                  si.created_at AS interp_created_at,
+                  si.prompt_version AS prior_prompt_version,
+                  n.published_at AS news_published_at
+                FROM public.media_items m
+                JOIN public.news_items n ON n.id = m.news_item_id
+                LEFT JOIN LATERAL (
+                  SELECT id, trader_profile_id, instrument_symbol, prompt_version,
+                         exchange, timeframe, created_at
+                  FROM public.signal_interpretations
+                  WHERE media_item_id = m.id
+                  ORDER BY created_at DESC
+                  LIMIT 1
+                ) si ON TRUE
+                WHERE m.id = $1
+                """,
+                (media_id,),
+            )
+        if not row:
+            key = f"interpretationId={interp_id}" if interp_id else f"mediaId={media_id}"
+            return None, f"no media/news context found for {key}"
+        ctx = dict(row)
+        local_path = ctx.get("local_path")
+        if not local_path or not os.path.isfile(local_path):
+            source_url = ctx.get("source_url")
+            if not source_url:
+                return None, f"media_id={ctx['media_id']} has no local file and no source_url"
+            try:
+                import aiohttp
+                import tempfile
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        source_url, timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status != 200:
+                            return None, f"CDN download failed HTTP {resp.status}"
+                        suffix = ".png" if ".png" in source_url.lower() else ".jpg"
+                        fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="tickles_reinterpret_")
+                        os.close(fd)
+                        with open(tmp_path, "wb") as fh:
+                            fh.write(await resp.read())
+                        ctx["local_path"] = tmp_path
+                        ctx["_temp_path"] = tmp_path
+            except Exception as exc:
+                return None, f"CDN download error: {exc}"
+        return ctx, None
+
+    if not os.path.isfile(image_path):
+        return None, f"imagePath not found: {image_path}"
+    return {
+        "media_id": None,
+        "local_path": image_path,
+        "news_item_id": None,
+        "headline": str(p.get("headline") or ""),
+        "content": str(p.get("context") or p.get("newsContext") or ""),
+        "source": str(p.get("source") or "discord"),
+        "author": str(p.get("author") or "unknown"),
+        "channel_name": str(p.get("channelName") or ""),
+        "instruments": None,
+        "source_id": None,
+        "context_window": None,
+        "interpretation_id": interp_id,
+        "trader_profile_id": int(p.get("traderProfileId") or 0),
+        "prior_symbol": str(p.get("symbol") or "UNKNOWN"),
+        "prior_prompt_version": None,
+    }, None
+
+
+async def _handle_reinterpret(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-read a chart with the production Lens prompt (DB prompt_versions).
+
+    By default returns preview only (no DB writes). Set ``persist`` to update an
+    existing ``signal_interpretations`` row; set ``rearm`` to also cancel pending
+    legs and arm new tracked_positions (requires ``interpretationId``).
+    """
+    persist = bool(p.get("persist", False))
+    rearm = bool(p.get("rearm", False))
+    if rearm:
+        persist = True
+    interp_id = p.get("interpretationId") or p.get("interpretation_id")
+    if (persist or rearm) and not interp_id:
+        return {
+            "ok": False,
+            "error": "interpretationId is required when persist or rearm is true",
+        }
+
+    ctx, err = await _resolve_reinterpret_target(p)
+    if err:
+        return {"ok": False, "error": err}
+
+    prompt_version = str(
+        p.get("promptVersion") or p.get("prompt_version") or ""
+    ).strip() or None
+    include_quant = bool(p.get("includeQuant", True))
+    include_recall = bool(p.get("includeRecall", False))
+    include_candles = bool(p.get("includeCandles", True))
+    symbol_override = str(p.get("symbol") or "").strip()
+
+    try:
+        from datetime import datetime, timezone
+        from shared.utils.correlation import new_correlation_id
+        from shared.intelligence.interpretation_service import (
+            InterpretationConfig,
+            build_reinterpret_response,
+            get_or_create_trader_profile,
+            resolve_instrument_symbol,
+            run_consensus,
+            run_llm_track,
+            run_quant_track,
+            _format_context_window,
+            _parse_llm_json,
+            _recall_relevant_memories,
+        )
+        from shared.intelligence.reinterpret_legs import enrich_reinterpret_with_legs
+        from shared.intelligence.reinterpret_persist import persist_reinterpret_from_llm
+        from shared.intelligence.text_signal_extractor import strip_reply_prefix
+
+        pool = await _get_pool()
+        cfg = InterpretationConfig()
+
+        news_source = (ctx.get("source") or "discord").lower()
+        author = ctx.get("author") or "unknown"
+        platform = "telegram" if news_source == "telegram" else "discord"
+
+        trader_profile_id = int(ctx.get("trader_profile_id") or 0)
+        if not trader_profile_id:
+            trader_profile_id = await get_or_create_trader_profile(
+                pool, platform, author or "unknown", display_name=author,
+            )
+
+        symbol, exchange = await resolve_instrument_symbol(pool, ctx.get("instruments"))
+        if symbol_override:
+            symbol = symbol_override
+        elif not symbol:
+            symbol = str(ctx.get("prior_symbol") or "UNKNOWN")
+        if not exchange:
+            exchange = "bybit"
+
+        clean_headline = strip_reply_prefix(ctx.get("headline") or "")
+        clean_content = strip_reply_prefix(ctx.get("content") or "")
+        news_context = f"{clean_headline}\n{clean_content}"[:1000]
+        ctx_txt = _format_context_window(ctx.get("context_window"), author)
+        if ctx_txt:
+            news_context = f"{news_context}\n\n{ctx_txt}"
+
+        cid = new_correlation_id("mcp_reinterpret")
+        recall_context = ""
+        if include_recall:
+            recall_context = await _recall_relevant_memories(
+                company=_default_company(p),
+                symbol=symbol if symbol and symbol != "UNKNOWN" else None,
+                direction=None,
+                trader_handle=author if author != "unknown" else None,
+                shared_pool=pool,
+                correlation_id=cid,
+            )
+
+        quant = None
+        consensus = None
+        if include_quant and symbol and symbol != "UNKNOWN":
+            quant = await run_quant_track(
+                pool, pool, symbol, exchange, cfg.freshness_threshold_s,
+            )
+
+        llm = await run_llm_track(
+            cfg=cfg,
+            image_path=ctx["local_path"],
+            news_context=news_context,
+            instrument_symbol=symbol,
+            correlation_id=cid,
+            recall_context=recall_context,
+            news_source=news_source,
+            channel_name=str(ctx.get("channel_name") or ""),
+            trader_profile_id=trader_profile_id,
+            shared_pool=pool,
+            prompt_version_override=prompt_version,
+            chart_hacker_quant=quant,
+        )
+
+        if llm.instrument and (not symbol or symbol == "UNKNOWN"):
+            symbol = llm.instrument
+        if llm.timeframe:
+            pass  # surfaced in response
+
+        parsed = _parse_llm_json(llm.raw_response)
+        if include_quant and quant is not None:
+            consensus = run_consensus(llm, quant)
+
+        meta = {
+            "media_id": ctx.get("media_id"),
+            "interpretation_id": ctx.get("interpretation_id"),
+            "news_item_id": ctx.get("news_item_id"),
+            "prior_prompt_version": ctx.get("prior_prompt_version"),
+            "correlation_id": cid,
+            "image_path": ctx.get("local_path"),
+            "author": author,
+            "source": news_source,
+            "instrument_symbol_resolved": symbol,
+            "exchange": exchange,
+            "persisted": persist,
+            "rearmed": rearm,
+        }
+        result = build_reinterpret_response(
+            llm, parsed=parsed, consensus=consensus, quant=quant, meta=meta,
+        )
+
+        call_ts = ctx.get("news_published_at") or ctx.get("interp_created_at")
+        if call_ts is None:
+            call_ts = datetime.now(timezone.utc)
+        elif isinstance(call_ts, datetime) and call_ts.tzinfo is None:
+            call_ts = call_ts.replace(tzinfo=timezone.utc)
+
+        if persist or rearm:
+            from shared.intelligence.interpretation_service import QuantResult
+            persist_quant = quant if quant is not None else QuantResult()
+            persist_consensus = consensus if consensus is not None else run_consensus(llm, persist_quant)
+            persist_result = await persist_reinterpret_from_llm(
+                pool,
+                int(ctx["interpretation_id"]),
+                ctx,
+                llm,
+                persist_consensus,
+                persist_quant,
+                rearm=rearm,
+                correlation_id=cid,
+            )
+            result["persist_result"] = persist_result
+            meta["persisted"] = True
+            meta["rearmed"] = rearm
+
+        if include_candles:
+            from shared.dashboard.market_routes import _resolve_candle_symbol
+            candle_symbol = _resolve_candle_symbol(
+                llm.instrument or symbol,
+                symbol if symbol and symbol != "UNKNOWN" else "BTC/USDT",
+            )
+            result = await enrich_reinterpret_with_legs(
+                result,
+                pool=pool,
+                default_symbol=candle_symbol,
+                default_exchange=exchange,
+                call_ts=call_ts,
+                interpretation_id=int(ctx["interpretation_id"]) if ctx.get("interpretation_id") else None,
+                include_candles=True,
+                include_position_updates=bool(persist or rearm),
+            )
+
+        return result
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        logger.exception("reinterpret failed")
+        return {"ok": False, "error": str(exc)}
+    finally:
+        tmp = (ctx or {}).get("_temp_path")
+        if tmp and os.path.isfile(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 async def _handle_chart_analyze(p: Dict[str, Any]) -> Dict[str, Any]:
     """Analyze a chart image with a vision LLM.
 
@@ -306,7 +642,9 @@ async def _handle_chart_analyze(p: Dict[str, Any]) -> Dict[str, Any]:
         "key support/resistance levels, any chart pattern, and your confidence. "
         "Output ONLY valid JSON.",
     )
-    user_prompt = user_template.format(symbol=symbol)
+    user_prompt = user_template.format_map(
+        _BlankDefaultDict(symbol=symbol, context=str(p.get("context", "")))
+    )
 
     try:
         data_uri = _image_to_base64(image_path)
@@ -679,8 +1017,102 @@ def _build_tools(_ctx: ToolContext) -> List[Tuple[McpTool, Any]]:
     return [
         (
             McpTool(
+                name="intelligence.reinterpret",
+                description=(
+                    "Re-read a chart with the production Lens prompt from prompt_versions "
+                    "(DB). Returns the FULL schema: instrument, timeframe, setup_state, "
+                    "trader_trades[] (multiple legs), chart_hacker_trades[], chart_analysis, "
+                    "market views, sentiments, ai_agreement_with_trader, reasoning, parsed "
+                    "raw JSON, legacy primary fields, optional quant+consensus, per-leg "
+                    "candles (includeCandles), and optional persist/rearm onto an existing "
+                    "interpretationId."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "mediaId": {
+                            "type": "integer",
+                            "description": "media_items.id to re-read.",
+                        },
+                        "interpretationId": {
+                            "type": "integer",
+                            "description": "signal_interpretations.id (resolves media + news).",
+                        },
+                        "imagePath": {
+                            "type": "string",
+                            "description": "Absolute path when no DB media row (standalone test).",
+                        },
+                        "promptVersion": {
+                            "type": "string",
+                            "description": (
+                                "Exact prompt_versions.version, e.g. "
+                                "2026.05.30-discord-semantic-v8. Default: loader chain "
+                                "(trader prompt_id → source → newest Discord)."
+                            ),
+                        },
+                        "companyId": {
+                            "type": "string",
+                            "description": "Company for recall context (default jarvais).",
+                        },
+                        "includeQuant": {
+                            "type": "boolean",
+                            "description": "Run quant track + consensus (default true).",
+                        },
+                        "includeRecall": {
+                            "type": "boolean",
+                            "description": "Inject mem0 recall into prompt (default false).",
+                        },
+                        "includeCandles": {
+                            "type": "boolean",
+                            "description": (
+                                "Attach legs[] with per-trade timeframe + candles (default true). "
+                                "Uses same symbol/TF resolution as dashboard signal-replay."
+                            ),
+                        },
+                        "persist": {
+                            "type": "boolean",
+                            "description": (
+                                "Write LLM result to signal_interpretations (requires interpretationId). "
+                                "Default false — preview only."
+                            ),
+                        },
+                        "rearm": {
+                            "type": "boolean",
+                            "description": (
+                                "Cancel pending/open legs and arm new tracked_positions "
+                                "(requires interpretationId; implies persist). Default false."
+                            ),
+                        },
+                        "symbol": {
+                            "type": "string",
+                            "description": "Override instrument symbol for imagePath-only runs.",
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "News/discord text for imagePath-only runs.",
+                        },
+                        "author": {
+                            "type": "string",
+                            "description": "Trader handle for imagePath-only runs.",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "discord|telegram for prompt selection (default discord).",
+                        },
+                    },
+                },
+                tags={"phase": "3b", "group": "intelligence"},
+            ),
+            _handle_reinterpret,
+        ),
+        (
+            McpTool(
                 name="intelligence.chart_analyze",
-                description="Analyze a chart image with a vision LLM and return structured trading signal.",
+                description=(
+                    "Quick vision read using the legacy MCP JSON file prompt (simplified "
+                    "schema). For production dual-track output with multiple trades, use "
+                    "intelligence.reinterpret instead."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -933,27 +1365,6 @@ def _build_tools(_ctx: ToolContext) -> List[Tuple[McpTool, Any]]:
         ),
         (
             McpTool(
-                name="intelligence.guru.report",
-                description="Get the latest ChartHacker guru cross-trader comparison report.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "sourceSlug": {
-                            "type": "string",
-                            "description": "Source slug (default charthackers_discord).",
-                        },
-                        "days": {
-                            "type": "integer",
-                            "description": "Lookback for report files (default 7).",
-                        },
-                    },
-                },
-                tags={"phase": "3c", "group": "intelligence"},
-            ),
-            _handle_guru_report,
-        ),
-        (
-            McpTool(
                 name="intelligence.epic.resolve",
                 description="Resolve a trading symbol to a Capital.com epic code for CFD trading.",
                 input_schema={
@@ -978,11 +1389,71 @@ def _build_tools(_ctx: ToolContext) -> List[Tuple[McpTool, Any]]:
             ),
             _handle_epic_resolve,
         ),
+        (
+            McpTool(
+                name="intelligence.critic.compare",
+                description=(
+                    "On-demand chart_hacker critic run vs trader setup. Fetches open "
+                    "positions (by id list or latest N), enriches with live quant/funding/"
+                    "RSI/trader score, calls the critic LLM, and returns a side-by-side "
+                    "comparison with any stored agent_opinion. Default is dry-run (no DB "
+                    "write); set persist=true to save opinions."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "companyId": {
+                            "type": "string",
+                            "description": "Optional tenant filter (tracked_positions.company_id).",
+                        },
+                        "positionIds": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": "Specific tracked_position ids to compare.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max positions when positionIds omitted (default 10, max 25).",
+                            "default": 10,
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "Position status filter (default open).",
+                            "default": "open",
+                        },
+                        "traderProfileId": {
+                            "type": "integer",
+                            "description": "Filter to one trader profile when no positionIds.",
+                        },
+                        "actorId": {
+                            "type": "string",
+                            "description": "Exact actor_id match.",
+                        },
+                        "actorIds": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Match any of these actor_id values.",
+                        },
+                        "actorIdPrefix": {
+                            "type": "string",
+                            "description": "Optional actor_id prefix filter (SQL LIKE).",
+                        },
+                        "persist": {
+                            "type": "boolean",
+                            "description": "Write agent_opinions + level backfill (default false).",
+                            "default": False,
+                        },
+                    },
+                },
+                tags={"phase": "8", "group": "intelligence", "status": "live"},
+            ),
+            _handle_critic_compare,
+        ),
     ]
 
 
 # ---------------------------------------------------------------------------
-# Phase 3C: Position tracking & ChartHacker guru query tools
+# Phase 3C: Position tracking query tools
 # ---------------------------------------------------------------------------
 
 async def _handle_positions_open(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -1016,23 +1487,23 @@ async def _handle_positions_open(p: Dict[str, Any]) -> Dict[str, Any]:
         rows = await pool.fetch_all(
             f"""
             SELECT
-                tp.id, tp.trader_profile_id, tpf.display_name, tpf.platform_handle,
-                tp.instrument_symbol, tp.instrument_epic, tp.side,
-                tp.entry_price, tp.stop_loss, tp.take_profit,
-                tp.status, tp.outcome, tp.realized_pnl,
-                tp.detected_at, tp.closed_at, tp.rr_at_entry,
-                tp.metadata
+                tp.id, tp.trader_profile_id, tpf.display_name, tpf.handle_normalized AS platform_handle,
+                tp.instrument_symbol, tp.epic_code AS instrument_epic, tp.direction AS side,
+                tp.entry_price, tp.stop_loss, tp.take_profit_1 AS take_profit,
+                tp.status, tp.outcome, tp.realized_pnl_usd AS realized_pnl,
+                tp.created_at AS detected_at, tp.exit_timestamp AS closed_at, tp.risk_reward_ratio AS rr_at_entry,
+                tp.metadata,
+                n.channel_name, n.collected_at AS posted_at
             FROM public.tracked_positions tp
             JOIN public.trader_profiles tpf ON tpf.id = tp.trader_profile_id
-            JOIN public.collector_catalog cc ON cc.id = tpf.source_id
+            JOIN public.news_items n ON n.id = tp.news_item_id
+            JOIN public.collector_catalog cc ON cc.source_type = tpf.platform
             WHERE {where_clause}
             AND cc.source_slug = ${arg_idx}
-            ORDER BY tp.detected_at DESC
+            ORDER BY tp.created_at DESC
             LIMIT ${arg_idx + 1}
             """,
-            *args,
-            source_slug,
-            limit,
+            tuple(args) + (source_slug, limit),
         )
         positions = []
         for r in rows:
@@ -1055,6 +1526,8 @@ async def _handle_positions_open(p: Dict[str, Any]) -> Dict[str, Any]:
                     "closed_at": _fmt_ts(r["closed_at"]),
                     "rr_at_entry": float(r["rr_at_entry"]) if r["rr_at_entry"] else None,
                     "metadata": r["metadata"],
+                    "channel_name": r["channel_name"],
+                    "posted_at": _fmt_ts(r["posted_at"]),
                 }
             )
         return {"ok": True, "count": len(positions), "positions": positions}
@@ -1176,29 +1649,29 @@ async def _handle_traders_leaderboard(p: Dict[str, Any]) -> Dict[str, Any]:
             SELECT
                 tpf.id AS trader_profile_id,
                 tpf.display_name,
-                tpf.platform_handle,
+                tpf.handle_normalized AS platform_handle,
                 COUNT(tp.id) AS total_trades,
-                SUM(CASE WHEN tp.outcome = 'take_profit' THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN tp.outcome = 'stop_loss' THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN tp.outcome = 'tp1_hit' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN tp.outcome = 'sl_hit' THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN tp.outcome = 'breakeven' THEN 1 ELSE 0 END) AS breakevens,
-                COALESCE(SUM(tp.realized_pnl), 0) AS total_pnl,
+                COALESCE(SUM(tp.realized_pnl_usd), 0) AS total_pnl,
                 CASE
                     WHEN COUNT(CASE WHEN tp.outcome IS NOT NULL THEN 1 END) > 0
-                    THEN SUM(CASE WHEN tp.outcome = 'take_profit' THEN 1 ELSE 0 END)::float
+                    THEN SUM(CASE WHEN tp.outcome = 'tp1_hit' THEN 1 ELSE 0 END)::float
                          / COUNT(CASE WHEN tp.outcome IS NOT NULL THEN 1 END) * 100
                     ELSE 0
                 END AS win_rate_pct
             FROM public.trader_profiles tpf
-            JOIN public.collector_catalog cc ON cc.id = tpf.source_id
+            JOIN public.collector_catalog cc ON cc.source_type = tpf.platform
             LEFT JOIN public.tracked_positions tp
                 ON tp.trader_profile_id = tpf.id
-                AND tp.detected_at >= NOW() - INTERVAL '%s days'
+                AND tp.created_at >= NOW() - INTERVAL '%s days'
             WHERE cc.source_slug = $1
-            GROUP BY tpf.id, tpf.display_name, tpf.platform_handle
+            GROUP BY tpf.id, tpf.display_name, tpf.handle_normalized
             ORDER BY %s DESC
             """
             % (days, order_col),
-            source_slug,
+            (source_slug,),
         )
         traders = []
         for r in rows:
@@ -1220,63 +1693,6 @@ async def _handle_traders_leaderboard(p: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "count": len(traders), "metric": metric, "days": days, "traders": traders}
     except Exception as exc:
         logger.exception("traders_leaderboard query failed")
-        return {"ok": False, "error": str(exc)}
-
-
-async def _handle_guru_report(p: Dict[str, Any]) -> Dict[str, Any]:
-    """Get the latest ChartHacker guru report metadata.
-
-    Params:
-        sourceSlug (str, optional): Source slug (default charthackers_discord).
-        days (int, optional): Lookback for report files (default 7).
-
-    Returns:
-        Dict with latest report path, generation time, and summary.
-    """
-    source_slug = str(p.get("sourceSlug", "charthackers_discord"))
-    days = min(int(p.get("days", 7)), 30)
-
-    try:
-        from shared.intelligence.chart_hacker_guru import REPORT_DIR as _default_dir
-
-        report_dir = os.environ.get("GURU_REPORT_DIR", _default_dir)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        latest_txt: Optional[str] = None
-        latest_json: Optional[str] = None
-        latest_mtime: Optional[datetime] = None
-
-        for f in Path(report_dir).glob("chart_hacker_guru_*.txt"):
-            try:
-                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
-                if mtime >= cutoff and (latest_mtime is None or mtime > latest_mtime):
-                    latest_txt = str(f)
-                    latest_json = str(f.with_suffix(".json"))
-                    latest_mtime = mtime
-            except Exception:
-                continue
-
-        if latest_txt is None:
-            return {"ok": True, "found": False, "source_slug": source_slug, "days": days}
-
-        # Read JSON summary if available
-        summary: Dict[str, Any] = {}
-        if latest_json and Path(latest_json).exists():
-            try:
-                summary = json.loads(Path(latest_json).read_text(encoding="utf-8"))
-            except Exception:
-                pass
-
-        return {
-            "ok": True,
-            "found": True,
-            "source_slug": source_slug,
-            "report_txt_path": latest_txt,
-            "report_json_path": latest_json,
-            "generated_at": _fmt_ts(latest_mtime),
-            "summary": summary,
-        }
-    except Exception as exc:
-        logger.exception("guru_report query failed")
         return {"ok": False, "error": str(exc)}
 
 
@@ -1342,6 +1758,48 @@ async def _handle_epic_resolve(p: Dict[str, Any]) -> Dict[str, Any]:
         }
     except Exception as exc:
         logger.exception("epic_resolve failed")
+        return {"ok": False, "error": str(exc)}
+
+
+async def _handle_critic_compare(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Run fresh chart_hacker critic vs trader setup (on-demand, no daemon wait).
+
+    By default dry-run: calls the LLM but does NOT write ``agent_opinions``.
+    Set ``persist`` true to save results like the opinion daemon would.
+    """
+    from shared.intelligence.critic_compare import run_critic_compare
+
+    company_id = p.get("companyId") or p.get("company_id")
+    if company_id is not None:
+        company_id = str(company_id).strip() or None
+    position_ids = p.get("positionIds") or p.get("position_ids")
+    if position_ids is not None:
+        position_ids = [int(x) for x in position_ids]
+
+    limit = min(int(p.get("limit", 10)), 25)
+    status = str(p.get("status", "open"))
+    trader_profile_id = p.get("traderProfileId") or p.get("trader_profile_id")
+    if trader_profile_id is not None:
+        trader_profile_id = int(trader_profile_id)
+    actor_id = p.get("actorId") or p.get("actor_id")
+    actor_ids = p.get("actorIds") or p.get("actor_ids")
+    actor_prefix = p.get("actorIdPrefix") or p.get("actor_id_prefix")
+    persist = bool(p.get("persist", False))
+
+    try:
+        return await run_critic_compare(
+            company_id=company_id,
+            position_ids=position_ids,
+            limit=limit,
+            status=status,
+            trader_profile_id=trader_profile_id,
+            actor_id=str(actor_id) if actor_id else None,
+            actor_ids=[str(a) for a in actor_ids] if actor_ids else None,
+            actor_id_prefix=str(actor_prefix) if actor_prefix else None,
+            persist=persist,
+        )
+    except Exception as exc:
+        logger.exception("critic_compare failed")
         return {"ok": False, "error": str(exc)}
 
 
