@@ -1172,6 +1172,22 @@ async def run_llm_track(
         )
         logger.warning("chart_analysis.json system_prompt missing -- using hardcoded fallback")
     user_template = prompts.get("user_prompt_template", "Analyze this chart. Identify the trading instrument from the chart itself.\nNews context: {context}\n\n{recall_context}")
+
+    # Append JSON output format to the system prompt so the model always knows
+    # which fields to return.  The DB prompt has prose instructions for symbol
+    # identification but no output schema -- without this the model infers a
+    # schema that omits ``instrument``.
+    _OUTPUT_SCHEMA = (
+        "\n\nJSON OUTPUT FORMAT — Respond ONLY with this exact structure:\n"
+        '{"instrument": "ticker or UNKNOWN (read from chart header/message/watermark)",\n'
+        ' "direction": "long" | "short" | "neutral" | "unclear",\n'
+        ' "confidence": 0.0-1.0,\n'
+        ' "reasoning": "brief text (max 300 chars)",\n'
+        ' "levels": {"entry": "...", "stop_loss": "...", "take_profit": "..."}}\n'
+        "No markdown, no prose outside the JSON. Always include the instrument field."
+    )
+    system_prompt += _OUTPUT_SCHEMA
+
     # Render the prompt with whichever placeholders the template uses. We
     # support {symbol}, {context}, {recall_context} -- all optional.
     try:

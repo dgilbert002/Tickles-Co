@@ -46,6 +46,12 @@ for p in (_ROOT, _SHARED):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+# Options suffix regex: strips date-strike-type tails like -260531-90-P
+# from options-contract symbols so the resolver can match the base pair
+# (e.g. "SOL/USDT") in the instruments table.
+import re as _re
+_OPTIONS_SUFFIX_RE = _re.compile(r"-\d{6}-\d+-[PC]$")
+
 from shared.utils.config import load_env
 from shared.utils.db import DatabasePool, get_shared_pool
 from shared.utils.instrument_normaliser import normalise_venue, to_canonical_symbol
@@ -436,8 +442,14 @@ async def _resolve_instrument_id_impl(
         instruments.id or None when no resolution is possible.
     """
 
-    # Normalize perp suffixes for instrument lookup
-    raw_symbol = raw_symbol.replace(":USDT", "").replace(":USDC", "").replace(".P", "") if raw_symbol else raw_symbol
+    # Normalize perp/option suffixes for instrument lookup.
+    # Options contracts (e.g. "SOL/USDT:USDT-260531-90-P") carry a date-
+    # strike-type suffix that the instruments table doesn't store; without
+    # stripping it the resolver returns None, the monitor skips the position,
+    # and pending -> open activation never fires (no candles, no CCXT fallback).
+    if raw_symbol:
+        raw_symbol = _OPTIONS_SUFFIX_RE.sub("", raw_symbol)
+        raw_symbol = raw_symbol.replace(":USDT", "").replace(":USDC", "").replace(".P", "")
 
     canonical_symbol = to_canonical_symbol(raw_symbol)
     canonical_exchange = normalise_venue(raw_exchange) if raw_exchange else ""
@@ -909,42 +921,49 @@ async def _find_entry_touch_candle(
         ``current_price`` at activation time.
     """
     instrument_id = await _resolve_instrument_id(pool, symbol, exchange)
-    if instrument_id is None:
-        return None
+
+    # If the resolver can't map the symbol to an instrument (e.g. options
+    # suffixes, Capital.com stocks, inactive instruments), skip the local
+    # ``candles`` table and fall straight through to the CCXT OHLCV query
+    # below. For instruments WITH a valid id, try the local table first.
     since_utc = ensure_utc(since)
     not_before_utc = ensure_utc(not_before)
-    # The effective floor for the timestamp search is the LATER of
-    # ``since`` (anti-historical-retrofit) and ``not_before`` (recency).
     floor_ts = since_utc
     if not_before_utc is not None and not_before_utc > since_utc:
         floor_ts = not_before_utc
-    try:
-        row = await pool.fetch_one(
-            """
-            SELECT "timestamp", high, low, close
-            FROM public.candles
-            WHERE instrument_id = $1
-              AND timeframe = $2
-              AND "timestamp" > $3
-              AND low <= $4
-              AND high >= $4
-            ORDER BY "timestamp" ASC
-            LIMIT 1
-            """,
-            (instrument_id, timeframe, floor_ts, entry),
-        )
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.exception(
-            "_find_entry_touch_candle query failed instrument_id=%s tf=%s: %s",
-            instrument_id, timeframe, exc,
-        )
-        row = None
 
-    if row is None:
+    if instrument_id is not None:
         try:
-            # 2026-05-23: Safe pending queue check optimization.
-            # Check if local candles are up-to-date (fresh). If they are, and there's no local touch,
-            # we don't need the slow CCXT API fallback query!
+            row = await pool.fetch_one(
+                """
+                SELECT "timestamp", high, low, close
+                FROM public.candles
+                WHERE instrument_id = $1
+                  AND timeframe = $2
+                  AND "timestamp" > $3
+                  AND low <= $4
+                  AND high >= $4
+                ORDER BY "timestamp" ASC
+                LIMIT 1
+                """,
+                (instrument_id, timeframe, floor_ts, entry),
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.exception(
+                "_find_entry_touch_candle query failed instrument_id=%s tf=%s: %s",
+                instrument_id, timeframe, exc,
+            )
+            row = None
+
+        if row is not None:
+            # Candle touch found locally — activate immediately.
+            ts = ensure_utc(row["timestamp"])
+            return (ts, float(row["close"]))
+
+        # 2026-05-23: Safe pending queue check optimization.
+        # If local candles are fresh (<10 min old) and no touch was found,
+        # the position genuinely hasn't hit entry — skip the slow CCXT fallback.
+        try:
             max_ts = await pool.fetch_val(
                 """
                 SELECT MAX("timestamp") FROM public.candles
@@ -963,47 +982,47 @@ async def _find_entry_touch_candle(
         except Exception as t_exc:
             logger.warning("Failed to check local candle freshness for %s: %s", symbol, t_exc)
 
-        # Round 12 (2026-05-24): use multi-venue OHLCV helper. Adapter
-        # construction + auth + cleanup all live inside the helper so we
-        # only branch on "got candles? scan them" here.
-        try:
-            logger.info(
-                "_find_entry_touch_candle: Local touch not found for %s. "
-                "Checking OHLCV fallback via %s.",
-                symbol, exchange or "bybit",
+    # --- CCXT / Capital.com OHLCV fallback (reachable from both paths) ---
+    # This runs when: (a) instrument_id couldn't be resolved at all
+    # (options/Capital.com/inactive), OR (b) local candles are stale or
+    # have no touch. ``_fetch_ohlcv_for_market`` handles bybit/blofin/bitget
+    # via CCXT and capital.com via its own adapter.
+    try:
+        logger.info(
+            "_find_entry_touch_candle: Local touch not found for %s. "
+            "Checking OHLCV fallback via %s.",
+            symbol, exchange or "bybit",
+        )
+        ccxt_candles = await _fetch_ohlcv_for_market(
+            symbol=symbol,
+            exchange=exchange,
+            timeframe=timeframe,
+            since_utc=floor_ts,
+            limit=1000,
+            adapters=adapters,
+        )
+        if ccxt_candles:
+            logger.debug(
+                "_find_entry_touch_candle: fetched %d candles for %s "
+                "(exchange=%s)",
+                len(ccxt_candles), symbol, exchange or "bybit",
             )
-            ccxt_candles = await _fetch_ohlcv_for_market(
-                symbol=symbol,
-                exchange=exchange,
-                timeframe=timeframe,
-                since_utc=floor_ts,
-                limit=1000,
-                adapters=adapters,
-            )
-            if ccxt_candles:
-                logger.debug(
-                    "_find_entry_touch_candle: fetched %d candles for %s "
-                    "(exchange=%s)",
-                    len(ccxt_candles), symbol, exchange or "bybit",
-                )
-                for c in ccxt_candles:
-                    hi = float(c.high)
-                    lo = float(c.low)
-                    if lo <= entry <= hi:
-                        logger.info(
-                            "Entry touch found via OHLCV fallback for %s at "
-                            "%s (entry=%.6f, low=%.6f, high=%.6f)",
-                            symbol, c.timestamp, entry, lo, hi,
-                        )
-                        return c.timestamp, float(c.close)
-        except Exception as fallback_exc:
-            logger.warning(
-                "_find_entry_touch_candle OHLCV fallback failed for %s: %s",
-                symbol, fallback_exc,
-            )
-        return None
-
-    return row["timestamp"], float(row["close"])
+            for c in ccxt_candles:
+                hi = float(c.high)
+                lo = float(c.low)
+                if lo <= entry <= hi:
+                    logger.info(
+                        "Entry touch found via OHLCV fallback for %s at "
+                        "%s (entry=%.6f, low=%.6f, high=%.6f)",
+                        symbol, c.timestamp, entry, lo, hi,
+                    )
+                    return c.timestamp, float(c.close)
+    except Exception as fallback_exc:
+        logger.warning(
+            "_find_entry_touch_candle OHLCV fallback failed for %s: %s",
+            symbol, fallback_exc,
+        )
+    return None
 
 
 async def fetch_latest_price_by_epic(
