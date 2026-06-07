@@ -259,7 +259,7 @@ class DemoBridge:
             "WHERE tp.status IN ('pending', 'open') "
             "AND tp.entry_price > 0 "
             "AND tp.id != ALL($1::bigint[]) "
-            "AND tp.signal_timestamp >= NOW() - INTERVAL '7 days' "
+            "AND tp.signal_timestamp >= NOW() - INTERVAL '24 hours' "
             "ORDER BY tp.signal_timestamp ASC "
             "LIMIT 50",
             (exclude,)
