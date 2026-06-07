@@ -293,6 +293,10 @@ class CapitalAdapter(BaseExchangeAdapter):
 
                     if resp.status != 200:
                         body = await resp.text()
+                        # "prices.not-found" = no data in date range (weekend /
+                        # market closed) — not an error, return empty list.
+                        if "prices.not-found" in body or "not-found" in body:
+                            return []
                         raise ConnectionError(
                             f"API error {resp.status}: {body}"
                         )

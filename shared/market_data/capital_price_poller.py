@@ -28,17 +28,19 @@ logger = logging.getLogger("capital.poller")
 POLL_INTERVAL_S = int(os.environ.get("CAPITAL_POLL_INTERVAL_S", "60"))
 
 # Capital.com epic codes for the 10 seeded instruments
+# Bare symbol names work directly with the Capital.com demo API /prices endpoint.
+# Full epic IDs (CS.D.*.CFD.IP) are not needed for demo — they 404.
 EPIC_MAP = {
-    "GOLD":    "CS.D.CFDGOLD.CFD.IP",
-    "SILVER":  "CS.D.CFDSILVER.CFD.IP",
-    "OIL":     "CS.D.BRENT.CFD.IP",
-    "DE40":    "CS.D.DE40.CFD.IP",
-    "US500":   "CS.D.US500.CFD.IP",
-    "US100":   "CS.D.US100.CFD.IP",
-    "EURUSD":  "CS.D.EURUSD.CFD.IP",
-    "GBPUSD":  "CS.D.GBPUSD.CFD.IP",
-    "USDJPY":  "CS.D.USDJPY.CFD.IP",
-    "SOXL":    "CS.D.SOXL.CFD.IP",
+    "GOLD":    "GOLD",
+    "SILVER":  "SILVER",
+    "OIL":     "OIL_BRENT",
+    "DE40":    "DE40",
+    "US500":   "US500",
+    "US100":   "US100",
+    "EURUSD":  "EURUSD",
+    "GBPUSD":  "GBPUSD",
+    "USDJPY":  "USDJPY",
+    "SOXL":    "SOXL",
 }
 
 

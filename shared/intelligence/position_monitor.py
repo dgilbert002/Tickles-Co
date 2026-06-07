@@ -94,6 +94,39 @@ logger = logging.getLogger("tickles.intelligence.position_monitor")
 # This helper is intentionally NOT a class method — it has no state, only
 # adapter caching, which is owned by the caller's ``adapters`` dict.
 # ---------------------------------------------------------------------------
+
+# -- Capital.com epic mapping (shared with capital_price_poller.py) ----------
+# The router stores bare symbol names (EURUSD, GOLD) in its epic_code field,
+# but Capital.com's REST API expects full epic IDs (CS.D.EURUSD.CFD.IP).
+# This map translates the bare names. Patterns:
+#   * Most: CS.D.{SYMBOL}.CFD.IP  (EURUSD → CS.D.EURUSD.CFD.IP)
+#   * Commodities with CFD prefix: GOLD → CS.D.CFDGOLD.CFD.IP
+#     SILVER → CS.D.CFDSILVER.CFD.IP, OIL → CS.D.BRENT.CFD.IP
+#   * Indices / stocks: use symbol as-is in the middle segment
+_CAPITAL_EPIC_MAP: Dict[str, str] = {
+    "GOLD":   "CS.D.CFDGOLD.CFD.IP",
+    "SILVER": "CS.D.CFDSILVER.CFD.IP",
+    "OIL":    "CS.D.BRENT.CFD.IP",
+    "DE40":   "CS.D.DE40.CFD.IP",
+    "US500":  "CS.D.US500.CFD.IP",
+    "US100":  "CS.D.US100.CFD.IP",
+    "EURUSD": "CS.D.EURUSD.CFD.IP",
+    "GBPUSD": "CS.D.GBPUSD.CFD.IP",
+    "USDJPY": "CS.D.USDJPY.CFD.IP",
+    "SOXL":   "CS.D.SOXL.CFD.IP",
+}
+
+
+def _resolve_capital_epic(symbol: str) -> str:
+    """Resolve a Capital.com symbol to its API identifier.
+
+    The Capital.com demo API accepts bare symbol names (EURUSD, GOLD,
+    etc.) directly on the /prices endpoint — full CS.D.* epic IDs are
+    not needed for demo. Just strip separators and uppercase.
+    """
+    return symbol.upper().strip().replace("/", "")
+
+
 async def _fetch_ohlcv_for_market(
     symbol: str,
     exchange: Optional[str],
@@ -185,9 +218,12 @@ async def _fetch_ohlcv_for_market(
             if adapters is not None:
                 adapters["capital.com"] = adapter
                 is_cached = True
+        # Translate bare symbol names (EURUSD, GOLD) to full Capital.com
+        # epics (CS.D.EURUSD.CFD.IP, CS.D.CFDGOLD.CFD.IP) that the API expects.
+        epic = _resolve_capital_epic(symbol)
         try:
             candles = await adapter.fetch_ohlcv(
-                epic=symbol, timeframe=timeframe, since=since_utc, limit=limit,
+                epic=epic, timeframe=timeframe, since=since_utc, limit=limit,
             )
             return list(candles or [])
         except Exception as exc:

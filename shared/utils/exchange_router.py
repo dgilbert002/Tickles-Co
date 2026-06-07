@@ -576,14 +576,13 @@ async def resolve_market(
     if row:
         ex = row["exchange"]
         if ex == "capital.com":
-            # Capital is parked. Surface as unsupported but keep the
-            # epic so the future re-enable can flip a flag without
-            # losing data.
+            # Capital.com CFD / forex / index. Route as supported; the
+            # bare epic_code is translated to the full Capital.com epic
+            # ID (CS.D.*.CFD.IP) by _resolve_capital_epic in the caller.
             result = RoutedMarket(
-                supported=False,
-                unsupported_reason=UNSUPPORTED_REASONS.CAPITAL_ONLY,
-                exchange=None,
-                exchange_symbol=None,
+                supported=True,
+                exchange="capital.com",
+                exchange_symbol=row["exchange_symbol"],
                 asset_class="cfd",
                 epic_code=row["exchange_symbol"],
                 canonical_symbol=row["canonical_symbol"],
@@ -591,8 +590,7 @@ async def resolve_market(
             )
             _cache_put(cache_key, result)
             logger.info(
-                "resolve_market(symbol=%r) -> capital-only PARKED "
-                "(epic=%s, canonical=%s)",
+                "resolve_market(symbol=%r) -> capital.com (epic=%s, canonical=%s)",
                 raw, row["exchange_symbol"], row["canonical_symbol"],
             )
             return result
