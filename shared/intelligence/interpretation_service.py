@@ -2228,8 +2228,8 @@ async def get_or_create_trader_profile(
     handle_normalized = handle_raw.lower().strip().lstrip("@")
     sql = (
         "INSERT INTO public.trader_profiles "
-        "  (platform, handle_raw, handle_normalized, display_name, first_seen_at, last_seen_at) "
-        "VALUES ($1, $2, $3, $4, NOW(), NOW()) "
+        "  (platform, handle_raw, handle_normalized, display_name, first_seen_at, last_seen_at, is_tracked) "
+        "VALUES ($1, $2, $3, $4, NOW(), NOW(), FALSE) "
         "ON CONFLICT (platform, handle_normalized) DO UPDATE SET "
         "  last_seen_at = EXCLUDED.last_seen_at, "
         "  display_name = COALESCE(EXCLUDED.display_name, public.trader_profiles.display_name) "
