@@ -68,10 +68,12 @@ class CcxtExecutionAdapter:
         client_factory: Optional[Any] = None,
         sandbox: bool = True,
         demo_trading: bool = False,
+        default_type: str = "swap",
     ) -> None:
         self._factory = client_factory
         self._sandbox = sandbox
         self._demo_trading = demo_trading
+        self._default_type = default_type
         self._clients: Dict[str, Any] = {}
         self._known_orders: Dict[str, Dict[str, Any]] = {}
         self._leverage_cache: Dict[str, int] = {}
@@ -103,7 +105,7 @@ class CcxtExecutionAdapter:
             if not creds.get("apiKey") or not creds.get("secret"):
                 creds = self._load_creds_from_db(exchange, account_name)
 
-            config = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
+            config = {"enableRateLimit": True, "options": {"defaultType": self._default_type}}
             config.update(creds)
             client = cls(config)
 
@@ -249,8 +251,8 @@ class CcxtExecutionAdapter:
         # Ensure one-way mode for Bybit
         await self._ensure_one_way_mode(client, ex, account_name, sym)
 
-        # ── Leverage ──
-        if lev and 1 <= lev <= 125:
+        # ── Leverage (spot accounts always trade 1x — skip) ──
+        if lev and 1 <= lev <= 125 and self._default_type != "spot":
             cache_key = f"{ex}:{sym}"
             if self._leverage_cache.get(cache_key) != lev:
                 try:

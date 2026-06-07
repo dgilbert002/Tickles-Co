@@ -103,7 +103,7 @@ DEMO_FALLBACK_BALANCE = float(os.environ.get("DEMO_FALLBACK_BALANCE", "1000.0"))
 class DemoBridge:
     def __init__(self):
         self._pool = None
-        self._adapter = CcxtExecutionAdapter(demo_trading=True)
+        self._adapter = CcxtExecutionAdapter(demo_trading=True, default_type="spot")
         self._stop = asyncio.Event()
         self._mirrored: set = set()        # tracked_position IDs already mirrored
         self._orders: Dict[int, Dict] = {} # tracked_position_id → {account: order_id}
