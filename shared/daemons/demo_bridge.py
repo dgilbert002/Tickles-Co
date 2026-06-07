@@ -186,7 +186,7 @@ class DemoBridge:
         mode = AGENT_MODE.get(agent_id or "", "lev_5pct")
         bal = balance if balance and balance > 0 else DEMO_FALLBACK_BALANCE
         # Leverage from SL distance — identical formula to the paper agents.
-        if sl and sl > 0 and entry > 0:
+        if sl is not None and sl > 0 and entry > 0:
             sl_dist = abs(entry - sl) / entry
         else:
             sl_dist = 0.05
@@ -390,9 +390,9 @@ class DemoBridge:
                     account_id_external=f"demo_signal_{tp_id}",
                     symbol=sym, direction=direction, order_type=ORDER_TYPE_LIMIT,
                     quantity=qty, requested_price=entry,
-                    stop_loss=sl if sl > 0 else None,
-                    take_profit=tp if tp > 0 else None,
-                    leverage=leverage if leverage > 1 else None,
+                    stop_loss=sl if sl is not None and sl > 0 else None,
+                    take_profit=tp if tp is not None and tp > 0 else None,
+                    leverage=leverage if leverage is not None and leverage > 1 else None,
                     metadata={
                         "source": "demo_bridge_signal",
                         "accountName": acct["account_name"],

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -113,7 +114,7 @@ class CcxtExecutionAdapter:
 
     def _load_creds_from_db(self, exchange: str, account_name: str) -> Dict[str, str]:
         try:
-            import subprocess, json
+            import subprocess
             pw = os.environ.get("DB_PASSWORD", "")
             result = subprocess.run(
                 ["psql", "-U", "admin", "-h", "localhost", "-d", "tickles_shared",
@@ -121,18 +122,18 @@ class CcxtExecutionAdapter:
                  f"SELECT api_key, api_secret, api_passphrase FROM exchange_accounts "
                  f"WHERE exchange='{exchange}' AND account_name='{account_name}' AND is_active=TRUE"],
                 env={**os.environ, "PGPASSWORD": pw},
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=15,
             )
             if result.returncode == 0 and result.stdout.strip():
                 parts = result.stdout.strip().split("|")
-                if len(parts) >= 2:
-                    creds = {"apiKey": parts[0], "secret": parts[1]}
-                    if len(parts) >= 3 and parts[2]:
-                        creds["password"] = parts[2]
+                if len(parts) >= 2 and parts[0] and parts[1]:
+                    creds = {"apiKey": parts[0].strip(), "secret": parts[1].strip()}
+                    if len(parts) >= 3 and parts[2] and parts[2].strip():
+                        creds["password"] = parts[2].strip()
                     LOG.info("ccxt: loaded credentials from DB for %s/%s", exchange, account_name)
                     return creds
-        except Exception:
-            pass
+        except Exception as e:
+            LOG.warning("ccxt: DB credential load failed for %s/%s: %s", exchange, account_name, e)
         return {}
 
     def _configure_exchange_mode(self, client: Any, exchange: str):
