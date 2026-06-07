@@ -3248,7 +3248,7 @@ async def create_tracked_position_from_interpretation(
                     $19, $20, $21,
                     $22, $22
                 )
-                ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction)
+                ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction, entry_price)
                 DO NOTHING
                 RETURNING id
                 """,
@@ -3609,7 +3609,7 @@ async def create_tracked_position_from_interpretation(
             $37,
             $38, $38
         )
-        ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction)
+        ON CONFLICT (news_item_id, trader_profile_id, instrument_symbol, direction, entry_price)
         DO NOTHING
         RETURNING id
         """,

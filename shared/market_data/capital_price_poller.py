@@ -46,7 +46,7 @@ EPIC_MAP = {
 
 async def _resolve_instrument_id(conn, symbol: str) -> Optional[int]:
     row = await conn.fetchrow(
-        "SELECT id FROM public.instruments WHERE symbol = $1 AND exchange = 'capital' AND is_active = TRUE LIMIT 1",
+        "SELECT id FROM public.instruments WHERE symbol = $1 AND exchange = 'capital.com' AND is_active = TRUE LIMIT 1",
         symbol,
     )
     return int(row["id"]) if row else None

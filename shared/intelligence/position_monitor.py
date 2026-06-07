@@ -699,6 +699,31 @@ async def _find_sl_tp_wick_candle(
         return None
     instrument_id = await _resolve_instrument_id(pool, symbol, exchange)
     if instrument_id is None:
+        # Instrument can't be resolved locally (options, capital.com,
+        # inactive). Try the CCXT/capital.com fallback directly instead
+        # of bailing out — matches _find_entry_touch_candle behaviour.
+        try:
+            ccxt_candles = await _fetch_ohlcv_for_market(
+                symbol=symbol, exchange=exchange, timeframe=timeframe,
+                since_utc=ensure_utc(since), limit=1000, adapters=adapters,
+            )
+            if ccxt_candles:
+                for c in ccxt_candles:
+                    hi = float(c.high)
+                    lo = float(c.low)
+                    close_v = float(c.close)
+                    if direction == "long":
+                        if stop_loss is not None and lo <= stop_loss:
+                            return c.timestamp, close_v, "sl", float(stop_loss)
+                        if take_profit is not None and hi >= take_profit:
+                            return c.timestamp, close_v, "tp", float(take_profit)
+                    else:  # short
+                        if stop_loss is not None and hi >= stop_loss:
+                            return c.timestamp, close_v, "sl", float(stop_loss)
+                        if take_profit is not None and lo <= take_profit:
+                            return c.timestamp, close_v, "tp", float(take_profit)
+        except Exception:
+            pass
         return None
     since_utc = ensure_utc(since)
 

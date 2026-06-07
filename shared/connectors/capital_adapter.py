@@ -64,7 +64,7 @@ class CapitalAdapter(BaseExchangeAdapter):
     @property
     def name(self) -> str:
         """Get the exchange name/identifier."""
-        return "capitalcom"
+        return "capital.com"
 
     @property
     def cst(self) -> Optional[str]:
@@ -375,7 +375,7 @@ class CapitalAdapter(BaseExchangeAdapter):
                     trades_count=None,
                     data_source="api",
                     candle_data_hash=data_hash,
-                    exchange="capitalcom",
+                    exchange="capital.com",
                 )
                 candles.append(candle)
 
