@@ -719,9 +719,9 @@
         var r = E("div", "dsc-cfg-row");
         var c = E("input"); c.type = "checkbox"; c.checked = !!t.is_tracked; c.addEventListener("change", function () { saveTrader(t.id, { is_tracked: c.checked }, r); }); r.appendChild(c);
         r.appendChild(E("span", "dsc-cfg-name", "@" + (t.display_name || t.handle).substring(0,20)));
-        var s = E("select", "dsc-cfg-media"); MO.forEach(function (v) { var o = E("option", "", v[1]); o.value = v[0]; if ((t.tracked_media_types || "all") === v[0]) o.selected = true; s.appendChild(o); });
+        var s = E("select", "dsc-cfg-media"); MO.forEach(function (v) { var o = E("option", "", v[1]); o.value = v[0]; if ((t.tracked_media_types || "everything") === v[0]) o.selected = true; s.appendChild(o); });
         s.addEventListener("change", function () { saveTrader(t.id, { tracked_media_types: s.value }, r); }); r.appendChild(s);
-        var originalMT = t.tracked_media_types || "all"; var e = E("span", "dsc-cfg-echo"); e.textContent = (t.is_tracked ? "on" : "off") + " \u00b7 " + originalMT; e.setAttribute("data-mt", originalMT); r.appendChild(e); col2.appendChild(r);
+        var originalMT = t.tracked_media_types || "everything"; var e = E("span", "dsc-cfg-echo"); e.textContent = (t.is_tracked ? "on" : "off") + " \u00b7 " + originalMT; e.setAttribute("data-mt", originalMT); r.appendChild(e); col2.appendChild(r);
       });
     });
   }
