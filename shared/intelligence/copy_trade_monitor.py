@@ -25,7 +25,7 @@ import re
 import signal
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, "/opt/tickles")
@@ -37,6 +37,7 @@ from shared.services.banker import update_balance as banker_update
 logger = logging.getLogger("copy_trade.monitor")
 
 POLL_INTERVAL_S = int(os.environ.get("COPY_TRADE_POLL_S", "30"))
+ENTRY_TOUCH_CANDLES = int(os.environ.get("COPY_ENTRY_TOUCH_CANDLES", "60"))
 
 # Optimized SL/TP multipliers — loaded from system_config table at startup
 # and refreshed each tick so the auto-optimizer cron can update them live.
@@ -62,7 +63,7 @@ AGENTS = [
     ("A+Opt: Spot Seq",  None, None, "spot_seq_opt"),
     ("B+Opt: Lev Par",   None, None, "lev_parallel_opt"),
     ("C+Opt: +BE Lock",  None, None, "lev_be_lock_opt"),
-    ("CH: AI Vision",    1.0, 1.0, "spot_seq_ch"),
+    ("Copy: ChartHacker", 1.0, 1.0, "spot_seq_ch"),
     ("A×3: Spot Lev 3x", 1.0, 1.0, "spot_lev_3x"),
     ("Rose A: Spot Seq",  1.0, 1.0, "spot_seq_rose"),
     ("Rose B: Lev Par",   1.0, 1.0, "lev_parallel_rose"),
@@ -82,7 +83,7 @@ NAME_TO_ID = {
     "A+Opt: Spot Seq":  "copy_opt_spot_seq",
     "B+Opt: Lev Par":   "copy_opt_lev_parallel",
     "C+Opt: +BE Lock":  "copy_opt_lev_be_lock",
-    "CH: AI Vision":    "copy_ch_ai_vision",
+    "Copy: ChartHacker": "copy_charthacker",
     "A×3: Spot Lev 3x": "copy_spot_lev_3x",
     "Rose A: Spot Seq":  "copy_rose_a",
     "Rose B: Lev Par":   "copy_rose_b",
@@ -147,6 +148,94 @@ def get_sl_tp(entry: float, direction: str, orig_sl: float, orig_tp: float,
         return entry * (1 + sl_dist * sl_m), entry * (1 - tp_dist * tp_m)
 
 
+def validate_levels(
+    entry: float,
+    direction: str,
+    orig_sl: float,
+    orig_tp: float,
+    *,
+    critic_sl: Optional[float] = None,
+    critic_tp: Optional[float] = None,
+):
+    """Return (sl, tp) when SL is valid; None skips the trade (no SL = no trade).
+
+    Missing/wrong-side TP uses critic TP when provided; otherwise 2× SL distance.
+    Missing/invalid SL uses critic SL when provided.
+    """
+    from shared.intelligence.critic_levels import (
+        is_valid_critic_sl,
+        is_valid_critic_tp,
+        parse_level,
+    )
+
+    e = float(entry or 0)
+    sl = float(orig_sl or 0)
+    tp = float(orig_tp or 0)
+    csl = parse_level(critic_sl)
+    ctp = parse_level(critic_tp)
+    if e <= 0:
+        return None
+    if direction == "long":
+        if sl <= 0 or sl >= e:
+            if csl is not None and is_valid_critic_sl(direction, e, csl):
+                sl = csl
+            else:
+                return None
+        sl_dist = abs(e - sl)
+        if tp <= 0 or tp <= e:
+            if ctp is not None and is_valid_critic_tp(direction, e, ctp):
+                tp = ctp
+            else:
+                tp = e + 2.0 * sl_dist
+    else:
+        if sl <= 0 or sl <= e:
+            if csl is not None and is_valid_critic_sl(direction, e, csl):
+                sl = csl
+            else:
+                return None
+        sl_dist = abs(e - sl)
+        if tp <= 0 or tp >= e:
+            if ctp is not None and is_valid_critic_tp(direction, e, ctp):
+                tp = ctp
+            else:
+                tp = e - 2.0 * sl_dist
+    return sl, tp
+
+
+async def _fetch_critic_levels(pool, position_id: int) -> tuple[Optional[float], Optional[float]]:
+    """Latest chart_hacker critic levels for a trader position (if any)."""
+    try:
+        row = await pool.fetch_one(
+            """
+            SELECT agent_stop_loss, agent_take_profit, would_take_trade
+            FROM public.agent_opinions
+            WHERE position_id = $1 AND agent_name = 'chart_hacker'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (int(position_id),),
+        )
+    except Exception as exc:
+        logger.debug("_fetch_critic_levels failed pos=%s: %s", position_id, exc)
+        return None, None
+    if not row or not row.get("would_take_trade"):
+        return None, None
+    return row.get("agent_stop_loss"), row.get("agent_take_profit")
+
+
+def _entry_touched(candles: List[dict], entry: float) -> bool:
+    for c in candles:
+        if float(c["low"]) <= entry <= float(c["high"]):
+            return True
+    return False
+
+
+def _distance_to_entry(cur: float, entry: float) -> float:
+    if entry <= 0:
+        return 999.0
+    return abs(cur - entry) / entry
+
+
 def compute_pnl(entry: float, exit_px: float, direction: str, notional: float):
     """Simple P&L: notional × (exit/entry - 1) for long, notional × (1 - exit/entry) for short."""
     if entry <= 0:
@@ -155,6 +244,39 @@ def compute_pnl(entry: float, exit_px: float, direction: str, notional: float):
         return notional * (exit_px / entry - 1.0)
     else:
         return notional * (1.0 - exit_px / entry)
+
+
+def lev_after_buffer(sl_dist: float) -> float:
+    """Liquidation-safe leverage.
+
+    Max leverage where liquidation ~= the stop is (1/sl_dist). We drop a 3x
+    LEVERAGE buffer (not a price %) so a forced liquidation can't trigger just
+    before the stop — e.g. a 12x-capable setup trades at 9x. Tight stops still
+    get high leverage/notional (intended). Floored at 1x, capped by leverage_cap.
+    Buffer + cap are tunable via SIZING keys liq_buffer_x / leverage_cap.
+    """
+    if sl_dist < 0.005:
+        sl_dist = 0.005
+    raw = (1.0 / sl_dist) - float(_sizing("liq_buffer_x", 3.0))
+    return max(min(raw, float(_sizing("leverage_cap", 100.0))), 1.0)
+
+
+_OPTION_RE = re.compile(r"-\d{5,8}-\d+(?:\.\d+)?-[PC]$", re.IGNORECASE)
+
+
+def is_option_symbol(symbol: str) -> bool:
+    """True for option contracts like SOL/USDT:USDT-260531-90-P."""
+    return bool(symbol) and bool(_OPTION_RE.search(symbol))
+
+
+def _used_margin(agent: dict) -> float:
+    """Sum of margin (allocated) currently locked in an agent's open positions.
+
+    BE-locked positions shrink their 'allocated', so this naturally falls and
+    frees capacity for new trades — capacity is governed by available margin,
+    not a fixed trade-count cap.
+    """
+    return sum(float(p.get("allocated", 0.0)) for p in agent.get("open_positions", []))
 
 
 class LiveCopyTradeMonitor:
@@ -166,6 +288,10 @@ class LiveCopyTradeMonitor:
         self._started_at = datetime.now(timezone.utc)
         # Track which trader positions we've already entered
         self._entered_positions: set = set()
+        self._agent_entered: Dict[str, set] = {}
+        self._expired_chase: int = 0
+        self._expired_no_margin: int = 0
+        self._margin_queue: Dict[str, List[dict]] = {}
         # Agent state: agent_id → {balance, open_positions: [{trader_id, entry, sl, tp, dir, symbol, allocated, lev}]}
         self._agents: Dict[str, Dict] = {}
         for name, _, _, mode in AGENTS:
@@ -180,6 +306,7 @@ class LiveCopyTradeMonitor:
                 "open_positions": [],
                 "mode": mode,
             }
+            self._margin_queue[name] = []
 
     async def _ensure_pool(self):
         if self._pool is None:
@@ -320,7 +447,7 @@ class LiveCopyTradeMonitor:
             try:
                 done_rows = await conn.fetch(
                     """
-                    SELECT DISTINCT tracked_position_id
+                    SELECT agent_id, tracked_position_id
                     FROM competition_trades
                     WHERE contest_id = 'copy-trade-scenarios'
                       AND tracked_position_id IS NOT NULL
@@ -328,10 +455,11 @@ class LiveCopyTradeMonitor:
                 )
                 for r in done_rows:
                     tid = r.get("tracked_position_id")
-                    if tid is not None:
+                    ag = ID_TO_NAME.get(r.get("agent_id"))
+                    if tid is not None and ag is not None:
                         self._entered_positions.add(int(tid))
+                        self._agent_entered.setdefault(ag, set()).add(int(tid))
             except Exception as exc:
-                # competition_trades table may not exist on a fresh install
                 logger.debug("competition_trades scan skipped: %s", exc)
 
         for r in rows:
@@ -364,13 +492,44 @@ class LiveCopyTradeMonitor:
             for pos in ops_raw:
                 tid = pos.get("trader_id")
                 if tid is not None:
-                    self._entered_positions.add(int(tid))
+                    self._agent_entered.setdefault(agent_name, set()).add(int(tid))
             loaded += 1
+
+        # Rehydrate BE-locked state from competition_trades for open positions.
+        # This survives restarts — if a position was locked before the daemon
+        # stopped, we pick up the adjusted SL/leverage/allocated from the DB.
+        try:
+            async with pool.acquire() as conn:
+                be_rows = await conn.fetch("""
+                    SELECT agent_id, symbol, direction, entry_price,
+                           sl_price, leverage, allocated
+                    FROM competition_trades
+                    WHERE contest_id = 'copy-trade-scenarios'
+                      AND be_locked = TRUE
+                      AND exit_price IS NULL
+                """)
+            for br in be_rows:
+                agent_name = ID_TO_NAME.get(br["agent_id"])
+                if not agent_name or agent_name not in self._agents:
+                    continue
+                for pos in self._agents[agent_name]["open_positions"]:
+                    if (pos["symbol"] == br["symbol"]
+                            and pos["direction"] == br["direction"]
+                            and abs(pos["entry"] - float(br["entry_price"])) < 0.0001):
+                        pos["be_locked"] = True
+                        pos["sl"] = float(br["sl_price"])
+                        pos["leverage"] = float(br["leverage"])
+                        pos["allocated"] = float(br["allocated"])
+                        logger.info("rehydrated BE lock for %s %s %s @%.6g",
+                                    agent_name, pos["symbol"], pos["direction"], pos["entry"])
+                        break
+        except Exception as exc:
+            logger.debug("BE lock rehydration skipped: %s", exc)
 
         logger.info(
             "copy_agent_state: loaded persisted state for %d agents "
             "(%d trader_ids in entered set)",
-            loaded, len(self._entered_positions),
+            loaded, sum(len(v) for v in self._agent_entered.values()),
         )
 
     def _agent_uses_optimal(self, name: str) -> bool:
@@ -418,14 +577,19 @@ class LiveCopyTradeMonitor:
             rows = await conn.fetch("""
                 SELECT tp.id, tp.instrument_symbol, tp.direction,
                        tp.entry_price, tp.stop_loss, tp.take_profit_1,
-                       tp.signal_timestamp, tp.actor_id, tp.notional_usd
+                       tp.signal_timestamp, tp.activated_at, tp.actor_id, tp.notional_usd,
+                       tp.signal_source, tp.chart_hacker_endorsed
                 FROM tracked_positions tp
                 WHERE tp.status = 'open'
                   AND tp.entry_price > 0
 
 
                   AND tp.signal_timestamp >= NOW() - INTERVAL '7 days'
-                  AND (tp.actor_id LIKE 'jarvais_trader_%' OR tp.actor_id = 'jarvais_chart_hacker' OR tp.actor_id = 'jarvais_rose_ch')
+                  AND (
+                    tp.actor_id LIKE 'jarvais_trader_%'
+                    OR tp.actor_id = 'jarvais_chart_hacker'
+                    OR tp.actor_id = 'jarvais_rose_ch'
+                  )
                 ORDER BY tp.signal_timestamp DESC
                 LIMIT 200
             """)
@@ -447,6 +611,22 @@ class LiveCopyTradeMonitor:
                 WHERE status = 'closed' AND id = ANY($1::int[])
             """, list(trader_ids))
         return {r["id"]: dict(r) for r in rows}
+
+    async def _get_latest_candle(self, symbol: str):
+        """Get the single most recent 1m candle for a symbol, regardless of time window."""
+        candidates = _symbol_lookup_candidates(symbol)
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            for cand_sym in candidates:
+                row = await conn.fetchrow("""
+                    SELECT c.close, c.high, c.low
+                    FROM candles c JOIN instruments i ON i.id = c.instrument_id
+                    WHERE i.symbol = $1 AND c.timeframe = '1m'
+                    ORDER BY c.timestamp DESC LIMIT 1
+                """, cand_sym)
+                if row:
+                    return {"close": float(row["close"]), "high": float(row["high"]), "low": float(row["low"])}
+        return None
 
     async def _get_candles(self, symbol: str, since: datetime):
         """Get recent 1m candles for a symbol.
@@ -475,60 +655,99 @@ class LiveCopyTradeMonitor:
             logger.debug("no candles for %s (tried %s)", symbol, candidates)
         return []
 
-    async def _enter_agent_position(self, agent_name: str, trader_pos: dict):
-        """Create a paper position for one agent, sizing by their mode rules."""
+    async def _enter_agent_position(self, agent_name: str, trader_pos: dict, *, from_queue: bool = False):
+        """Create a paper position — touch-to-fill aligned with position_monitor."""
         agent = self._agents[agent_name]
         mode = self._agent_mode(agent_name)
         use_opt = self._agent_uses_optimal(agent_name)
         sym = trader_pos["instrument_symbol"]
+        if is_option_symbol(sym):
+            logger.info("skip option symbol %s for %s", sym, agent_name)
+            return
         entry = float(trader_pos["entry_price"])
         direction = trader_pos["direction"]
-        orig_sl = float(trader_pos.get("stop_loss") or 0)
-        orig_tp = float(trader_pos.get("take_profit_1") or 0)
-        # Default SL/TP if not provided by trader
-        if orig_sl <= 0:
-            orig_sl = entry * 0.95 if direction == "long" else entry * 1.05
-        if orig_tp <= 0:
-            orig_tp = entry * 1.05 if direction == "long" else entry * 0.95
+        pool = await self._ensure_pool()
+        critic_sl, critic_tp = await _fetch_critic_levels(pool, int(trader_pos["id"]))
+        levels = validate_levels(
+            entry, direction,
+            float(trader_pos.get("stop_loss") or 0),
+            float(trader_pos.get("take_profit_1") or 0),
+            critic_sl=critic_sl,
+            critic_tp=critic_tp,
+        )
+        if levels is None:
+            logger.info("skip %s for %s: no valid stop loss", sym, agent_name)
+            return
+        orig_sl, orig_tp = levels
         sl, tp = get_sl_tp(entry, direction, orig_sl, orig_tp, sym, use_opt)
 
-        # Position sizing by mode
-        if "spot_seq" in mode:
-            # Full balance, sequential
+        fill_at = trader_pos.get("activated_at") or trader_pos.get("signal_timestamp")
+        if fill_at and not isinstance(fill_at, datetime):
+            fill_at = datetime.fromisoformat(str(fill_at).replace("Z", "+00:00"))
+        if not fill_at:
+            fill_at = datetime.now(timezone.utc)
+        lookback_start = fill_at - timedelta(minutes=ENTRY_TOUCH_CANDLES)
+        touch_candles = await self._get_candles(sym, lookback_start)
+        no_candles = not touch_candles
+        if no_candles:
+            logger.warning("no candles for %s — entering %s without entry-touch check", sym, agent_name)
+        elif not _entry_touched(touch_candles, entry):
+            logger.info("skip %s for %s: entry %.6f not touched in last %d candles",
+                        sym, agent_name, entry, ENTRY_TOUCH_CANDLES)
+            return
+
+        if no_candles:
+            # No candle data at all — use tracked_positions.current_price or skip chase check
+            cur = float(trader_pos.get("current_price") or 0)
+            if cur <= 0:
+                logger.warning("no candles and no current_price for %s — entering %s blind (no entry/chase checks)", sym, agent_name)
+                # Skip chase check entirely — no price data to compare against
+        else:
+            latest = touch_candles
+            cur = float(latest[-1]["close"])
+        if cur > 0:
+            past_tp = (cur >= tp) if direction == "long" else (cur <= tp)
+            past_sl = (cur <= sl) if direction == "long" else (cur >= sl)
+            if past_tp or past_sl:
+                self._expired_chase += 1
+                logger.info("skip chase %s %s entry=%s cur=%.6f past %s (%s)",
+                            sym, direction, entry, cur, "TP" if past_tp else "SL", agent_name)
+                return
+
+        sl_dist = abs(entry - sl) / entry if entry > 0 else 0.05
+        if mode == "spot_seq_ch":
+            allocated = agent["balance"] * (float(_sizing("risk_pct_3", 3.0)) / 100.0)
+            leverage = lev_after_buffer(sl_dist)
+        elif "spot_seq" in mode:
             if agent["open_positions"]:
-                return  # Already in a trade
+                return
             allocated = agent["balance"]
             leverage = 1.0
         elif mode == "spot_lev_3x":
-            # Full balance, sequential, configurable leverage (default 3x)
             if agent["open_positions"]:
                 return
             allocated = agent["balance"]
             leverage = float(_sizing("spot_lev_3x", 3.0))
         elif mode == "lev_parallel_3pct":
-            # Configurable risk % per trade (default 3%), configurable max concurrent (default 33)
-            if len(agent["open_positions"]) >= int(_sizing("max_concurrent_3", 33)):
-                return
             allocated = agent["balance"] * (float(_sizing("risk_pct_3", 3.0)) / 100.0)
-            sl_dist = abs(entry - sl) / entry if entry > 0 else 0.05
-            if sl_dist < 0.005:
-                sl_dist = 0.005
-            raw_lev = (1.0 / sl_dist) * 0.97
-            leverage = min(raw_lev, float(_sizing("leverage_cap", 100.0)))
+            leverage = lev_after_buffer(sl_dist)
         else:
-            # Leveraged: configurable risk % per trade (default 5%), max concurrent (default 20)
-            if len(agent["open_positions"]) >= int(_sizing("max_concurrent_5", 20)):
-                return
             allocated = agent["balance"] * (float(_sizing("risk_pct_5", 5.0)) / 100.0)
-            sl_dist = abs(entry - sl) / entry if entry > 0 else 0.05
-            if sl_dist < 0.005:
-                sl_dist = 0.005
-            raw_lev = (1.0 / sl_dist) * 0.97
-            leverage = min(raw_lev, float(_sizing("leverage_cap", 100.0)))
+            leverage = lev_after_buffer(sl_dist)
 
-        if agent_name.startswith("CH:"):
+        free = agent["balance"] - _used_margin(agent)
+        if allocated > free + 1e-9:
+            if not from_queue:
+                q = self._margin_queue.setdefault(agent_name, [])
+                if not any(x.get("id") == trader_pos.get("id") for x in q):
+                    q.append(dict(trader_pos))
+                    logger.info("queued %s for %s (need $%.2f, free $%.2f)",
+                                sym, agent_name, allocated, free)
+            return
+
+        if mode == "spot_seq_ch":
             logger.info("CH entering %s dir=%s entry=%s sl=%s tp=%s", sym, direction, entry, sl, tp)
-                # Entry fee — load from instruments table per symbol
+
         fees = await self._load_instrument_fees(sym)
         entry_fee = allocated * leverage * fees["maker_bps"] / 10000.0
         agent["balance"] -= entry_fee
@@ -545,33 +764,78 @@ class LiveCopyTradeMonitor:
             "leverage": leverage,
             "be_locked": False,
             "be_price": entry * 1.05 if direction == "long" else entry * 0.95,
-            "entered_at": datetime.now(timezone.utc),
+            "entered_at": fill_at,
         })
 
-        # Insert open position into competition_trades so the dashboard can see it
         try:
             await self._log_trade_open(agent_name, agent["open_positions"][-1], sym)
         except Exception:
             pass
-
-        # Round-7 persistence: save the agent's new open-position list so a
-        # crash before the next contest score push doesn't lose this entry.
         try:
             await self._save_agent(agent_name)
         except Exception as exc:
             logger.warning("copy_agent_state save (open) failed for %s: %s", agent_name, exc)
+
+    async def _process_margin_queues(self):
+        """Retry queued signals closest to entry; expire stale ones."""
+        for agent_name, queue in list(self._margin_queue.items()):
+            if not queue:
+                continue
+            priced: List[tuple] = []
+            for tp in queue:
+                sym = tp["instrument_symbol"]
+                candles = await self._get_candles(
+                    sym, datetime.now(timezone.utc) - timedelta(minutes=ENTRY_TOUCH_CANDLES))
+                cur = float(candles[-1]["close"]) if candles else float(tp["entry_price"])
+                priced.append((_distance_to_entry(cur, float(tp["entry_price"])), tp, candles))
+            priced.sort(key=lambda x: x[0])
+            remaining = []
+            for dist, tp, candles in priced:
+                entry = float(tp["entry_price"])
+                direction = tp["direction"]
+                pool = await self._ensure_pool()
+                critic_sl, critic_tp = await _fetch_critic_levels(pool, int(tp["id"]))
+                levels = validate_levels(
+                    entry, direction,
+                    float(tp.get("stop_loss") or 0),
+                    float(tp.get("take_profit_1") or 0),
+                    critic_sl=critic_sl,
+                    critic_tp=critic_tp,
+                )
+                if levels is None:
+                    continue
+                sl, tp_px = get_sl_tp(
+                    entry, direction, levels[0], levels[1],
+                    tp["instrument_symbol"], self._agent_uses_optimal(agent_name))
+                if not candles or not _entry_touched(candles, entry):
+                    remaining.append(tp)
+                    continue
+                cur = float(candles[-1]["close"])
+                past_tp = (cur >= tp_px) if direction == "long" else (cur <= tp_px)
+                past_sl = (cur <= sl) if direction == "long" else (cur >= sl)
+                if past_tp or past_sl:
+                    self._expired_no_margin += 1
+                    continue
+                before = len(self._agents[agent_name]["open_positions"])
+                await self._enter_agent_position(agent_name, tp, from_queue=True)
+                if len(self._agents[agent_name]["open_positions"]) == before:
+                    remaining.append(tp)
+            self._margin_queue[agent_name] = remaining
 
     async def _sync_sl_tp(self):
         """Re-read SL/TP from tracked_positions for all in-memory positions."""
         pool = await self._ensure_pool()
         for agent_name, agent in self._agents.items():
             for pos in agent["open_positions"]:
+                # Never overwrite a BE-locked SL — the lock moved it to
+                # breakeven intentionally, and the trader's original SL
+                # would undo that protection.
                 row = await pool.fetch_one(
                     "SELECT stop_loss, take_profit_1 FROM tracked_positions WHERE id = $1",
                     (pos["trader_id"],),
                 )
                 if row:
-                    if row["stop_loss"] and float(row["stop_loss"] or 0) > 0:
+                    if not pos.get("be_locked") and row["stop_loss"] and float(row["stop_loss"] or 0) > 0:
                         pos["sl"] = float(row["stop_loss"])
                     if row["take_profit_1"] and float(row["take_profit_1"] or 0) > 0:
                         pos["tp"] = float(row["take_profit_1"])
@@ -589,6 +853,40 @@ class LiveCopyTradeMonitor:
 
         for sym, positions in by_symbol.items():
             since = min(p["entered_at"] for p in positions)
+
+            # BE pre-check: lock immediately if price is already past +5%.
+            # Must run BEFORE the candle-fetch guard because positions entered
+            # during candle daemon gaps have zero candles since entry.
+            latest_candle = None
+            try:
+                latest_candle = await self._get_latest_candle(sym)
+            except Exception as exc:
+                logger.warning("BE pre-check _get_latest_candle failed for %s: %s", sym, exc)
+            if latest_candle:
+                for pos in positions:
+                    if pos.get("be_locked"):
+                        continue
+                    agent_mode = agent.get("mode", "")
+                    if "be_lock" not in agent_mode:
+                        continue
+                    triggered = False
+                    if pos["direction"] == "long" and latest_candle["close"] >= pos.get("be_price", 0):
+                        triggered = True
+                        pos["sl"] = pos["entry"] * 1.001
+                    elif pos["direction"] == "short" and latest_candle["close"] <= pos.get("be_price", float("inf")):
+                        triggered = True
+                        pos["sl"] = pos["entry"] * 0.999
+                    if triggered:
+                        old_lev = pos["leverage"]
+                        pos["be_locked"] = True
+                        pos["leverage"] = 100.0
+                        pos["allocated"] = pos["allocated"] * (old_lev / 100.0)
+                        await self._persist_be_lock(agent_name, pos)
+                        logger.info(
+                            "BE LOCK (pre-check) %s %s %s @%.6g → SL=%.6g lev=100x alloc=%.4f",
+                            agent_name, pos["symbol"], pos["direction"],
+                            pos["entry"], pos["sl"], pos["allocated"])
+
             candles = await self._get_candles(sym, since)
             if not candles:
                 continue
@@ -630,6 +928,12 @@ class LiveCopyTradeMonitor:
                             pos["be_locked"] = True
                             pos["leverage"] = 100.0
                             pos["allocated"] = pos["allocated"] * (old_lev / 100.0)
+                            # Persist BE lock to DB so it survives restarts
+                            await self._persist_be_lock(agent_name, pos)
+                            logger.info(
+                                "BE LOCK %s %s %s @%.6g → SL=%.6g lev=100x alloc=%.4f",
+                                agent_name, pos["symbol"], pos["direction"],
+                                pos["entry"], pos["sl"], pos["allocated"])
 
             for pos, exit_px, reason, ts in to_close:
                 await self._close_agent_position(agent_name, pos, exit_px, reason)
@@ -684,12 +988,35 @@ class LiveCopyTradeMonitor:
                     INSERT INTO competition_trades
                     (contest_id, agent_id, symbol, direction, entry_price,
                      sl_price, tp_price, allocated, leverage, pnl, fees, exit_reason,
-                     entered_at, tracked_position_id)
+                     entered_at, tracked_position_id, be_locked)
                     VALUES ('copy-trade-scenarios', $1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 'open',
-                            $9, $10)
+                            $9, $10, FALSE)
                 """, NAME_TO_ID.get(agent_name, agent_name), sym, pos["direction"],
                     pos["entry"], pos["sl"], pos["tp"], pos["allocated"], pos["leverage"],
                     pos["entered_at"], pos.get("trader_id"))
+        except Exception:
+            pass
+
+    async def _persist_be_lock(self, agent_name, pos):
+        """Update competition_trades with BE lock state so it survives restarts."""
+        try:
+            pool = await self._ensure_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE competition_trades
+                    SET be_locked = TRUE,
+                        sl_price = $1,
+                        leverage = $2,
+                        allocated = $3
+                    WHERE contest_id = 'copy-trade-scenarios'
+                      AND agent_id = $4
+                      AND symbol = $5
+                      AND direction = $6
+                      AND entry_price = $7
+                      AND exit_price IS NULL
+                """, pos["sl"], pos["leverage"], pos["allocated"],
+                    NAME_TO_ID.get(agent_name, agent_name), pos["symbol"],
+                    pos["direction"], pos["entry"])
         except Exception:
             pass
 
@@ -930,29 +1257,48 @@ class LiveCopyTradeMonitor:
         await self._load_sizing_knobs()
         # 0.5 Sync SL/TP from tracked_positions (may have been updated by LLM re-extraction)
         await self._sync_sl_tp()
+        # 0.6 Retry margin-queued signals (closest to entry first)
+        await self._process_margin_queues()
         # 1. Enter new trader positions
         new_positions = await self._get_new_open_positions()
         for pos in new_positions:
             for agent_name in self._agents:
                 try:
-                    # Agent → position source routing
-                    is_ch_pos = (pos.get("actor_id") == "jarvais_chart_hacker")
-                    is_ch_agent = agent_name.startswith("CH:")
-                    is_rose_pos = (pos.get("actor_id") == "jarvais_rose_ch")
-                    is_rose_agent = agent_name.startswith("Rose")
-                    # Regular agents skip ChartHacker and Rose positions
-                    if not is_ch_agent and not is_rose_agent and (is_ch_pos or is_rose_pos):
+                    # Agent → position source routing.
+                    # Route by the agent's stable MODE, not its display name, so
+                    # the label can be renamed without misrouting trades
+                    # (2026-05-29: "CH: AI Vision" → "Copy: ChartHacker").
+                    agent_mode = self._agents[agent_name].get("mode", "")
+                    actor = str(pos.get("actor_id") or "")
+                    is_ch_pos = (
+                        actor == "jarvais_chart_hacker"
+                        or bool(pos.get("chart_hacker_endorsed"))
+                    )
+                    is_ch_agent = (agent_mode == "spot_seq_ch")
+                    is_rose_pos = (actor == "jarvais_rose_ch")
+                    is_rose_agent = agent_mode.endswith("_rose")
+                    # Regular agents skip ChartHacker-only and Rose positions
+                    if not is_ch_agent and not is_rose_agent and (actor == "jarvais_chart_hacker" or is_rose_pos):
                         continue
-                    # CH agent only takes chart_hacker positions
+                    # CH agent mirrors chart_hacker rows OR trader legs CH endorsed
                     if is_ch_agent and not is_ch_pos:
                         continue
                     # Rose agent only takes rose_ch positions
                     if is_rose_agent and not is_rose_pos:
                         continue
+                    if pos["id"] in self._agent_entered.get(agent_name, set()):
+                        continue
                     if pos["entry_price"] and float(pos["entry_price"]) > 0:
                         await self._enter_agent_position(agent_name, pos)
                 except Exception as exc:
                     logger.warning("Agent %s failed to enter pos %s: %s", agent_name, pos.get("id"), exc)
+            # Track which agents successfully entered this position
+            tid = pos["id"]
+            for agent_name in self._agents:
+                for op in self._agents[agent_name].get("open_positions", []):
+                    if op.get("trader_id") == tid:
+                        self._agent_entered.setdefault(agent_name, set()).add(tid)
+                        break
             self._entered_positions.add(pos["id"])
 
         if new_positions:

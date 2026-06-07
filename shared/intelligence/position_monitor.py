@@ -1154,6 +1154,31 @@ def _build_snapshot(
     sl_val = float(sl) if sl is not None else None
     tp_val = float(tp) if tp is not None else None
 
+    # HEAL-2026-05-29 — price-plausibility guard (monitor side).
+    #
+    # The live-price feed resolves a symbol -> instrument and can hit a ticker
+    # COLLISION (e.g. "SPX" -> the SPX6900 memecoin at $0.32 instead of the S&P
+    # tokenised perp at ~6100), producing a current_price that is wildly
+    # inconsistent with the position's entry. Writing that yields garbage
+    # unrealized P&L on the radar (the symptom the operator reported on
+    # 2026-05-29). When the fetched price disagrees with entry by >3x we treat
+    # the price as untrustworthy and SKIP the snapshot (leave current_price as
+    # it was, do not fabricate P&L). This mirrors the arming-time guard in
+    # interpretation_service.create_tracked_position_from_interpretation.
+    #
+    # ROLLBACK: delete this block.
+    if entry > 0 and current_price and current_price > 0:
+        _r = current_price / entry
+        if _r > 3.0 or _r < (1.0 / 3.0):
+            logger.warning(
+                "Position %s (%s %s) price-plausibility skip: entry=%.8f vs "
+                "feed_price=%.8f (ratio=%.3f) — likely ticker collision / wrong "
+                "instrument; not writing garbage P&L",
+                position.get("id"), position.get("instrument_symbol"),
+                direction, entry, current_price, _r,
+            )
+            return None
+
     # P&L
     unrealized_pnl_usd = compute_pnl(direction, entry, current_price, qty, lev)
     pnl_pct = compute_pnl_pct(direction, entry, current_price)
@@ -1728,15 +1753,33 @@ class PositionMonitor:
                     adapters=self._adapters,
                 )
                 if triggered is None:
-                    # No candle whose [low, high] contains entry has printed
-                    # since the position was created. Still pending —
-                    # nothing to do, just leave it. Counted under no_price
-                    # so the existing log line keeps working.
+                    # --- LIVE PRICE FALLBACK (2026-05-30) ---
+                    # Try CCXT live ticker before giving up. For new instruments
+                    # with no candle history, this is the only activation path.
+                    try:
+                        live = await fetch_live_price_from_feed(
+                            pos["instrument_symbol"])
+                        if live is not None and live > 0:
+                            direction = str(pos.get("direction") or "").lower()
+                            crossed = (
+                                (direction == "long" and live >= entry)
+                                or (direction == "short" and live <= entry)
+                            )
+                            if crossed:
+                                triggered = (now, live)
+                                logger.info(
+                                    "position %s activated via CCXT live price (no candle data): "
+                                    "%s %s entry=%.6g live=%.6g",
+                                    pos_id, pos["instrument_symbol"], direction, entry, live,
+                                )
+                    except Exception:
+                        pass
+
+                if triggered is None:
                     no_price += 1
                     continue
 
                 trigger_ts, trigger_close = triggered
-                # Round 11 (2026-05-24): when the touch is outside the fast
                 # path (older than 30 min), tag the row so we can audit which
                 # activations "caught up" vs which fired live. A normal/live
                 # activation clears status_reason; a retro activation stamps
@@ -1855,6 +1898,28 @@ class PositionMonitor:
         # convention (SL beats TP on same-candle ambiguity).
         sl_val_for_wick = position.get("stop_loss")
         tp_val_for_wick = position.get("take_profit_1") or position.get("take_profit")
+        # Geometric-validity guard (owner-locked 2026-05-30): a TP on the WRONG
+        # side of entry (short with TP>=entry, long with TP<=entry) used to fire
+        # an instant fake 'tp1_hit' because the wick scan tests `lo<=tp`/`hi>=tp`
+        # and any candle is trivially past a mis-placed level — closing the signal
+        # at a price the market never reached. We IGNORE impossible levels here
+        # (rather than fabricate one) so the signal rides to a genuine SL/TP.
+        _e_lvl = position.get("entry_price")
+        _dir_lvl = position.get("direction", "")
+        if _e_lvl and float(_e_lvl) > 0:
+            _e_lvl = float(_e_lvl)
+            if tp_val_for_wick is not None:
+                _tpf = float(tp_val_for_wick)
+                if (_dir_lvl == "long" and _tpf <= _e_lvl) or (_dir_lvl == "short" and _tpf >= _e_lvl):
+                    logger.warning("position %s: ignoring wrong-side TP %.6g (entry %.6g, %s)",
+                                   pos_id, _tpf, _e_lvl, _dir_lvl)
+                    tp_val_for_wick = None
+            if sl_val_for_wick is not None:
+                _slf = float(sl_val_for_wick)
+                if (_dir_lvl == "long" and _slf >= _e_lvl) or (_dir_lvl == "short" and _slf <= _e_lvl):
+                    logger.warning("position %s: ignoring wrong-side SL %.6g (entry %.6g, %s)",
+                                   pos_id, _slf, _e_lvl, _dir_lvl)
+                    sl_val_for_wick = None
         wick: Optional[Tuple[datetime, float, str, float]] = None
         wick_since: Optional[datetime] = None
         if sl_val_for_wick is not None or tp_val_for_wick is not None:

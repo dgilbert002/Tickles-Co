@@ -55,5 +55,5 @@ INSERT INTO public.copy_agent_state (agent_id, balance, starting_balance) VALUES
   ('copy_opt_spot_seq',      1000, 1000),
   ('copy_opt_lev_parallel',  1000, 1000),
   ('copy_opt_lev_be_lock',   1000, 1000),
-  ('copy_ch_ai_vision',      1000, 1000)
+  ('copy_charthacker',       1000, 1000)  -- renamed from copy_ch_ai_vision 2026-05-29
 ON CONFLICT (agent_id) DO NOTHING;

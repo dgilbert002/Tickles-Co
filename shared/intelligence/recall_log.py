@@ -202,12 +202,12 @@ INSERT INTO mem0_recall_log (
     actor_id, company_id, correlation_id,
     query_summary, query_dimension, query_symbol,
     returned_count, top_k_ids, top_k_metadata,
-    position_id
+    position_id, signal_source
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6,
     $7, $8::jsonb, $9::jsonb,
-    $10
+    $10, $11
 )
 RETURNING id
 """
@@ -225,6 +225,7 @@ async def record_recall(
     top_k_ids: Optional[Iterable[Any]] = None,
     top_k_metadata: Optional[Iterable[Dict[str, Any]]] = None,
     position_id: Optional[int] = None,
+    signal_source: Optional[str] = None,
 ) -> Optional[int]:
     """Insert one ``mem0_recall_log`` row for a recall made at decision time.
 
@@ -270,6 +271,7 @@ async def record_recall(
     dim = _truncate(query_dimension, _SHORT_TEXT_MAX)
     symbol = _truncate(query_symbol, _SHORT_TEXT_MAX)
     cid = _truncate(correlation_id, _SHORT_TEXT_MAX)
+    src = _truncate(signal_source, _SHORT_TEXT_MAX) if signal_source else None
 
     # Mirror the validation in link_recall_to_position: reject obviously
     # bad position ids upfront rather than relying on the FK to catch
@@ -315,6 +317,7 @@ async def record_recall(
             ids_json,
             md_json,
             position_id,
+            src,
         )
         return int(row_id) if row_id is not None else None
     except asyncpg.PostgresError as exc:
@@ -410,6 +413,107 @@ async def link_recall_to_position(
             recall_id, position_id, exc,
         )
         return False
+
+
+async def link_recall_by_correlation(
+    conn: asyncpg.Connection,
+    *,
+    correlation_id: str,
+    position_id: int,
+    actor_id: str = "chart_hacker",
+    signal_source: Optional[str] = None,
+) -> int:
+    """Patch ``position_id`` onto pending recall rows by ``correlation_id``.
+
+    This is the join used by the interpretation pipeline (Phase B). A recall
+    is recorded at decision time keyed by the signal's ``correlation_id``
+    BEFORE the ``tracked_positions`` row exists; this links it once the
+    position id is known — without threading a recall_id through the (large)
+    interpret method. Only "pending" rows (``position_id IS NULL``) for the
+    given ``actor_id`` + ``correlation_id`` are patched.
+
+    Idempotent: a second call for the same signal finds no pending row and
+    returns 0. Respects the partial UNIQUE index
+    ``uq_mem0_recall_position (actor_id, position_id)``.
+
+    Args:
+        conn: Active asyncpg connection (tickles_shared).
+        correlation_id: The signal-chain correlation id (e.g. ``sig-…``).
+        position_id: ``tracked_positions.id`` to link.
+        actor_id: Recall owner; defaults to ``chart_hacker`` (the only actor
+            that performs decision-time recall today).
+
+    Returns:
+        Number of rows linked. ``0`` is normal (no recall for this signal).
+        Errors are logged but never re-raised.
+    """
+    if not correlation_id or not isinstance(correlation_id, str):
+        return 0
+    if (
+        not isinstance(position_id, int)
+        or isinstance(position_id, bool)
+        or position_id <= 0
+    ):
+        logger.warning(
+            "recall_log.link_recall_by_correlation: invalid position_id=%r",
+            position_id,
+        )
+        return 0
+
+    try:
+        src = _truncate(signal_source, _SHORT_TEXT_MAX) if signal_source else None
+        if src:
+            result = await conn.execute(
+                """
+                UPDATE mem0_recall_log
+                   SET position_id = $1
+                 WHERE correlation_id = $2
+                   AND actor_id = $3
+                   AND signal_source = $4
+                   AND position_id IS NULL
+                """,
+                position_id,
+                correlation_id,
+                actor_id,
+                src,
+            )
+        else:
+            result = await conn.execute(
+                """
+                UPDATE mem0_recall_log
+                   SET position_id = $1
+                 WHERE correlation_id = $2
+                   AND actor_id = $3
+                   AND position_id IS NULL
+                """,
+                position_id,
+                correlation_id,
+                actor_id,
+            )
+        parts = result.split()
+        rowcount = (
+            int(parts[1]) if len(parts) == 2 and parts[0] == "UPDATE" else 0
+        )
+        if rowcount:
+            logger.info(
+                "recall_log: linked %d recall row(s) cid=%s -> position_id=%s",
+                rowcount, correlation_id, position_id,
+            )
+        return rowcount
+    except asyncpg.UniqueViolationError as exc:
+        logger.warning(
+            "recall_log.link_recall_by_correlation: UNIQUE conflict "
+            "cid=%s pos=%s: %s",
+            correlation_id, position_id, exc,
+        )
+        return 0
+    except asyncpg.PostgresError as exc:
+        logger.warning(
+            "recall_log.link_recall_by_correlation: UPDATE failed "
+            "cid=%s pos=%s: %s",
+            correlation_id, position_id, exc,
+        )
+        return 0
 
 
 # ---------------------------------------------------------------------------

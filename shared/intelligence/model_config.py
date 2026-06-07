@@ -357,3 +357,371 @@ def get_model_sync(slot: str) -> str:
     if slot not in VALID_SLOTS:
         raise ValueError(f"unknown slot: {slot!r}")
     return _read_env(slot) or _code_default(slot)
+
+
+# ===========================================================================
+# Round 14 (2026-05-29) — Provider-aware, all-services slot registry.
+# ---------------------------------------------------------------------------
+# Why this exists
+# ---------------
+# The 3-slot picker above only covered the vision pipeline and only stored a
+# *model string* — the *provider* (OpenRouter vs Requesty) was a global env var
+# (LLM_GATEWAY_DEFAULT). The operator now wants to choose BOTH provider AND
+# model, per slot, from the dashboard — including the text services (postmortem,
+# guru, MCP, text-extract, chart-hacker-opinion) and including Requesty routing
+# policies like ``policy/tickles-vision``.
+#
+# This section adds a generalised registry on TOP of the legacy functions, so
+# nothing above changes behaviour. Storage:
+#
+#   * New rows: namespace ``model_slots``, config_key = <slot>, config_value =
+#     JSON ``{"provider": "...", "model": "..."}``.
+#   * For the 3 vision slots we ALSO mirror the chosen model into the legacy
+#     ``chart_hacker/model.<slot>`` row so the existing ``get_model()`` callers
+#     (and the Round-10 tests) keep seeing a consistent value during the
+#     migration window.
+#
+# Resolution order (per field):
+#   provider: DB JSON → env ``LLM_GATEWAY_<SERVICE>`` → ``LLM_GATEWAY_DEFAULT``
+#             → registry default.
+#   model:    DB JSON → (vision only) legacy ``chart_hacker/model.<slot>`` →
+#             env ``<env_model>`` → registry default.
+# ===========================================================================
+
+SLOT_KIND_VISION = "vision"
+SLOT_KIND_TEXT = "text"
+
+# Namespace for the new provider-aware rows.
+_SLOTS_NS = "model_slots"
+
+# The full registry. ``service`` is the GatewayConfig service name (drives the
+# cost-log ``role`` + the per-service env overrides). ``env_gw`` is the legacy
+# per-service gateway env var. ``env_model`` is the legacy per-service model env
+# var. ``legacy_model_key`` (vision only) bridges to the Round-10 storage.
+SLOT_REGISTRY: Dict[str, Dict[str, Any]] = {
+    # ---- Vision pipeline (the Round-10 trio) ----
+    SLOT_PRIMARY: {
+        "kind": SLOT_KIND_VISION,
+        "label": "Vision — Primary",
+        "service": "interpretation",
+        "env_gw": "LLM_GATEWAY_INTERPRETATION",
+        "env_model": _ENV_VARS[SLOT_PRIMARY],
+        "legacy_model_key": _SLOT_KEYS[SLOT_PRIMARY],
+        "def_provider": "openrouter",
+        "def_model": _CODE_DEFAULTS[SLOT_PRIMARY],
+    },
+    SLOT_FALLBACK: {
+        "kind": SLOT_KIND_VISION,
+        "label": "Vision — Fallback",
+        "service": "interpretation",
+        "env_gw": "LLM_GATEWAY_INTERPRETATION",
+        "env_model": _ENV_VARS[SLOT_FALLBACK],
+        "legacy_model_key": _SLOT_KEYS[SLOT_FALLBACK],
+        "def_provider": "openrouter",
+        "def_model": _CODE_DEFAULTS[SLOT_FALLBACK],
+    },
+    SLOT_PREFILTER: {
+        "kind": SLOT_KIND_VISION,
+        "label": "Vision — Prefilter",
+        "service": "interpretation",
+        "env_gw": "LLM_GATEWAY_PREFILTER",
+        "env_model": _ENV_VARS[SLOT_PREFILTER],
+        "legacy_model_key": _SLOT_KEYS[SLOT_PREFILTER],
+        "def_provider": "openrouter",
+        "def_model": _CODE_DEFAULTS[SLOT_PREFILTER],
+    },
+    # ---- Text services ----
+    "postmortem": {
+        "kind": SLOT_KIND_TEXT,
+        "label": "Postmortem",
+        "service": "postmortem",
+        "env_gw": "LLM_GATEWAY_POSTMORTEM",
+        "env_model": "SIGNAL_POSTMORTEM_MODEL",
+        "legacy_model_key": None,
+        "def_provider": "openrouter",
+        "def_model": "openai/gpt-4o-mini",
+    },
+    # NOTE (2026-05-29): the 'guru' and 'mcp' slots were intentionally NOT
+    # added here. ChartHacker Guru was removed in the earlier surgeon/guru
+    # cleanup, and the MCP tools route their LLM calls through the vision slots
+    # (intelligence.interpret → InterpretationService) rather than owning a
+    # model. Listing dead slots in the picker would mislead the operator, so
+    # only slots that a live service actually reads are registered.
+    "text_extract": {
+        "kind": SLOT_KIND_TEXT,
+        "label": "Text Signal Extract",
+        "service": "text_extraction",
+        "env_gw": "LLM_GATEWAY_TEXT_EXTRACT",
+        "env_model": "TEXT_EXTRACTION_MODEL",
+        "legacy_model_key": None,
+        "def_provider": "openrouter",
+        "def_model": "google/gemini-2.0-flash-001",
+    },
+    "chart_hacker_opinion": {
+        "kind": SLOT_KIND_TEXT,
+        "label": "ChartHacker Opinion (vision)",
+        "service": "chart_hacker_opinion",
+        "env_gw": "LLM_GATEWAY_CHART_HACKER_OPINION",
+        "env_model": "OPINION_MODEL",
+        "legacy_model_key": None,
+        # This one reads images too, so the UI should filter it to vision models.
+        "def_provider": "openrouter",
+        "def_model": "anthropic/claude-sonnet-4",
+        "vision_capable": True,
+    },
+}
+
+ALL_SLOTS = tuple(SLOT_REGISTRY.keys())
+
+# Slot-level cache: slot → ({"provider","model"}, expires_at).
+_SLOT_CACHE: Dict[str, Tuple[Dict[str, str], float]] = {}
+
+
+def _slot_def(slot: str) -> Dict[str, Any]:
+    sd = SLOT_REGISTRY.get(slot)
+    if sd is None:
+        raise ValueError(f"unknown slot: {slot!r} (must be one of {ALL_SLOTS})")
+    return sd
+
+
+def slot_is_vision(slot: str) -> bool:
+    """True if the slot consumes images (vision-only model filtering in the UI)."""
+    sd = _slot_def(slot)
+    return sd["kind"] == SLOT_KIND_VISION or bool(sd.get("vision_capable"))
+
+
+def list_slots() -> List[Dict[str, Any]]:
+    """Static description of every configurable slot (for the Settings UI)."""
+    out: List[Dict[str, Any]] = []
+    for name, sd in SLOT_REGISTRY.items():
+        out.append({
+            "slot": name,
+            "label": sd["label"],
+            "kind": sd["kind"],
+            "service": sd["service"],
+            "vision": slot_is_vision(name),
+            "def_provider": sd["def_provider"],
+            "def_model": sd["def_model"],
+        })
+    return out
+
+
+def _env_provider(slot: str) -> Optional[str]:
+    """Provider from env: LLM_GATEWAY_<SERVICE> → LLM_GATEWAY_DEFAULT."""
+    sd = _slot_def(slot)
+    raw = os.environ.get(sd["env_gw"]) or os.environ.get("LLM_GATEWAY_DEFAULT")
+    if raw and raw.strip():
+        return raw.strip().lower()
+    return None
+
+
+def _env_slot_model(slot: str) -> Optional[str]:
+    sd = _slot_def(slot)
+    raw = os.environ.get(sd["env_model"])
+    return raw.strip() if raw and raw.strip() else None
+
+
+async def _read_slot_db(pool, slot: str) -> Tuple[Optional[str], Optional[str]]:
+    """Read the model_slots JSON row → (provider, model). None,None if absent."""
+    try:
+        row = await pool.fetch_one(
+            "SELECT config_value FROM public.system_config "
+            "WHERE namespace = $1 AND config_key = $2",
+            (_SLOTS_NS, slot),
+        )
+    except Exception as exc:
+        logger.warning("model_config: slot DB read failed for %s: %s", slot, exc)
+        return None, None
+    if not row:
+        return None, None
+    val = row.get("config_value") if isinstance(row, dict) else row["config_value"]
+    if not val:
+        return None, None
+    try:
+        data = json.loads(val) if isinstance(val, str) else dict(val)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("model_config: slot JSON parse failed for %s: %s", slot, exc)
+        return None, None
+    prov = (data.get("provider") or "").strip().lower() or None
+    mdl = (data.get("model") or "").strip() or None
+    return prov, mdl
+
+
+async def get_slot(slot: str, *, pool=None) -> Dict[str, Any]:
+    """Resolve {provider, model} for a slot with full source attribution.
+
+    Returns a dict::
+
+        {"slot","kind","service","vision","provider","model",
+         "provider_source","model_source"}
+    """
+    sd = _slot_def(slot)
+
+    now = time.monotonic()
+    async with _CACHE_LOCK:
+        cached = _SLOT_CACHE.get(slot)
+        if cached and cached[1] > now:
+            c = cached[0]
+            return {
+                "slot": slot, "kind": sd["kind"], "service": sd["service"],
+                "vision": slot_is_vision(slot),
+                "provider": c["provider"], "model": c["model"],
+                "provider_source": c.get("provider_source", "cache"),
+                "model_source": c.get("model_source", "cache"),
+                "label": sd["label"],
+            }
+
+    if pool is None:
+        try:
+            from shared.utils.db import get_shared_pool
+            pool = await get_shared_pool()
+        except Exception as exc:
+            logger.warning("model_config: slot pool acquire failed: %s", exc)
+            pool = None
+
+    db_prov, db_model = (None, None)
+    legacy_model: Optional[str] = None
+    if pool is not None:
+        db_prov, db_model = await _read_slot_db(pool, slot)
+        # Vision slots: bridge to the Round-10 legacy row for the model.
+        if db_model is None and sd.get("legacy_model_key"):
+            try:
+                legacy_model = await _read_db_row(pool, slot)
+            except Exception:
+                legacy_model = None
+
+    # Provider resolution.
+    if db_prov:
+        provider, provider_source = db_prov, "db"
+    elif _env_provider(slot):
+        provider, provider_source = _env_provider(slot), "env"
+    else:
+        provider, provider_source = sd["def_provider"], "code_default"
+
+    # Model resolution.
+    if db_model:
+        model, model_source = db_model, "db"
+    elif legacy_model:
+        model, model_source = legacy_model, "legacy_db"
+    elif _env_slot_model(slot):
+        model, model_source = _env_slot_model(slot), "env"
+    else:
+        model, model_source = sd["def_model"], "code_default"
+
+    async with _CACHE_LOCK:
+        _SLOT_CACHE[slot] = (
+            {"provider": provider, "model": model,
+             "provider_source": provider_source, "model_source": model_source},
+            now + _CACHE_TTL_S,
+        )
+
+    return {
+        "slot": slot, "kind": sd["kind"], "service": sd["service"],
+        "vision": slot_is_vision(slot),
+        "provider": provider, "model": model,
+        "provider_source": provider_source, "model_source": model_source,
+        "label": sd["label"],
+    }
+
+
+async def set_slot(
+    slot: str,
+    provider: str,
+    model: str,
+    *,
+    pool=None,
+    actor_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist {provider, model} for a slot. Mirrors model into the legacy row
+    for vision slots so old callers stay consistent. Writes an audit row.
+    """
+    sd = _slot_def(slot)
+    provider = (provider or "").strip().lower()
+    model = (model or "").strip()
+    if provider not in ("openrouter", "requesty"):
+        raise ValueError(f"provider must be openrouter|requesty; got {provider!r}")
+    if not model:
+        raise ValueError("model must be a non-empty string")
+
+    if pool is None:
+        from shared.utils.db import get_shared_pool
+        pool = await get_shared_pool()
+
+    prev_prov, prev_model = await _read_slot_db(pool, slot)
+    payload = json.dumps({"provider": provider, "model": model})
+
+    await pool.execute(
+        """
+        INSERT INTO public.system_config (namespace, config_key, config_value, is_secret, updated_at)
+        VALUES ($1, $2, $3, FALSE, NOW())
+        ON CONFLICT (namespace, config_key) DO UPDATE
+          SET config_value = EXCLUDED.config_value, updated_at = NOW()
+        """,
+        (_SLOTS_NS, slot, payload),
+    )
+
+    # Vision back-compat mirror: keep chart_hacker/model.<slot> in sync.
+    if sd.get("legacy_model_key"):
+        await pool.execute(
+            """
+            INSERT INTO public.system_config (namespace, config_key, config_value, is_secret, updated_at)
+            VALUES ($1, $2, $3, FALSE, NOW())
+            ON CONFLICT (namespace, config_key) DO UPDATE
+              SET config_value = EXCLUDED.config_value, updated_at = NOW()
+            """,
+            (_NAMESPACE, sd["legacy_model_key"], model),
+        )
+
+    # Audit (best-effort).
+    try:
+        await pool.execute(
+            """
+            INSERT INTO public.model_config_audit
+                (slot, model_old, model_new, actor_label, changed_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            """,
+            (
+                slot,
+                f"{prev_prov or '?'}::{prev_model or '?'}",
+                f"{provider}::{model}",
+                actor_label or "unknown",
+            ),
+        )
+    except Exception as exc:
+        logger.warning("model_config: slot audit write failed (non-fatal): %s", exc)
+
+    async with _CACHE_LOCK:
+        _SLOT_CACHE.pop(slot, None)
+        # Also drop the legacy cache entry so get_model() re-reads.
+        _CACHE.pop(slot, None)
+
+    logger.info(
+        "model_config: slot=%s set provider=%s model=%s by %s",
+        slot, provider, model, actor_label or "unknown",
+    )
+    return {
+        "slot": slot, "provider": provider, "model": model,
+        "previous": {"provider": prev_prov, "model": prev_model},
+    }
+
+
+async def get_all_slots_v2(*, pool=None) -> Dict[str, Dict[str, Any]]:
+    """Resolve every slot (provider + model + sources) — for the Settings UI."""
+    if pool is None:
+        try:
+            from shared.utils.db import get_shared_pool
+            pool = await get_shared_pool()
+        except Exception:
+            pool = None
+    out: Dict[str, Dict[str, Any]] = {}
+    for name in SLOT_REGISTRY:
+        out[name] = await get_slot(name, pool=pool)
+    return out
+
+
+def invalidate_slot_cache(slot: Optional[str] = None) -> None:
+    """Drop cached slot value(s)."""
+    if slot is None:
+        _SLOT_CACHE.clear()
+        return
+    _SLOT_CACHE.pop(slot, None)

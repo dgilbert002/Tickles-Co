@@ -231,6 +231,129 @@ def _truncate(value: Any, max_len: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Phase A (2026-05-29) — promote graded postmortem lessons into MemU.
+#
+# MemU is the cross-company institutional memory. Until now it only received
+# outcome-less signal snapshots; the graded postmortem lessons (the actual
+# learning) were written ONLY to per-company mem0. These helpers close that
+# gap by also queuing the company-level lesson onto the durable memu_outbox
+# (kind='postmortem'), which the memu-listener writes into MemU `insights`.
+#
+# The outbox write is replicated locally rather than importing
+# interpretation_service.broadcast_insight (avoids a heavy / circular import).
+# MemU dedups on (kind, content_hash), so re-broadcasting is idempotent.
+# ---------------------------------------------------------------------------
+
+_MEMU_POSTMORTEM_KIND = "postmortem"
+
+
+def _build_postmortem_broadcast(
+    *,
+    company: str,
+    position_id: int,
+    symbol: str,
+    exchange: Optional[str],
+    direction: str,
+    outcome: str,
+    signal_source: str,
+    trader_handle: str,
+    parsed: Dict[str, Any],
+    correlation_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build a BroadcastPayload dict promoting a postmortem's graded lessons.
+
+    Returns ``None`` when there is no institutional-value content to promote
+    (i.e. neither a company lesson nor a detected edge), so callers can skip
+    the outbox write entirely.
+
+    Args:
+        company: Company slug (tenant) the position belongs to.
+        position_id: ``tracked_positions.id``.
+        symbol / exchange / direction / outcome: position descriptors.
+        signal_source: 'chart_hacker' (agent) or 'trader'.
+        trader_handle: normalised handle when source is a human trader.
+        parsed: the postmortem LLM output (lessons_for_company / _actor,
+            edge_detected, why_it_failed / why_it_worked).
+        correlation_id: optional; defaults to ``pm-<position_id>``.
+
+    Returns:
+        A BroadcastPayload-shaped dict, or ``None``.
+    """
+    company_lesson = (parsed.get("lessons_for_company") or "").strip()
+    actor_lesson = (parsed.get("lessons_for_actor") or "").strip()
+    edge = (parsed.get("edge_detected") or "").strip()
+    why_failed = (parsed.get("why_it_failed") or "").strip()
+    why_worked = (parsed.get("why_it_worked") or "").strip()
+
+    # Only promote lessons that carry cross-company value.
+    if not company_lesson and not edge:
+        return None
+
+    if (signal_source or "").lower() == "chart_hacker":
+        actor_type = "agent"
+        actor_id = "chart_hacker"
+    else:
+        actor_type = "trader"
+        actor_id = (trader_handle or "unknown").strip().lower() or "unknown"
+
+    lines = [f"# Postmortem — {symbol} {direction} → {outcome}"]
+    if company_lesson:
+        lines.append(f"\n**Lesson:** {company_lesson}")
+    if edge:
+        lines.append(f"\n**Edge detected:** {edge}")
+    if why_failed:
+        lines.append(f"\n**Why it failed:** {why_failed}")
+    elif why_worked:
+        lines.append(f"\n**Why it worked:** {why_worked}")
+    if actor_lesson:
+        lines.append(f"\n**Actor note:** {actor_lesson}")
+    body_md = "\n".join(lines)
+
+    payload: Dict[str, Any] = {
+        "schema_version": 1,
+        "company": company,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "insight_kind": _MEMU_POSTMORTEM_KIND,
+        "summary": f"{symbol} {direction} → {outcome}",
+        "body_md": body_md,
+        "correlation_id": correlation_id or f"pm-{position_id}",
+        "created_at_iso": datetime.now(timezone.utc).isoformat(),
+    }
+    if symbol:
+        payload["instrument_symbol_normalised"] = symbol
+    if exchange:
+        payload["instrument_exchange"] = exchange
+    if position_id:
+        payload["position_id"] = int(position_id)
+    return payload
+
+
+async def _broadcast_to_memu(pool: DatabasePool, payload: Dict[str, Any]) -> None:
+    """Durable outbox insert + pg_notify (mirrors broadcast_insight).
+
+    Args:
+        pool: shared Postgres pool.
+        payload: BroadcastPayload-shaped dict.
+    """
+    body = json.dumps(payload, separators=(",", ":"), default=str)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row_id = await conn.fetchval(
+                "INSERT INTO public.memu_outbox (payload) VALUES ($1::jsonb) "
+                "RETURNING id",
+                body,
+            )
+            await conn.execute(
+                "SELECT pg_notify('memu_broadcast', $1)", str(row_id)
+            )
+    logger.info(
+        "postmortem->MemU: queued outbox row=%s kind=%s pos=%s",
+        row_id, payload.get("insight_kind"), payload.get("position_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase J — push postmortem lessons into mem0 (closes the learning loop)
 # ---------------------------------------------------------------------------
 async def _push_lessons_to_mem0(
@@ -324,9 +447,8 @@ async def _push_lessons_to_mem0(
                 position["id"], exc,
             )
 
-    # company lesson — broadcast to MemU is handled elsewhere (broadcast_insight);
-    # also stamp it into chart_hacker's mem0 with about='company' so it shows up
-    # on recall regardless of which side opens the next analysis.
+    # company lesson — stamp into chart_hacker's mem0 with about='company' so it
+    # shows up on recall regardless of which side opens the next analysis.
     if company_lesson:
         text = f"Company lesson ({symbol} {direction} → {outcome}): {company_lesson}"
         meta_company = dict(metadata)
@@ -344,6 +466,33 @@ async def _push_lessons_to_mem0(
                 "postmortem→mem0: company-lesson add failed (position_id=%s): %s",
                 position["id"], exc,
             )
+
+    # Phase A — promote the graded lesson to MemU (cross-company institutional
+    # memory). Best-effort: never block the postmortem on a MemU hiccup.
+    try:
+        payload = _build_postmortem_broadcast(
+            company=company,
+            position_id=int(position["id"]),
+            symbol=symbol,
+            exchange=(
+                position["instrument_exchange"]
+                if "instrument_exchange" in position.keys()
+                else None
+            ),
+            direction=direction,
+            outcome=outcome,
+            signal_source=signal_source,
+            trader_handle=trader_handle,
+            parsed=parsed,
+        )
+        if payload is not None:
+            pool = await get_shared_pool()
+            await _broadcast_to_memu(pool, payload)
+    except Exception as exc:
+        logger.warning(
+            "postmortem→MemU: broadcast failed (position_id=%s): %s",
+            position["id"], exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +529,9 @@ class PostMortemService:
         self.prompt_version: Optional[str] = None
         self._prompts: Dict[str, Any] = {}
         self._model = model or _DEFAULT_MODEL
+        # Round 14: when the operator passes an explicit --model, it wins over
+        # the dashboard slot picker. Otherwise the "postmortem" slot controls it.
+        self._model_explicit = bool(model and str(model).strip())
 
     # ------------------------------------------------------------------
     # Lazy init
@@ -630,11 +782,20 @@ class PostMortemService:
         Returns:
             Tuple of (parsed_json_dict, latency_ms, model_actually_used).
         """
-        cfg = self._ensure_gateway()
+        # Round 14: resolve the "postmortem" slot (provider + model) from the
+        # dashboard picker. An explicit --model override still wins. We also
+        # strip the legacy "openrouter/" prefix some env values carry.
+        if self._model_explicit:
+            cfg = self._ensure_gateway()
+            model = self._model
+        else:
+            from shared.intelligence.gateway_config import resolve_slot_gateway
+            cfg, slot_model = await resolve_slot_gateway("postmortem")
+            model = slot_model[len("openrouter/"):] if slot_model.startswith("openrouter/") else slot_model
         start = datetime.now(timezone.utc)
         resp = await chat_completion(
             cfg,
-            model=self._model,
+            model=model,
             system_prompt=system_prompt,
             user_text=user_prompt,
             correlation_id=correlation_id,

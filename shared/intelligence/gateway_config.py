@@ -141,6 +141,26 @@ class GatewayConfig:
             except ValueError:
                 logger.warning("Invalid LLM_TEMPERATURE_%s: %s", service_name.upper(), temp_str)
 
+        # HEAL-2026-05-29 — max_tokens per service (env-overridable).
+        # The previous hard-pinned 2048 default truncated the interpretation
+        # vision response on complex dual-track charts, producing invalid JSON
+        # that the parser dropped (charts lost entirely). The vision schema
+        # (two trade arrays + chart_analysis + reasoning) needs more headroom,
+        # so interpretation now defaults to 8192 (operator wants COMPREHENSIVE
+        # reasoning for post-mortems/learning, not brevity); other services keep
+        # 2048. Override via LLM_MAX_TOKENS_<SERVICE> or LLM_MAX_TOKENS_DEFAULT.
+        _mt_default = 8192 if service_name.lower() == "interpretation" else 2048
+        _mt_str = (
+            os.environ.get(f"LLM_MAX_TOKENS_{service_name.upper()}")
+            or os.environ.get("LLM_MAX_TOKENS_DEFAULT")
+        )
+        max_tokens = _mt_default
+        if _mt_str:
+            try:
+                max_tokens = int(_mt_str)
+            except ValueError:
+                logger.warning("Invalid LLM_MAX_TOKENS_%s: %s", service_name.upper(), _mt_str)
+
         return cls(
             gateway=gateway,
             api_key=api_key,
@@ -148,9 +168,59 @@ class GatewayConfig:
             service_name=service_name,
             default_model=default_model,
             fallback_model=fallback_model,
+            max_tokens=max_tokens,
             temperature=temperature,
             cost_log_enabled=_COST_LOG_ENABLED,
         )
+
+
+    @classmethod
+    def for_provider(cls, provider: str, service_name: str) -> "GatewayConfig":
+        """Build a GatewayConfig for an EXPLICIT provider, bypassing the
+        LLM_GATEWAY_* env resolution.
+
+        Round 14 (2026-05-29): the model picker stores a per-slot provider in
+        the DB. When a service resolves its slot, it knows the provider already
+        and must NOT let the global env override it — otherwise choosing
+        "Requesty" for one slot and "OpenRouter" for another could not work.
+        Model/temperature/max_tokens still resolve per-service as before; the
+        caller passes the slot's model explicitly to call_vision_llm/
+        chat_completion, so ``default_model`` here is only a safety net.
+
+        Args:
+            provider: "openrouter" or "requesty".
+            service_name: Logical service name (drives cost-log role + per-service
+                model/temperature/max_tokens env overrides).
+        """
+        provider = (provider or "openrouter").strip().lower()
+        base = cls.for_service(service_name)
+        if provider == "requesty":
+            api_key = os.environ.get(
+                "REQUESTY_API_KEY",
+                os.environ.get(
+                    "REQUESTY_API",
+                    os.environ.get("TICKLES_APP_VISION_API_KEY", ""),
+                ),
+            )
+            # Treat present-but-empty as unset (the .env gotcha we just fixed).
+            if not (api_key or "").strip():
+                api_key = (
+                    os.environ.get("REQUESTY_API", "")
+                    or os.environ.get("TICKLES_APP_VISION_API_KEY", "")
+                )
+            base_url = os.environ.get(
+                "REQUESTY_BASE_URL",
+                os.environ.get("TICKLES_APP_REQUESTY_URL", "https://router.requesty.ai/v1"),
+            )
+        else:
+            provider = "openrouter"
+            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+            base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+        # Rebuild the frozen dataclass with the explicit provider/key/url,
+        # preserving the per-service model/temp/max_tokens already resolved.
+        from dataclasses import replace
+        return replace(base, gateway=provider, api_key=api_key, base_url=base_url)
 
 
 def get_gateway_for_service(service_name: str) -> "GatewayConfig":
@@ -163,6 +233,28 @@ def get_gateway_for_service(service_name: str) -> "GatewayConfig":
         GatewayConfig instance ready for use.
     """
     return GatewayConfig.for_service(service_name)
+
+
+async def resolve_slot_gateway(slot: str) -> "tuple[GatewayConfig, str]":
+    """Round 14: resolve a model-picker slot → (GatewayConfig, model_string).
+
+    The slot's provider (DB → env → default) decides the endpoint/key; the
+    slot's model is returned for the caller to pass to call_vision_llm /
+    chat_completion. This is the single entry point services should use so the
+    dashboard picker fully controls provider + model.
+
+    Falls back gracefully to the legacy per-service gateway if model_config is
+    unavailable for any reason.
+    """
+    try:
+        from shared.intelligence.model_config import get_slot
+        s = await get_slot(slot)
+        cfg = GatewayConfig.for_provider(s["provider"], s["service"])
+        return cfg, s["model"]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("resolve_slot_gateway(%s) failed, using legacy: %s", slot, exc)
+        cfg = GatewayConfig.for_service(slot)
+        return cfg, cfg.default_model
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +474,18 @@ async def call_vision_llm(
             agent_id=agent_id,
         )
 
-    choice = data.get("choices", [{}])[0]
+        choices = data.get("choices", [])
+    if not choices:
+        logger.warning("LLM returned empty choices array (model=%s, service=%s) — response may be blocked/filtered", model, cfg.service_name)
+    choice = (choices[0] if choices else {})
     content = choice.get("message", {}).get("content", "")
+    finish_reason = choice.get("finish_reason", "stop")
+    if finish_reason != "stop":
+        logger.warning(
+            "LLM finish_reason=%s (model=%s, service=%s, cid=%s) — "
+            "response may be truncated. Consider increasing max_tokens.",
+            finish_reason, model, cfg.service_name, correlation_id,
+        )
     return {
         "content": content,
         "model": data.get("model", model),
@@ -491,8 +593,18 @@ async def chat_completion(
             agent_id=agent_id,
         )
 
-    choice = data.get("choices", [{}])[0]
+        choices = data.get("choices", [])
+    if not choices:
+        logger.warning("LLM returned empty choices array (model=%s, service=%s) — response may be blocked/filtered", model, cfg.service_name)
+    choice = (choices[0] if choices else {})
     content = choice.get("message", {}).get("content", "")
+    finish_reason = choice.get("finish_reason", "stop")
+    if finish_reason != "stop":
+        logger.warning(
+            "LLM finish_reason=%s (model=%s, service=%s, cid=%s) — "
+            "response may be truncated. Consider increasing max_tokens.",
+            finish_reason, model, cfg.service_name, correlation_id,
+        )
     return {
         "content": content,
         "model": data.get("model", model),

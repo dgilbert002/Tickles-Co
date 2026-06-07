@@ -49,9 +49,15 @@ class CronCanary:
         """Query heartbeats and identify stale agents."""
         pool = await DatabasePool.get_instance()
         
-        # Fetch all heartbeats
+        # Fetch all heartbeats.
+        # 2026-05-29 fix: the table columns are `last_run_at` / `last_status`
+        # (see shared/intelligence/heartbeat.py + dashboard handle_services), NOT
+        # `last_heartbeat_at` / `status`. The old names raised on every cycle so
+        # this canary never actually alerted. Aliased back to the names the rest
+        # of this method expects.
         rows = await pool.fetch_all(
-            "SELECT agent_id, last_heartbeat_at, status, expected_interval_seconds, consecutive_failures "
+            "SELECT agent_id, last_run_at AS last_heartbeat_at, "
+            "last_status AS status, expected_interval_seconds, consecutive_failures "
             "FROM public.cron_heartbeats"
         )
 
@@ -61,8 +67,11 @@ class CronCanary:
         for row in rows:
             agent_id = row["agent_id"]
             last_ts = row["last_heartbeat_at"]
-            interval = row["expected_interval_seconds"]
-            
+            interval = row["expected_interval_seconds"] or 0
+
+            # Skip rows with no timestamp or no expected interval — can't judge.
+            if last_ts is None or not interval:
+                continue
             # Ensure last_ts is timezone-aware
             if last_ts.tzinfo is None:
                 last_ts = last_ts.replace(tzinfo=timezone.utc)

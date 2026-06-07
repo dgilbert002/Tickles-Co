@@ -303,8 +303,9 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
     if not _passes_prefilter(text, author):
         return None
 
-    gateway = get_gateway_for_service("text_extraction")
-    model = os.environ.get("TEXT_EXTRACTION_MODEL", "google/gemini-2.0-flash-001")
+    # Round 14: provider + model from the "text_extract" slot (dashboard picker).
+    from shared.intelligence.gateway_config import resolve_slot_gateway
+    gateway, model = await resolve_slot_gateway("text_extract")
 
     user_prompt = "Message:\n" + text[:2000]
 
@@ -321,7 +322,7 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
             model=model,
             system_prompt=_LLM_TEXT_SYSTEM,
             user_text=user_prompt,
-            max_tokens=500,
+            max_tokens=int(os.environ.get("TEXT_EXTRACTOR_MAX_TOKENS", "4096")),
         )
         content = response.get("content", "")
 
