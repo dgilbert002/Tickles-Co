@@ -104,10 +104,16 @@ class DemoBridge:
     def __init__(self):
         self._pool = None
         self._adapter = CcxtExecutionAdapter(demo_trading=True, default_type="spot")
+        self._adapter_swap = CcxtExecutionAdapter(demo_trading=True, default_type="swap")
         self._stop = asyncio.Event()
+
         self._mirrored: set = set()        # tracked_position IDs already mirrored
         self._orders: Dict[int, Dict] = {} # tracked_position_id → {account: order_id}
         self._acct_balance: Dict[str, float] = {}  # "{exchange}/{account}" → USDT balance (refreshed each tick)
+
+    def _adapter_for(self, exchange: str):
+        """Return spot adapter for bybit, swap adapter for bitget (balance lives in swap wallet)."""
+        return self._adapter_swap if exchange == "bitget" else self._adapter
 
     async def _ensure_pool(self):
         if self._pool is None:
@@ -161,7 +167,7 @@ class DemoBridge:
                     continue
                 seen.add(key)
                 try:
-                    bal = await self._adapter.fetch_balance(
+                    bal = await self._adapter_for(a["exchange"]).fetch_balance(
                         exchange=a["exchange"], account_name=a["account_name"])
                     usdt = float(bal.get("USDT") or 0.0)
                     if usdt > 0:
@@ -307,12 +313,13 @@ class DemoBridge:
         """Place limit order on demo accounts for a new signal."""
         tp_id = signal["id"]
         sym = signal["instrument_symbol"]
-        # Strip CCXT perp suffixes (:USDT, :USDC) — bitget and other
-        # exchanges use the bare symbol format (e.g. ZEC/USDT not
-        # ZEC/USDT:USDT). Also strip options contract suffixes so expired
-        # options aren't routed as spot orders.
-        sym = sym.replace(":USDT", "").replace(":USDC", "")
-        sym = _OPT_RE_DEMO.sub("", sym)
+        # Strip CCXT perp suffixes for spot exchanges (bybit), but KEEP them
+        # for swap exchanges (bitget — the demo balance is in the swap wallet).
+        # Also strip options contract suffixes.
+        import re as _re2
+        _opt_re = _re2.compile(r"-\d{6}-\d+-[PC]$")
+        sym = _opt_re.sub("", sym)
+        # Only strip :USDT/:USDC for non-bitget (spot) accounts handled per-signal
         direction = signal["direction"]
         entry = float(signal["entry_price"] or 0)
         sl = float(signal["stop_loss"] or 0) if signal.get("stop_loss") else None
@@ -383,12 +390,23 @@ class DemoBridge:
             else:
                 qty = max(round(qty, 6), 0.001)
 
+            # Per-account symbol: bybit (spot) needs bare format, bitget (swap)
+            # keeps the :USDT suffix (balance is in the swap wallet).
+            acct_sym = sym
+            # bitget demo: balance is in the swap wallet, keep perp suffix.
+            # bybit demo: spot wallet, strip perp suffix.
+            if acct["exchange"] == "bitget":
+                default_type = "swap"
+            else:
+                default_type = "spot"
+                acct_sym = acct_sym.replace(":USDT", "").replace(":USDC", "")
+
             try:
                 intent = ExecutionIntent(
                     company_id="jarvais", strategy_id=None, agent_id="demo_bridge",
                     exchange=acct["exchange"],
                     account_id_external=f"demo_signal_{tp_id}",
-                    symbol=sym, direction=direction, order_type=ORDER_TYPE_LIMIT,
+                    symbol=acct_sym, direction=direction, order_type=ORDER_TYPE_LIMIT,
                     quantity=qty, requested_price=entry,
                     stop_loss=sl if sl is not None and sl > 0 else None,
                     take_profit=tp if tp is not None and tp > 0 else None,
@@ -399,7 +417,7 @@ class DemoBridge:
                         "tracked_position_id": tp_id,
                     },
                 )
-                updates = await self._adapter.submit(intent)
+                updates = await self._adapter_for(acct["exchange"]).submit(intent)
                 acc = [u for u in updates if u.status == "accepted"]
                 
                 if acc:
@@ -472,7 +490,7 @@ class DemoBridge:
                                   exchange: str = "bybit"):
         """Cancel a limit order on the demo exchange."""
         try:
-            client = self._adapter._get_client(exchange, acct_name)
+            client = self._adapter_for(exchange)._get_client(exchange, acct_name)
             await asyncio.to_thread(client.cancel_order, order_id, "")
             LOG.info("Cancelled demo order %s for signal #%d (%s/%s)",
                      order_id, tp_id, exchange, acct_name)
@@ -499,7 +517,7 @@ class DemoBridge:
         )
         for r in rows:
             try:
-                client = self._adapter._get_client(r["exchange"], r["account_name"])
+                client = self._adapter_for(r["exchange"])._get_client(r["exchange"], r["account_name"])
                 raw = await asyncio.to_thread(
                     client.fetch_order, r["exchange_order_id"], r["symbol"])
             except Exception as exc:
