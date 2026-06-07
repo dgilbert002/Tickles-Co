@@ -113,19 +113,24 @@ class CcxtExecutionAdapter:
 
     def _load_creds_from_db(self, exchange: str, account_name: str) -> Dict[str, str]:
         try:
-            from shared.mcp.tools.db_helper import query as db_query
-            rows = db_query(
-                "SELECT api_key, api_secret, api_passphrase FROM public.exchange_accounts "
-                "WHERE exchange = %s AND account_name = %s AND is_active = TRUE LIMIT 1",
-                (exchange, account_name),
+            import subprocess, json
+            pw = os.environ.get("DB_PASSWORD", "")
+            result = subprocess.run(
+                ["psql", "-U", "admin", "-h", "localhost", "-d", "tickles_shared",
+                 "-t", "-A", "-c",
+                 f"SELECT api_key, api_secret, api_passphrase FROM exchange_accounts "
+                 f"WHERE exchange='{exchange}' AND account_name='{account_name}' AND is_active=TRUE"],
+                env={**os.environ, "PGPASSWORD": pw},
+                capture_output=True, text=True, timeout=5,
             )
-            if rows:
-                r = rows[0]
-                creds = {"apiKey": r["api_key"], "secret": r["api_secret"]}
-                if r.get("api_passphrase"):
-                    creds["password"] = r["api_passphrase"]
-                LOG.info("ccxt: loaded credentials from DB for %s/%s", exchange, account_name)
-                return creds
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split("|")
+                if len(parts) >= 2:
+                    creds = {"apiKey": parts[0], "secret": parts[1]}
+                    if len(parts) >= 3 and parts[2]:
+                        creds["password"] = parts[2]
+                    LOG.info("ccxt: loaded credentials from DB for %s/%s", exchange, account_name)
+                    return creds
         except Exception:
             pass
         return {}
@@ -151,20 +156,50 @@ class CcxtExecutionAdapter:
         mode_key = f"{exchange}:{account_name}:{symbol}"
         if mode_key in self._position_mode_set:
             return
-        if exchange != "bybit":
+
+        if exchange == "bybit":
+            try:
+                clean = symbol.replace("/", "").split(":")[0]
+                await asyncio.to_thread(
+                    lambda: client.private_post_v5_position_switch_mode({
+                        "category": "linear", "symbol": clean, "mode": 0,
+                    })
+                )
+            except Exception:
+                pass  # Already in one-way mode or not supported
             self._position_mode_set.add(mode_key)
             return
 
-        try:
-            clean = symbol.replace("/", "").split(":")[0]
-            await asyncio.to_thread(
-                lambda: client.private_post_v5_position_switch_mode({
-                    "category": "linear", "symbol": clean, "mode": 0,
-                })
-            )
+        if exchange == "bitget":
+            # Phase 1 (2026-05-29) FIX — Bitget reject code 40774:
+            # "The order type for unilateral position must also be the unilateral
+            # position type". This happens when the Bitget account is in
+            # one-way (unilateral) mode but ccxt sends hedge-mode order params
+            # (or vice-versa). We were NEVER setting Bitget's position mode —
+            # it was a silent no-op — so every Bitget demo order was rejected.
+            # Force one-way mode (hedged=False) once per account so create_order
+            # params line up with the account's mode. Best-effort: if it's
+            # already one-way, Bitget returns a benign "no change" error.
+            try:
+                await asyncio.to_thread(
+                    lambda: client.set_position_mode(False, symbol,
+                                                     {"productType": "USDT-FUTURES"})
+                )
+            except Exception:
+                # Fallback to the raw v2 endpoint if the unified call shape changes.
+                try:
+                    await asyncio.to_thread(
+                        lambda: client.private_mix_post_v2_mix_account_set_position_mode({
+                            "productType": "USDT-FUTURES", "posMode": "one_way_mode",
+                        })
+                    )
+                except Exception:
+                    pass
             self._position_mode_set.add(mode_key)
-        except Exception:
-            pass  # Already in one-way mode or not supported
+            return
+
+        # Other exchanges: nothing to do.
+        self._position_mode_set.add(mode_key)
 
     # ------------------------------------------------------------------
     # Submit order

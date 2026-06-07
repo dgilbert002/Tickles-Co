@@ -14,7 +14,7 @@ Design:
 Usage:
   python3 -m shared.daemons.demo_bridge
 """
-import asyncio, logging, os, signal, sys
+import asyncio, logging, os, re, signal, sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -24,9 +24,16 @@ from shared.execution.ccxt_adapter import CcxtExecutionAdapter
 from shared.execution.protocol import (
     ExecutionIntent, DIRECTION_LONG, DIRECTION_SHORT, ORDER_TYPE_LIMIT,
 )
+# Phase 1 (2026-05-29): forensic transaction log — every mirror event is
+# appended to /opt/tickles/shared/logs/paper_demo.log for the dashboard's
+# "Paper vs Demo vs Live" live-log viewer and shell-side grep.
+from shared.daemons.demo_forensic_log import flog
 
 LOG = logging.getLogger("demo.bridge")
 POLL_INTERVAL_S = int(os.environ.get("DEMO_BRIDGE_POLL_S", "15"))
+
+# Strip options-contract suffixes (e.g. -260531-90-P) before routing to CCXT.
+_OPT_RE_DEMO = re.compile(r"-\d{6}-\d+-[PC]$")
 
 # Phase 1 (2026-05-29) FIX — position sizing.
 #
@@ -50,6 +57,48 @@ POLL_INTERVAL_S = int(os.environ.get("DEMO_BRIDGE_POLL_S", "15"))
 DEMO_MARGIN_USD = float(os.environ.get("DEMO_MARGIN_USD", "50"))
 DEMO_NOTIONAL_SAFETY_PCT = float(os.environ.get("DEMO_NOTIONAL_SAFETY_PCT", "0.99"))
 
+# ---------------------------------------------------------------------------
+# Phase 6 (2026-05-29) — ACCURATE per-agent demo sizing.
+#
+# WHY: the flat DEMO_MARGIN_USD ($50) sizing above was safe but NOT faithful.
+# A demo account that mirrors `copy_spot_lev_3x` (3x notional on the full
+# wallet) was being sized identically to one mirroring a 5%-risk agent, so the
+# paper-vs-demo slippage/fee comparison was apples-to-oranges. To be a true
+# forensic mirror, each demo order must reproduce the EXACT sizing rule of the
+# paper agent assigned to that demo account, computed against the demo
+# account's REAL balance.
+#
+# Single source of truth for these rules: shared/intelligence/copy_trade_monitor.py
+# (AGENTS list + the "Position sizing by mode" block). Kept in sync here.
+#
+# agent_id → sizing mode
+AGENT_MODE: Dict[str, str] = {
+    "copy_spot_seq":        "spot_seq",     # full wallet, 1x, sequential
+    "copy_opt_spot_seq":    "spot_seq",
+    "copy_charthacker":     "spot_seq",     # mirrors chart_hacker — full wallet, 1x, sequential
+    "copy_rose_a":          "spot_seq",
+    "copy_spot_lev_3x":     "spot_lev_3x",  # full wallet, 3x, sequential
+    "copy_lev_3pct":        "lev_3pct",     # 3% risk, lev from SL, parallel
+    "copy_lev_parallel":    "lev_5pct",     # 5% risk, lev from SL, parallel
+    "copy_lev_be_lock":     "lev_5pct",
+    "copy_opt_lev_parallel":"lev_5pct",
+    "copy_opt_lev_be_lock": "lev_5pct",
+    "copy_rose_b":          "lev_5pct",
+    "copy_rose_c":          "lev_5pct",
+}
+# Max concurrent OPEN demo positions per account, by mode — mirrors the paper
+# agent's concurrency rule so the demo never over-places and exhausts margin.
+MODE_MAX_CONCURRENT: Dict[str, int] = {
+    "spot_seq": 1, "spot_lev_3x": 1, "lev_3pct": 33, "lev_5pct": 20,
+}
+# Risk % / leverage knobs (env-tunable; defaults match copy_trade_monitor).
+DEMO_RISK_PCT_5  = float(os.environ.get("DEMO_RISK_PCT_5",  "5.0"))
+DEMO_RISK_PCT_3  = float(os.environ.get("DEMO_RISK_PCT_3",  "3.0"))
+DEMO_SPOT_LEV_3X = float(os.environ.get("DEMO_SPOT_LEV_3X", "3.0"))
+DEMO_LEVERAGE_CAP= float(os.environ.get("DEMO_LEVERAGE_CAP","100.0"))
+# Fallback balance when the exchange balance can't be fetched (~paper wallet).
+DEMO_FALLBACK_BALANCE = float(os.environ.get("DEMO_FALLBACK_BALANCE", "1000.0"))
+
 
 class DemoBridge:
     def __init__(self):
@@ -58,6 +107,7 @@ class DemoBridge:
         self._stop = asyncio.Event()
         self._mirrored: set = set()        # tracked_position IDs already mirrored
         self._orders: Dict[int, Dict] = {} # tracked_position_id → {account: order_id}
+        self._acct_balance: Dict[str, float] = {}  # "{exchange}/{account}" → USDT balance (refreshed each tick)
 
     async def _ensure_pool(self):
         if self._pool is None:
@@ -65,7 +115,13 @@ class DemoBridge:
         return self._pool
 
     async def _load_mappings(self) -> Dict[str, List[Dict]]:
-        """Load agent→account mappings: {agent_id: [{exchange, account_name}, ...]}"""
+        """Load agent→account mappings: {agent_id: [{exchange, account_name}, ...]}
+
+        Also populates self._acct_agent — the REVERSE map keyed by
+        "{exchange}/{account_name}" → agent_id — so every demo order we place
+        can be stamped with the agent it belongs to (the demo account follows
+        that agent's scenario). Mappings are currently 1 account ↔ 1 agent.
+        """
         pool = await self._ensure_pool()
         rows = await pool.fetch_all("""
             SELECT cae.agent_id, ea.exchange, ea.account_name
@@ -76,18 +132,117 @@ class DemoBridge:
             ORDER BY cae.priority
         """)
         mappings: Dict[str, List[Dict]] = {}
+        self._acct_agent = {}
         for r in rows:
             mappings.setdefault(r["agent_id"], []).append({
                 "exchange": r["exchange"], "account_name": r["account_name"],
             })
+            self._acct_agent[f"{r['exchange']}/{r['account_name']}"] = r["agent_id"]
         return mappings
 
+    def _agent_for_account(self, exchange: str, account_name: str) -> Optional[str]:
+        """Which competition agent is this demo account mirroring? (reverse map)"""
+        return getattr(self, "_acct_agent", {}).get(f"{exchange}/{account_name}")
+
+    async def _refresh_balances(self, mappings: Dict[str, List[Dict]]):
+        """Pull the REAL USDT balance for every mapped demo account once per tick.
+
+        The accurate sizing model derives each order's notional from the demo
+        account's actual balance (so a demo order reproduces what the paper
+        agent would do with the same money). We cache it per tick to avoid one
+        balance call per signal. On failure we keep the last value, falling back
+        to DEMO_FALLBACK_BALANCE the first time.
+        """
+        seen = set()
+        for accts in mappings.values():
+            for a in accts:
+                key = f"{a['exchange']}/{a['account_name']}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    bal = await self._adapter.fetch_balance(
+                        exchange=a["exchange"], account_name=a["account_name"])
+                    usdt = float(bal.get("USDT") or 0.0)
+                    if usdt > 0:
+                        self._acct_balance[key] = usdt
+                except Exception as exc:
+                    LOG.debug("balance refresh %s failed: %s", key, exc)
+                self._acct_balance.setdefault(key, DEMO_FALLBACK_BALANCE)
+
+    def _compute_demo_size(self, agent_id: Optional[str], balance: float,
+                           entry: float, sl: Optional[float]):
+        """Reproduce the mapped paper agent's sizing rule against `balance`.
+
+        Mirrors shared/intelligence/copy_trade_monitor.py exactly:
+          - spot_seq      : allocated = full balance,        leverage = 1
+          - spot_lev_3x   : allocated = full balance,        leverage = 3 (cfg)
+          - lev_3pct      : allocated = 3% of balance,       leverage = 1/sl_dist (cap)
+          - lev_5pct      : allocated = 5% of balance,       leverage = 1/sl_dist (cap)
+        Notional = allocated * leverage. `allocated` is shaved by the safety pct
+        so margin stays just under the free balance (fee/slippage headroom).
+        Returns (mode, allocated, leverage_int, notional).
+        """
+        mode = AGENT_MODE.get(agent_id or "", "lev_5pct")
+        bal = balance if balance and balance > 0 else DEMO_FALLBACK_BALANCE
+        # Leverage from SL distance — identical formula to the paper agents.
+        if sl and sl > 0 and entry > 0:
+            sl_dist = abs(entry - sl) / entry
+        else:
+            sl_dist = 0.05
+        if sl_dist < 0.005:
+            sl_dist = 0.005
+        lev_from_sl = min((1.0 / sl_dist) * 0.97, DEMO_LEVERAGE_CAP)
+
+        if mode == "spot_seq":
+            allocated, leverage = bal, 1.0
+        elif mode == "spot_lev_3x":
+            allocated, leverage = bal, DEMO_SPOT_LEV_3X
+        elif mode == "lev_3pct":
+            allocated, leverage = bal * (DEMO_RISK_PCT_3 / 100.0), lev_from_sl
+        else:  # lev_5pct
+            allocated, leverage = bal * (DEMO_RISK_PCT_5 / 100.0), lev_from_sl
+
+        allocated *= DEMO_NOTIONAL_SAFETY_PCT  # headroom for fees/slippage
+        notional = allocated * leverage
+        lev_int = max(1, min(int(round(leverage)), int(DEMO_LEVERAGE_CAP)))
+        return mode, allocated, lev_int, notional
+
+    async def _open_demo_count(self, exchange: str, account_name: str) -> int:
+        """How many demo positions/orders are currently live for this account.
+
+        Counts pending resting orders + filled-and-still-open positions, so we
+        can enforce the agent's max-concurrent rule on the demo side.
+        """
+        pool = await self._ensure_pool()
+        row = await pool.fetch_one(
+            "SELECT COUNT(*) AS n FROM public.demo_orders "
+            "WHERE exchange=%s AND account_name=%s "
+            "AND (status='pending' OR (status='filled' AND closed_at IS NULL))",
+            (exchange, account_name))
+        return int(row["n"] if row else 0)
+
     async def _load_mirrored(self):
-        """Load already-mirrored tracked_position IDs from persistent tracking."""
+        """Load already-mirrored tracked_position IDs from persistent tracking.
+
+        Phase 1 (2026-05-29) FIX — duplicate-order stacking on restart:
+        previously this only excluded positions that had a PAPER fill
+        (competition_trades). A pending signal whose paper leg had not yet
+        filled was NOT excluded, so EVERY daemon restart re-placed a fresh
+        resting limit order for it — duplicate orders piled up on the exchange
+        and ate the account margin ("ab not enough" / "balance not enough").
+        We now ALSO exclude any tracked_position that already has a
+        pending/filled demo order, so restarts never duplicate. Rejected
+        orders are intentionally NOT excluded so they can be retried after the
+        underlying cause (balance/position-mode) is fixed.
+        """
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
             "SELECT DISTINCT tracked_position_id FROM public.competition_trades "
-            "WHERE contest_id = 'copy-trade-scenarios' AND tracked_position_id IS NOT NULL"
+            "WHERE contest_id = 'copy-trade-scenarios' AND tracked_position_id IS NOT NULL "
+            "UNION "
+            "SELECT DISTINCT tracked_position_id FROM public.demo_orders "
+            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled')"
         )
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
@@ -128,9 +283,9 @@ class DemoBridge:
 
     async def _agent_for_actor(self, actor_id: str, mappings: Dict[str, List[Dict]]) -> Optional[str]:
         """Map tracked_position actor_id to competition agent_id."""
-        # ChartHacker → copy_ch_ai_vision
+        # ChartHacker → copy_charthacker
         if actor_id == 'jarvais_chart_hacker':
-            return 'copy_ch_ai_vision'
+            return 'copy_charthacker'
         # Rose → copy_rose_a (primary rose agent)
         if actor_id == 'jarvais_rose_ch':
             return 'copy_rose_a'
@@ -139,8 +294,12 @@ class DemoBridge:
         # We check all mapped agents to see if they trade this signal type
         for agent_id in mappings:
             if actor_id.startswith('jarvais_trader_'):
-                # All regular agents trade trader signals
-                if not agent_id.startswith('copy_ch_') and not agent_id.startswith('copy_rose_'):
+                # All regular agents trade trader signals. Exclude the
+                # chart_hacker copier (copy_charthacker) and the rose copiers
+                # — they only mirror their own source. (2026-05-29 rename: the
+                # old `startswith('copy_ch_')` test no longer matches
+                # 'copy_charthacker', so exclude it explicitly.)
+                if agent_id != 'copy_charthacker' and not agent_id.startswith('copy_rose_'):
                     return agent_id
         return None
 
@@ -148,6 +307,12 @@ class DemoBridge:
         """Place limit order on demo accounts for a new signal."""
         tp_id = signal["id"]
         sym = signal["instrument_symbol"]
+        # Strip CCXT perp suffixes (:USDT, :USDC) — bitget and other
+        # exchanges use the bare symbol format (e.g. ZEC/USDT not
+        # ZEC/USDT:USDT). Also strip options contract suffixes so expired
+        # options aren't routed as spot orders.
+        sym = sym.replace(":USDT", "").replace(":USDC", "")
+        sym = _OPT_RE_DEMO.sub("", sym)
         direction = signal["direction"]
         entry = float(signal["entry_price"] or 0)
         sl = float(signal["stop_loss"] or 0) if signal.get("stop_loss") else None
@@ -175,34 +340,49 @@ class DemoBridge:
                 seen.add(key)
                 unique_accounts.append(a)
         
-        # Determine leverage from SL distance (must come BEFORE sizing now).
-        leverage = 1
-        if sl and sl > 0:
-            sl_dist = abs(entry - sl) / entry
-            if sl_dist > 0.005:
-                leverage = min(int((1.0 / sl_dist) * 0.97), 100)
-
-        # Phase 1 (2026-05-29) sizing — margin-based, NOT full-wallet.
-        # Commit a small fixed margin per trade (matches the paper risk model)
-        # then derive notional = margin * leverage. See DEMO_MARGIN_USD note at
-        # the top of the file. Capped so it never exceeds the signal's own
-        # notional (when the signal is genuinely small) and shaved by the safety
-        # pct for fee/slippage headroom.
-        margin_usd = DEMO_MARGIN_USD * DEMO_NOTIONAL_SAFETY_PCT
-        notional_eff = margin_usd * leverage
-        if notional > 0:
-            notional_eff = min(notional_eff, notional)  # never upsize beyond the signal
-
-        # Calculate quantity from notional / entry
-        qty = notional_eff / entry if notional_eff > 0 and entry > 0 else 0.001
-        if entry >= 1000:
-            qty = round(qty, 3)
-        elif entry >= 1:
-            qty = round(qty, 1)
-        else:
-            qty = max(round(qty, 6), 0.001)
-        
+        # Phase 6 (2026-05-29) — ACCURATE per-agent sizing.
+        # The OLD flat DEMO_MARGIN_USD logic is removed: each account is now
+        # sized by the EXACT rule of the paper agent it mirrors (see
+        # _compute_demo_size), computed against the account's real balance.
+        # Leverage, allocated margin, notional and the concurrency cap are all
+        # resolved per-account INSIDE the loop below.
         for acct in unique_accounts:
+            # Which agent does this demo account mirror?
+            agent_id = self._agent_for_account(acct["exchange"], acct["account_name"])
+            acct_key = f"{acct['exchange']}/{acct['account_name']}"
+            balance = self._acct_balance.get(acct_key, DEMO_FALLBACK_BALANCE)
+
+            # Reproduce the mapped agent's sizing rule against the real balance.
+            # NOTE: we deliberately do NOT cap to signal["notional_usd"] — that
+            # field is always the paper WALLET (1000), not a position ceiling.
+            # Capping to it would clamp spot_lev_3x (3x notional) and the
+            # leveraged agents back to ~1000 and silently undo accurate sizing.
+            mode, allocated, leverage, notional_eff = self._compute_demo_size(
+                agent_id, balance, entry, sl)
+
+            # Respect the agent's max-concurrent rule on the demo side so we
+            # don't over-place and exhaust margin (sequential agents = 1 at a
+            # time; 5%/3% parallel agents = 20/33).
+            cap = MODE_MAX_CONCURRENT.get(mode, 20)
+            open_n = await self._open_demo_count(acct["exchange"], acct["account_name"])
+            if open_n >= cap:
+                LOG.info("Signal #%d → %s/%s: SKIP (agent %s mode %s at cap %d/%d)",
+                         tp_id, acct["exchange"], acct["account_name"],
+                         agent_id or "?", mode, open_n, cap)
+                flog("mirror_skipped_cap", tp_id=tp_id, agent=agent_id,
+                     exchange=acct["exchange"], account=acct["account_name"],
+                     mode=mode, open_count=open_n, cap=cap)
+                continue
+
+            # Quantity from the per-account notional.
+            qty = notional_eff / entry if notional_eff > 0 and entry > 0 else 0.001
+            if entry >= 1000:
+                qty = round(qty, 3)
+            elif entry >= 1:
+                qty = round(qty, 1)
+            else:
+                qty = max(round(qty, 6), 0.001)
+
             try:
                 intent = ExecutionIntent(
                     company_id="jarvais", strategy_id=None, agent_id="demo_bridge",
@@ -225,14 +405,20 @@ class DemoBridge:
                 if acc:
                     ext_id = acc[0].external_order_id
                     self._orders.setdefault(tp_id, {})[acct["account_name"]] = ext_id
-                    LOG.info("Signal #%d → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
-                             tp_id, acct["exchange"], acct["account_name"],
+                    LOG.info("Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
+                             tp_id, agent_id or "?", acct["exchange"], acct["account_name"],
                              direction, sym, qty, entry, sl, tp, leverage,
                              ext_id or "?")
+                    flog("mirror_placed", tp_id=tp_id, agent=agent_id,
+                         exchange=acct["exchange"], account=acct["account_name"],
+                         symbol=sym, direction=direction, paper_entry=entry,
+                         sl=sl, tp=tp, qty=qty, leverage=leverage,
+                         notional=round(notional_eff, 2), order_id=ext_id)
                     # Record in demo_orders table for comparison tracking.
                     # Phase 1 (2026-05-29): record the EFFECTIVE notional we
                     # actually sized to (after the safety factor), not the raw
                     # 1000, so the dashboard "Demo Orders $" KPI is honest.
+                    # Now also stamps agent_id (account↔agent attribution).
                     # Removed the per-insert `pool.close()` — the pool is a shared
                     # singleton; closing it here broke subsequent ticks/daemons.
                     try:
@@ -240,38 +426,47 @@ class DemoBridge:
                         await pool.execute(
                             "INSERT INTO public.demo_orders "
                             "(tracked_position_id, exchange, account_name, exchange_order_id, "
-                            "symbol, direction, paper_entry, paper_sl, paper_tp, leverage, quantity, "
-                            "notional_usd, status, ordered_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
+                            "agent_id, symbol, direction, paper_entry, paper_sl, paper_tp, "
+                            "leverage, quantity, notional_usd, status, ordered_at) "
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
                             "ON CONFLICT DO NOTHING",
                             (tp_id, acct["exchange"], acct["account_name"], ext_id,
-                             sym, direction, entry, sl, tp, leverage, qty, notional_eff)
+                             agent_id, sym, direction, entry, sl, tp, leverage, qty, notional_eff)
                         )
                     except Exception as exc:
                         LOG.debug("demo_orders insert (accepted) failed: %s", exc)
                 else:
                     rej = [u for u in updates if u.status == "rejected"]
-                    LOG.warning("Signal #%d → %s/%s FAILED: %s",
-                                tp_id, acct["exchange"], acct["account_name"],
-                                rej[0].message if rej else "unknown")
+                    rej_msg = rej[0].message if rej else "unknown"
+                    LOG.warning("Signal #%d [%s] → %s/%s FAILED: %s",
+                                tp_id, agent_id or "?", acct["exchange"],
+                                acct["account_name"], rej_msg)
+                    flog("mirror_rejected", tp_id=tp_id, agent=agent_id,
+                         exchange=acct["exchange"], account=acct["account_name"],
+                         symbol=sym, direction=direction, paper_entry=entry,
+                         qty=qty, leverage=leverage,
+                         reason=(rej_msg or "")[:300])
                     # Record error (no pool.close() — shared singleton, see above)
                     try:
                         pool = await self._ensure_pool()
                         await pool.execute(
                             "INSERT INTO public.demo_orders "
-                            "(tracked_position_id, exchange, account_name, symbol, direction, "
+                            "(tracked_position_id, exchange, account_name, agent_id, symbol, direction, "
                             "paper_entry, paper_sl, paper_tp, leverage, quantity, notional_usd, "
                             "status, error_message, ordered_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'rejected',%s,NOW())",
-                            (tp_id, acct["exchange"], acct["account_name"], sym, direction,
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'rejected',%s,NOW())",
+                            (tp_id, acct["exchange"], acct["account_name"], agent_id, sym, direction,
                              entry, sl, tp, leverage, qty, notional_eff,
-                             rej[0].message[:500] if rej else "unknown")
+                             (rej_msg or "unknown")[:500])
                         )
                     except Exception as exc:
                         LOG.debug("demo_orders insert (rejected) failed: %s", exc)
             except Exception as exc:
                 LOG.error("Signal #%d → %s/%s ERROR: %s",
                           tp_id, acct["exchange"], acct["account_name"], exc)
+                flog("mirror_error", tp_id=tp_id, agent=agent_id,
+                     exchange=acct["exchange"], account=acct["account_name"],
+                     symbol=sym, error=str(exc)[:300])
 
     async def _cancel_demo_order(self, tp_id: int, acct_name: str, order_id: str,
                                   exchange: str = "bybit"):
@@ -297,7 +492,7 @@ class DemoBridge:
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
             "SELECT id, exchange, account_name, exchange_order_id, symbol, "
-            "       paper_entry "
+            "       paper_entry, agent_id, direction "
             "FROM public.demo_orders "
             "WHERE status = 'pending' AND exchange_order_id IS NOT NULL "
             "ORDER BY ordered_at ASC LIMIT 50"
@@ -317,23 +512,59 @@ class DemoBridge:
                 avg = float(avg)
                 paper_entry = float(r["paper_entry"] or 0)
                 slip = ((avg - paper_entry) / paper_entry) if paper_entry > 0 else None
+                # Phase 1 (2026-05-29): capture the execution fee on the entry
+                # fill so the forensic audit accounts for every cent. CCXT
+                # normalises this into raw["fee"]["cost"] (or a list in
+                # raw["fees"]). Best-effort — NULL stays NULL if unavailable.
+                entry_fee = self._extract_fee(raw)
                 await pool.execute(
                     "UPDATE public.demo_orders SET status='filled', demo_entry=%s, "
-                    "filled_at=NOW(), slippage_entry=%s, updated_at=NOW() WHERE id=%s",
-                    (avg, slip, r["id"]))
-                LOG.info("Demo order %s FILLED @ %.6f (slip=%s)",
+                    "filled_at=NOW(), slippage_entry=%s, entry_fee=%s, "
+                    "fees_synced_at=NOW(), updated_at=NOW() WHERE id=%s",
+                    (avg, slip, entry_fee, r["id"]))
+                LOG.info("Demo order %s FILLED @ %.6f (slip=%s fee=%s)",
                          r["exchange_order_id"], avg,
-                         f"{slip:.4%}" if slip is not None else "n/a")
+                         f"{slip:.4%}" if slip is not None else "n/a",
+                         entry_fee)
+                flog("fill", demo_order_id=r["id"], agent=r["agent_id"],
+                     exchange=r["exchange"], account=r["account_name"],
+                     symbol=r["symbol"], direction=r["direction"],
+                     paper_entry=float(r["paper_entry"] or 0), demo_entry=avg,
+                     slippage_pct=(round(slip * 100, 4) if slip is not None else None),
+                     entry_fee=entry_fee, order_id=r["exchange_order_id"])
             elif status in ("canceled", "cancelled", "rejected", "expired"):
                 await pool.execute(
                     "UPDATE public.demo_orders SET status='cancelled', updated_at=NOW() "
                     "WHERE id=%s", (r["id"],))
+                flog("cancel", demo_order_id=r["id"], agent=r["agent_id"],
+                     exchange=r["exchange"], account=r["account_name"],
+                     symbol=r["symbol"], exchange_status=status,
+                     order_id=r["exchange_order_id"])
+
+    @staticmethod
+    def _extract_fee(raw: Dict) -> Optional[float]:
+        """Best-effort total execution fee (USDT) from a CCXT order dict."""
+        try:
+            fee = raw.get("fee")
+            if isinstance(fee, dict) and fee.get("cost") is not None:
+                return abs(float(fee["cost"]))
+            fees = raw.get("fees")
+            if isinstance(fees, list) and fees:
+                total = sum(abs(float(f.get("cost") or 0)) for f in fees
+                            if isinstance(f, dict))
+                return total or None
+        except (TypeError, ValueError):
+            pass
+        return None
 
     async def tick(self):
         mappings = await self._load_mappings()
         if not mappings:
             return
-        
+
+        # 0. Refresh real demo-account balances (drives accurate per-agent sizing)
+        await self._refresh_balances(mappings)
+
         # 1. Place limit orders for new signals
         signals = await self._get_new_signals()
         if signals:
