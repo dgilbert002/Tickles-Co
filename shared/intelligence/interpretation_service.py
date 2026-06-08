@@ -5173,29 +5173,100 @@ class InterpretationService:
         media_results: List[Dict[str, Any]] = []
         if media_rows:
             logger.info("Interpretation cycle: %d media items to process", len(media_rows))
-            for row in media_rows:
-                if self._stop.is_set():
-                    break
+            # ── Agent 4: parallelise the media processing loop ──────────
+            # Semaphore caps concurrent LLM calls to avoid thundering-herd
+            # rate limits and DB connection exhaustion.  Default 4; env-
+            # overrideable via INTERPRETATION_CONCURRENCY.
+            import os as _os4
+            _max_concurrent = int(_os4.environ.get("INTERPRETATION_CONCURRENCY", "5"))
+            _sem = asyncio.Semaphore(_max_concurrent)
+            # Per-item retry budget (transient failures only: HTTP 429/5xx,
+            # timeout, connection errors).  Non-retryable errors (like
+            # missing file or budget-exceeded) propagate on first attempt.
+            _max_retries = 2  # 1 initial + 2 retries = 3 total attempts per item
+
+            async def _process_one_with_retry(
+                idx: int, row: Dict[str, Any]
+            ) -> Dict[str, Any]:
+                """Process a single media row under the shared semaphore with
+                staggered start and retry for transient failures."""
+                # Staggered start: each task waits idx * 0.5s before acquiring
+                # the semaphore, spreading the initial connection storm.
+                await asyncio.sleep(idx * 0.5)
+                last_exc: Optional[Exception] = None
+                for attempt in range(1 + _max_retries):
+                    if self._stop.is_set():
+                        return {
+                            "media_id": row.get("media_id"),
+                            "status": "cancelled",
+                            "reason": "stop requested",
+                        }
+                    async with _sem:
+                        try:
+                            result = await self._process_one(row)
+                            return result
+                        except Exception as exc:
+                            last_exc = exc
+                            # Only retry on transient-looking errors
+                            msg = str(exc).lower()
+                            transient = any(
+                                tag in msg
+                                for tag in (
+                                    "429", "rate limit", "too many requests",
+                                    "503", "502", "504",
+                                    "timeout", "timed out",
+                                    "connection", "connect",
+                                    "temporarily",
+                                )
+                            )
+                            if not transient or attempt == _max_retries:
+                                break
+                            backoff = (attempt + 1) * 2.0  # 2s, 4s
+                            logger.warning(
+                                "media_id=%s attempt %d/%d transient failure, "
+                                "retrying in %.1fs: %s",
+                                row.get("media_id"), attempt + 1,
+                                1 + _max_retries, backoff, exc,
+                            )
+                            await asyncio.sleep(backoff)
+
+                # Exhausted retries or non-transient failure
+                logger.exception(
+                    "Unexpected error processing media_id=%s after %d attempts: %s",
+                    row.get("media_id"), 1 + _max_retries, last_exc,
+                )
                 try:
-                    result = await self._process_one(row)
-                    media_results.append(result)
-                except Exception as exc:
-                    logger.exception("Unexpected error processing media_id=%s: %s", row.get("media_id"), exc)
-                    try:
-                        await update_media_status(
-                            shared_pool,
-                            row["media_id"],
-                            "failed",
-                            error=f"unexpected: {exc}"[:500],
-                            expected_processed_at=row.get("claim_ts"),
-                        )
-                    except Exception:
-                        pass
+                    await update_media_status(
+                        shared_pool,
+                        row["media_id"],
+                        "failed",
+                        error=f"unexpected: {last_exc}"[:500],
+                        expected_processed_at=row.get("claim_ts"),
+                    )
+                except Exception:
+                    pass
+                return {
+                    "media_id": row.get("media_id"),
+                    "status": "failed",
+                    "reason": str(last_exc),
+                }
+
+            # Launch all tasks concurrently (they self-throttle via semaphore)
+            tasks = [
+                _process_one_with_retry(i, row)
+                for i, row in enumerate(media_rows)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.error("Media task raised unhandled exception: %s", r)
                     media_results.append({
-                        "media_id": row.get("media_id"),
+                        "media_id": "unknown",
                         "status": "failed",
-                        "reason": str(exc),
+                        "reason": str(r),
                     })
+                else:
+                    media_results.append(r)
 
         # ── Text-only track ───────────────────────────────────────────
         text_results: List[Dict[str, Any]] = []
