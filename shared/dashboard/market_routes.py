@@ -28,11 +28,27 @@ from shared.utils.db import get_shared_pool
 logger = logging.getLogger("tickles.dashboard.market_routes")
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9./:_-]{2,40}$")
-_ALLOWED_TF = {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d", "3d", "1w"}
-_TF_ALIASES = {"1M":"1m","5M":"5m","15M":"15m","30M":"30m","1H":"1h","2H":"2h","4H":"4h","8H":"8h","1D":"1d","3D":"3d","1W":"1w","D":"1d","W":"1w"}
-_TF_SECONDS = {"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"2h":7200,"4h":14400,"8h":28800,"1d":86400,"3d":259200,"1w":604800}
+_ALLOWED_TF = {"1m", "5m", "15m", "30m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
+_TF_ALIASES = {
+    "1M": "1m", "5M": "5m", "15M": "15m", "30M": "30m", "30": "30m",
+    "1H": "1h", "2H": "2h", "3H": "3h", "4H": "4h", "6H": "6h", "8H": "8h", "12H": "12h",
+    "1D": "1d", "3D": "3d", "1W": "1w", "D": "1d", "W": "1w", "H1": "1h", "H4": "4h",
+    "M5": "5m",
+}
+_TF_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "3h": 10800,
+    "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200, "1d": 86400, "3d": 259200, "1w": 604800,
+}
 _NATIVE_TF = {"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"}
-_AGGREGATE_TF = {"2h": ("1h", 2), "8h": ("4h", 2), "3d": ("1d", 3)}
+# Aggregates built from stored 1m candles (user preference) or native base where noted.
+_AGGREGATE_TF = {
+    "2h": ("1m", 120),
+    "3h": ("1m", 180),
+    "6h": ("1m", 360),
+    "8h": ("4h", 2),
+    "12h": ("1m", 720),
+    "3d": ("1d", 3),
+}
 
 
 def _json_default(obj: Any) -> Any:
@@ -81,6 +97,33 @@ def _clean_symbol(raw: Optional[str]) -> Optional[str]:
     return s.replace(".P", "")
 
 
+def _resolve_candle_symbol(raw: Optional[str], fallback: Optional[str]) -> str:
+    """Map chart axis labels (e.g. TradingView ``BTCUSD``) to stored instruments."""
+    fb = _clean_symbol(fallback) or "BTC/USDT"
+    if not raw:
+        return fb
+    try:
+        from shared.utils.instrument_normaliser import to_canonical_symbol
+        canon = to_canonical_symbol(str(raw).strip()) or _clean_symbol(raw) or fb
+    except Exception:
+        canon = _clean_symbol(raw) or fb
+    # USDT-margined crypto charts often label the axis BTCUSD; we store BTC/USDT.
+    _USD_TO_USDT = {
+        "BTC/USD": "BTC/USDT",
+        "ETH/USD": "ETH/USDT",
+        "SOL/USD": "SOL/USDT",
+        "XRP/USD": "XRP/USDT",
+        "DOGE/USD": "DOGE/USDT",
+    }
+    if canon in _USD_TO_USDT:
+        return _USD_TO_USDT[canon]
+    cleaned = _clean_symbol(canon) or fb
+    if cleaned in ("BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD"):
+        base = cleaned[:-3]
+        return f"{base}/USDT"
+    return cleaned if cleaned else fb
+
+
 
 
 def _normalise_timeframe(raw: Optional[str]) -> str:
@@ -104,7 +147,7 @@ def _timeframe_window(call_ts: datetime, end_ts: datetime, timeframe: str) -> tu
     # calls get weeks/months; low timeframe calls stay compact.
     sec = _TF_SECONDS.get(timeframe, 60)
     pre_bars = 140
-    post_bars = {"1m":360,"5m":288,"15m":240,"30m":220,"1h":200,"2h":180,"4h":160,"8h":140,"1d":120,"3d":80,"1w":60}.get(timeframe, 240)
+    post_bars = {"1m":360,"5m":288,"15m":240,"30m":220,"1h":200,"2h":180,"3h":160,"4h":160,"6h":120,"8h":140,"12h":90,"1d":120,"3d":80,"1w":60}.get(timeframe, 240)
     limit = min(900, pre_bars + post_bars + 50)
     start = call_ts - timedelta(seconds=sec * pre_bars)
     desired_end = call_ts + timedelta(seconds=sec * post_bars)
@@ -361,9 +404,16 @@ async def _fetch_candles(
         )
     if timeframe in _AGGREGATE_TF:
         base_tf, ratio = _AGGREGATE_TF[timeframe]
+        base_sec = _TF_SECONDS.get(base_tf, 60)
+        # DESC LIMIT on 1m in a wide window returns only the newest bars — missing
+        # the call anchor on high-TF replays. Clamp the SQL window to what we can fetch.
+        if start is not None and end is not None:
+            max_span = timedelta(seconds=float(limit) * float(ratio) * float(base_sec))
+            if end - start > max_span:
+                start = end - max_span
         base = await _fetch_native_candles(
             symbol=symbol, exchange=exchange, timeframe=base_tf,
-            start=start, end=end, limit=min(limit * ratio + ratio * 4, 3000),
+            start=start, end=end, limit=min(limit * ratio + ratio * 4, 5000),
         )
         agg = _aggregate_candles(base, timeframe)
         return agg[-limit:]
@@ -420,11 +470,60 @@ async def handle_candles(request: web.Request) -> web.Response:
     return _json({"ok": True, "symbol": symbol, "exchange": exchange, "timeframe": timeframe, "count": len(rows), "candles": rows})
 
 
-async def handle_signal_replay(request: web.Request) -> web.Response:
-    """GET /api/signal-replay?id=<signal_interpretation_id>
+def _jsonb_list(val: Any) -> list:
+    if val is None:
+        return []
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except Exception:
+            return []
+    return val if isinstance(val, list) else []
 
-    Returns a joined signal/position/news/media payload plus 1m candles around
-    the call and position update points where available.
+
+def _levels_from_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "entry": trade.get("entry"),
+        "stop_loss": trade.get("stop_loss"),
+        "take_profit_1": trade.get("tp1") or trade.get("take_profit"),
+        "take_profit_2": trade.get("tp2"),
+        "take_profit_3": trade.get("tp3"),
+    }
+
+
+def _levels_from_position(pos: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "entry": pos.get("entry_price"),
+        "stop_loss": pos.get("stop_loss"),
+        "take_profit_1": pos.get("take_profit_1"),
+        "take_profit_2": pos.get("take_profit_2"),
+        "take_profit_3": pos.get("take_profit_3"),
+    }
+
+
+def _entry_close(a: Any, b: Any, tol: float = 0.003) -> bool:
+    try:
+        fa, fb = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    if fa <= 0 or fb <= 0:
+        return False
+    return abs(fa - fb) / max(fa, fb) <= tol
+
+
+def _trade_matches_position(trade: dict[str, Any], pos: dict[str, Any], source: str) -> bool:
+    if str(pos.get("signal_source") or "") != source:
+        return False
+    if str(trade.get("direction") or "").lower() != str(pos.get("direction") or "").lower():
+        return False
+    return _entry_close(trade.get("entry"), pos.get("entry_price"))
+
+
+async def handle_signal_replay(request: web.Request) -> web.Response:
+    """GET /api/signal-replay?id=<signal_interpretation_id>&leg=<n>&position_id=<id>
+
+    Returns interpretation + all legs (armed + unarmed) with per-leg candles at
+    the chart's detected timeframe (aggregated from 1m when needed).
     """
     try:
         interp_id = int(request.query.get("id", "0"))
@@ -432,6 +531,9 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
         interp_id = 0
     if interp_id <= 0:
         return _err(400, "id is required")
+
+    leg_idx = request.query.get("leg")
+    position_q = request.query.get("position_id")
 
     pool = await get_shared_pool()
     row = await pool.fetch_one(
@@ -448,111 +550,267 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
           si.entry_price, si.stop_loss, si.take_profit_1, si.take_profit_2,
           si.take_profit_3, si.take_profit_4, si.take_profit_5, si.take_profit_6,
           si.created_at, si.timeframe, si.model_version, si.prompt_version,
+          si.trader_trades, si.chart_hacker_trades,
           ni.headline AS news_headline, ni.content AS news_content, ni.source AS news_source,
           ni.author AS news_author, ni.channel_name AS news_channel_name,
           ni.published_at AS news_published_at, ni.collected_at AS news_collected_at,
           mi.id AS media_id, mi.local_path AS media_local_path, mi.source_url AS media_source_url,
           mi.thumbnail_path AS media_thumbnail_path, mi.media_type AS media_type, mi.mime_type AS mime_type,
-          tp.id AS position_id, tp.status AS position_status, tp.current_price,
-          tp.entry_price AS tp_entry_price, tp.stop_loss AS tp_stop_loss,
-          tp.take_profit_1 AS tp_take_profit_1, tp.take_profit_2 AS tp_take_profit_2,
-          tp.take_profit_3 AS tp_take_profit_3,
-          tp.signal_timestamp, tp.created_at AS opened_at, tp.closed_at, tp.exit_timestamp,
-          tp.unrealized_pnl_usd, tp.realized_pnl_usd, tp.realized_pnl_usd_final,
-          tp.unrealized_pnl_pct, tp.realized_pnl_pct, tp.outcome, tp.exit_reason,
-          tp.max_drawdown_pct, tp.max_profit_pct, tp.distance_to_entry_pct,
-          tp.distance_to_sl_pct, tp.distance_to_tp1_pct,
           tr.handle_raw, tr.handle_normalized, tr.display_name, tr.platform, tr.trader_type
         FROM public.signal_interpretations si
         LEFT JOIN public.news_items ni ON ni.id = si.news_item_id
         LEFT JOIN public.media_items mi ON mi.id = si.media_item_id
-        LEFT JOIN public.tracked_positions tp ON tp.signal_interpretation_id = si.id
         LEFT JOIN public.trader_profiles tr ON tr.id = si.trader_profile_id
         WHERE si.id = $1
-        ORDER BY tp.id DESC NULLS LAST
-        LIMIT 1
         """,
         (interp_id,),
     )
     if not row:
         return _err(404, "signal not found")
 
-    symbol = _clean_symbol(row.get("instrument_symbol")) or "BTC/USDT"
-    exchange = (row.get("instrument_exchange") or row.get("exchange") or "bybit").lower()
-    call_ts = row.get("signal_timestamp") or row.get("news_published_at") or row.get("created_at")
+    row = dict(row)
+    default_symbol = _clean_symbol(row.get("instrument_symbol")) or "BTC/USDT"
+    default_exchange = (row.get("instrument_exchange") or row.get("exchange") or "bybit").lower()
+    default_tf_raw = row.get("timeframe")
+    call_ts = row.get("news_published_at") or row.get("created_at")
     if call_ts is None:
         call_ts = datetime.now(timezone.utc)
     if call_ts.tzinfo is None:
         call_ts = call_ts.replace(tzinfo=timezone.utc)
-    end_ts = row.get("closed_at") or row.get("exit_timestamp") or datetime.now(timezone.utc)
-    if end_ts.tzinfo is None:
-        end_ts = end_ts.replace(tzinfo=timezone.utc)
-    chart_timeframe = _normalise_timeframe(row.get("timeframe") or "1m")
-    start, end, candle_limit = _timeframe_window(call_ts, end_ts, chart_timeframe)
 
-    candles = await _fetch_candles(
-        symbol=symbol,
-        exchange=exchange,
-        timeframe=chart_timeframe,
-        start=start,
-        end=end,
-        limit=candle_limit,
+    pos_rows = await pool.fetch_all(
+        """
+        SELECT id, status, direction, entry_price, stop_loss, take_profit_1, take_profit_2,
+               take_profit_3, signal_source, signal_timestamp, created_at, closed_at,
+               exit_timestamp, current_price, unrealized_pnl_usd, realized_pnl_usd,
+               realized_pnl_usd_final, unrealized_pnl_pct, realized_pnl_pct, outcome,
+               exit_reason, max_drawdown_pct, max_profit_pct, distance_to_entry_pct,
+               distance_to_sl_pct, distance_to_tp1_pct, instrument_symbol, instrument_exchange,
+               timeframe, chart_hacker_endorsed, actor_id,
+               entry_reason_trader, entry_reason_llm
+        FROM public.tracked_positions
+        WHERE signal_interpretation_id = $1
+        ORDER BY id
+        """,
+        (interp_id,),
     )
-    updates: list[dict[str, Any]] = []
-    if row.get("position_id"):
-        updates = await pool.fetch_all(
-            """
-            SELECT timestamp, price, unrealized_pnl_pct, unrealized_pnl_usd,
-                   distance_to_entry_pct, distance_to_sl_pct, distance_to_tp1_pct,
-                   time_in_trade_minutes, update_source
-            FROM public.position_updates
-            WHERE position_id = $1
-            ORDER BY timestamp ASC
-            LIMIT 2500
-            """,
-            (int(row["position_id"]),),
+    positions = [dict(p) for p in pos_rows]
+    match_positions = [
+        p for p in positions if str(p.get("status") or "").lower() not in ("cancelled",)
+    ]
+    matched_pos_ids: set[int] = set()
+
+    legs: list[dict[str, Any]] = []
+    trader_trades = _jsonb_list(row.get("trader_trades"))
+    ch_trades = _jsonb_list(row.get("chart_hacker_trades"))
+
+    def _append_leg(
+        *,
+        leg_key: str,
+        source: str,
+        trade: dict[str, Any],
+        pos: Optional[dict[str, Any]],
+        armed: bool,
+        skip_reason: Optional[str] = None,
+        endorsed: bool = False,
+    ) -> None:
+        sym = _resolve_candle_symbol(
+            trade.get("symbol") or (pos or {}).get("instrument_symbol") or default_symbol,
+            default_symbol,
+        )
+        exch = (pos or {}).get("instrument_exchange") or default_exchange
+        tf_raw = trade.get("timeframe") or (pos or {}).get("timeframe") or default_tf_raw
+        chart_tf = _normalise_timeframe(tf_raw or "1m")
+        levels = _levels_from_position(pos) if pos else _levels_from_trade(trade)
+        legs.append({
+            "leg_key": leg_key,
+            "source": source,
+            "armed": armed,
+            "skip_reason": skip_reason,
+            "chart_hacker_endorsed": bool(endorsed or (pos or {}).get("chart_hacker_endorsed")),
+            "direction": str(trade.get("direction") or (pos or {}).get("direction") or "").lower(),
+            "symbol": sym,
+            "exchange": exch.lower() if exch else default_exchange,
+            "timeframe": chart_tf,
+            "timeframe_source": tf_raw,
+            "levels": levels,
+            "confidence": trade.get("confidence"),
+            "evidence": trade.get("evidence"),
+            "rationale": trade.get("rationale"),
+            "position_id": int(pos["id"]) if pos else None,
+            "position": {
+                "id": pos.get("id"),
+                "status": pos.get("status"),
+                "signal_source": pos.get("signal_source"),
+                "current_price": pos.get("current_price"),
+                "opened_at": pos.get("created_at"),
+                "closed_at": pos.get("closed_at"),
+                "outcome": pos.get("outcome"),
+                "exit_reason": pos.get("exit_reason"),
+                "unrealized_pnl_usd": pos.get("unrealized_pnl_usd"),
+                "realized_pnl_usd": pos.get("realized_pnl_usd"),
+                "realized_pnl_usd_final": pos.get("realized_pnl_usd_final"),
+                "unrealized_pnl_pct": pos.get("unrealized_pnl_pct"),
+                "realized_pnl_pct": pos.get("realized_pnl_pct"),
+                "max_drawdown_pct": pos.get("max_drawdown_pct"),
+                "max_profit_pct": pos.get("max_profit_pct"),
+                "distance_to_entry_pct": pos.get("distance_to_entry_pct"),
+                "distance_to_sl_pct": pos.get("distance_to_sl_pct"),
+                "distance_to_tp1_pct": pos.get("distance_to_tp1_pct"),
+            } if pos else None,
+            "candles": [],
+            "position_updates": [],
+            "coverage": {"candle_count": 0, "update_count": 0},
+        })
+
+    for i, trade in enumerate(trader_trades):
+        if not isinstance(trade, dict):
+            continue
+        pos = next(
+            (p for p in match_positions if p["id"] not in matched_pos_ids and _trade_matches_position(trade, p, "trader")),
+            None,
+        )
+        if pos:
+            matched_pos_ids.add(int(pos["id"]))
+        _append_leg(
+            leg_key=f"trader-{i}",
+            source="trader",
+            trade=trade,
+            pos=pos,
+            armed=pos is not None,
+            skip_reason=None if pos else "not_armed",
         )
 
-    # Drawer accuracy fix (2026-05-29): the drawer used to read levels ONLY from
-    # signal_interpretations (si.*), which are frequently NULL for AI-inferred /
-    # entry-only signals — so the drawer rendered 0.000 even though the real
-    # tracked_position (tp.*) carried the true levels. Coalesce the two,
-    # preferring a non-null / non-zero si value, then falling back to tp.
-    def _lvl(*keys: str) -> Any:
-        first_non_null: Any = None
-        for k in keys:
-            v = row.get(k)
-            if v is None:
-                continue
-            if first_non_null is None:
-                first_non_null = v
-            try:
-                if float(v) != 0.0:
-                    return v
-            except (TypeError, ValueError):
-                return v
-        return first_non_null
+    for i, trade in enumerate(ch_trades):
+        if not isinstance(trade, dict):
+            continue
+        pos = next(
+            (p for p in match_positions if p["id"] not in matched_pos_ids and _trade_matches_position(trade, p, "chart_hacker")),
+            None,
+        )
+        endorsed = False
+        if pos is None:
+            for p in match_positions:
+                if p["id"] not in matched_pos_ids and _trade_matches_position(trade, p, "trader"):
+                    pos = p
+                    endorsed = True
+                    matched_pos_ids.add(int(p["id"]))
+                    break
+        elif pos:
+            matched_pos_ids.add(int(pos["id"]))
+        skip = None
+        if pos is None:
+            skip = "not_armed"
+        elif endorsed:
+            skip = "chart_hacker_endorsed_trader_leg"
+        _append_leg(
+            leg_key=f"chart_hacker-{i}",
+            source="chart_hacker",
+            trade=trade,
+            pos=pos,
+            armed=pos is not None,
+            skip_reason=skip,
+            endorsed=endorsed,
+        )
 
-    levels = {
-        "entry": _lvl("entry_price", "tp_entry_price"),
-        "stop_loss": _lvl("stop_loss", "tp_stop_loss"),
-        "take_profit_1": _lvl("take_profit_1", "tp_take_profit_1"),
-        "take_profit_2": _lvl("take_profit_2", "tp_take_profit_2"),
-        "take_profit_3": _lvl("take_profit_3", "tp_take_profit_3"),
-        "take_profit_4": row.get("take_profit_4"),
-        "take_profit_5": row.get("take_profit_5"),
-        "take_profit_6": row.get("take_profit_6"),
-    }
+    for p in match_positions:
+        if int(p["id"]) in matched_pos_ids:
+            continue
+        _append_leg(
+            leg_key=f"position-{p['id']}",
+            source=str(p.get("signal_source") or "trader"),
+            trade={
+                "direction": p.get("direction"),
+                "entry": p.get("entry_price"),
+                "stop_loss": p.get("stop_loss"),
+                "tp1": p.get("take_profit_1"),
+                "symbol": p.get("instrument_symbol"),
+                "timeframe": p.get("timeframe"),
+            },
+            pos=p,
+            armed=True,
+            endorsed=bool(p.get("chart_hacker_endorsed")),
+        )
+        matched_pos_ids.add(int(p["id"]))
+
+    # Fetch candles + position updates per leg.
+    for leg in legs:
+        leg_call = call_ts
+        pos = leg.get("position") or {}
+        if pos.get("opened_at"):
+            leg_call = pos["opened_at"]
+        elif positions and leg.get("position_id"):
+            pr = next((p for p in positions if p["id"] == leg["position_id"]), None)
+            if pr and pr.get("signal_timestamp"):
+                leg_call = pr["signal_timestamp"]
+        if isinstance(leg_call, datetime) and leg_call.tzinfo is None:
+            leg_call = leg_call.replace(tzinfo=timezone.utc)
+        leg_end = pos.get("closed_at") or datetime.now(timezone.utc)
+        if isinstance(leg_end, datetime) and leg_end.tzinfo is None:
+            leg_end = leg_end.replace(tzinfo=timezone.utc)
+        tf = leg["timeframe"]
+        start, end, candle_limit = _timeframe_window(leg_call, leg_end, tf)
+        leg["window"] = {"start": start, "end": end}
+        leg["candles"] = await _fetch_candles(
+            symbol=leg["symbol"],
+            exchange=leg["exchange"],
+            timeframe=tf,
+            start=start,
+            end=end,
+            limit=candle_limit,
+        )
+        leg["coverage"]["candle_count"] = len(leg["candles"])
+        if leg.get("position_id"):
+            updates = await pool.fetch_all(
+                """
+                SELECT timestamp, price, unrealized_pnl_pct, unrealized_pnl_usd,
+                       distance_to_entry_pct, distance_to_sl_pct, distance_to_tp1_pct,
+                       time_in_trade_minutes, update_source
+                FROM public.position_updates
+                WHERE position_id = $1
+                ORDER BY timestamp ASC
+                LIMIT 2500
+                """,
+                (int(leg["position_id"]),),
+            )
+            leg["position_updates"] = [dict(u) for u in updates]
+            leg["coverage"]["update_count"] = len(leg["position_updates"])
+
+    selected = 0
+    if position_q:
+        try:
+            pid = int(position_q)
+            for i, leg in enumerate(legs):
+                if leg.get("position_id") == pid:
+                    selected = i
+                    break
+        except ValueError:
+            pass
+    elif leg_idx is not None:
+        try:
+            selected = max(0, min(int(leg_idx), len(legs) - 1))
+        except ValueError:
+            selected = 0
+    else:
+        for i, leg in enumerate(legs):
+            if leg.get("armed"):
+                selected = i
+                break
+
+    active = legs[selected] if legs else {}
+    active_pos = active.get("position") or {}
+    active_levels = active.get("levels") or {}
+
     payload = {
         "ok": True,
         "id": interp_id,
-        "symbol": symbol,
-        "exchange": exchange,
-        "timeframe": chart_timeframe,
-        "timeframe_source": row.get("timeframe"),
-        "candle_seconds": _TF_SECONDS.get(chart_timeframe, 60),
+        "symbol": active.get("symbol") or default_symbol,
+        "exchange": active.get("exchange") or default_exchange,
+        "timeframe": active.get("timeframe") or _normalise_timeframe(default_tf_raw or "1m"),
+        "timeframe_source": active.get("timeframe_source") or default_tf_raw,
+        "candle_seconds": _TF_SECONDS.get(active.get("timeframe") or "1m", 60),
         "call_ts": call_ts,
-        "window": {"start": start, "end": end},
+        "window": active.get("window") or {},
         "annotated_chart_url": f"api/charts/{interp_id}",
         "media_url": _media_url(row.get("media_id"), row.get("media_local_path"), row.get("media_source_url")),
         "media": {
@@ -582,7 +840,7 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
             "collected_at": row.get("news_collected_at"),
         },
         "signal": {
-            "direction": row.get("consensus_direction"),
+            "direction": active.get("direction") or row.get("consensus_direction"),
             "confidence": row.get("consensus_confidence"),
             "method": row.get("consensus_method"),
             "llm_direction": row.get("llm_direction"),
@@ -590,12 +848,12 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
             "llm_reasoning": row.get("llm_reasoning"),
             "quant_direction": row.get("quant_direction"),
             "quant_confidence": row.get("quant_confidence"),
-            "trader_stated_thesis": row.get("trader_stated_thesis"),
-            "llm_inferred_thesis": row.get("llm_inferred_thesis"),
+            "trader_stated_thesis": row.get("trader_stated_thesis") if row.get("trader_stated_thesis") is not None else (match_positions[0].get("entry_reason_trader") if match_positions else None),
+            "llm_inferred_thesis": row.get("llm_inferred_thesis") if row.get("llm_inferred_thesis") is not None else (match_positions[0].get("entry_reason_llm") if match_positions else None),
             "reason_agreement_score": row.get("reason_agreement_score"),
             "ai_agreement_score": row.get("ai_agreement_score"),
             "ai_comment": row.get("ai_comment"),
-            "levels": levels,
+            "levels": active_levels,
             "tags": {
                 "pattern": row.get("pattern_tags"),
                 "setup": row.get("setup_tags"),
@@ -606,28 +864,19 @@ async def handle_signal_replay(request: web.Request) -> web.Response:
             "prompt_version": row.get("prompt_version"),
             "created_at": row.get("created_at"),
         },
-        "position": {
-            "id": row.get("position_id"),
-            "status": row.get("position_status"),
-            "current_price": row.get("current_price"),
-            "opened_at": row.get("opened_at"),
-            "closed_at": row.get("closed_at"),
-            "outcome": row.get("outcome"),
-            "exit_reason": row.get("exit_reason"),
-            "unrealized_pnl_usd": row.get("unrealized_pnl_usd"),
-            "realized_pnl_usd": row.get("realized_pnl_usd"),
-            "realized_pnl_usd_final": row.get("realized_pnl_usd_final"),
-            "unrealized_pnl_pct": row.get("unrealized_pnl_pct"),
-            "realized_pnl_pct": row.get("realized_pnl_pct"),
-            "max_drawdown_pct": row.get("max_drawdown_pct"),
-            "max_profit_pct": row.get("max_profit_pct"),
-            "distance_to_entry_pct": row.get("distance_to_entry_pct"),
-            "distance_to_sl_pct": row.get("distance_to_sl_pct"),
-            "distance_to_tp1_pct": row.get("distance_to_tp1_pct"),
+        "position": active_pos,
+        "legs": legs,
+        "selected_leg": selected,
+        "stats": {
+            "trader_trades_extracted": len(trader_trades),
+            "chart_hacker_trades_extracted": len(ch_trades),
+            "positions_armed": len(positions),
+            "legs_total": len(legs),
+            "legs_armed": sum(1 for lg in legs if lg.get("armed")),
         },
-        "candles": candles,
-        "position_updates": updates,
-        "coverage": {"candle_count": len(candles), "update_count": len(updates)},
+        "candles": active.get("candles") or [],
+        "position_updates": active.get("position_updates") or [],
+        "coverage": active.get("coverage") or {"candle_count": 0, "update_count": 0},
     }
     return _json(payload)
 
@@ -1230,6 +1479,9 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
         LEFT JOIN public.trader_profiles tr ON tr.id = si.trader_profile_id
         LEFT JOIN public.media_items mi ON mi.id = si.media_item_id
         WHERE si.created_at > now() - interval '30 days'
+          -- Phase 1 overnight cleanup: exclude stale signals (>7d, no tracked_position).
+          -- These clutter the radar with dead interpretations that will never trade.
+          AND (tp.id IS NOT NULL OR si.created_at > now() - interval '7 days')
         """ + status_filter_sql + f" ORDER BY si.id DESC, tp.id DESC NULLS LAST LIMIT {limit_sql}",
         (),
     )
@@ -1331,6 +1583,11 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
             "current_price": current,
             "distance_to_entry_pct": distance_to_entry,
             "position_status": r.get("position_status") or "signal",
+            # B (2026-05-29): "armed" = a real pending tracked_position is
+            # waiting to trigger (high-conviction, confidence>=0.4, has a demo
+            # order). Read-but-not-armed interpretations (position_status
+            # 'signal') are NOT armed and must NOT clutter "Approaching entry".
+            "armed": (r.get("position_status") == "pending"),
             "position_activated_at": r.get("position_activated_at").isoformat() if r.get("position_activated_at") else None,
             "signal_timestamp": (r.get("signal_timestamp") or r.get("created_at")).isoformat() if (r.get("signal_timestamp") or r.get("created_at")) else None,
             "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
@@ -1369,6 +1626,11 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
         "pending": 0, "filled_24h": 0, "cancelled_24h": 0,
         "no_setup_24h": 0, "dupes_24h": 0, "unsupported_24h": 0,
         "just_filled_30m": 0,
+        # B (2026-05-29): freshness for the honest empty-state — how long since
+        # the interpreter last read ANY setup, and how many it read in 24h. Lets
+        # the radar say "12 read in 24h, none armed, last read 3h ago" instead
+        # of looking broken.
+        "last_signal_min": -1, "signals_24h": 0,
     }
     try:
         meta = await pool.fetch_one(
@@ -1395,10 +1657,28 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
             """,
         )
         if meta:
-            for k in radar_meta:
+            for k in ("pending", "filled_24h", "cancelled_24h", "no_setup_24h",
+                      "dupes_24h", "unsupported_24h", "just_filled_30m"):
                 radar_meta[k] = int(meta.get(k) or 0)
     except Exception as exc:  # pragma: no cover - never block the tab on this
         logger.warning("unified-signals radar_meta query raised: %s", exc)
+
+    # B (2026-05-29): interpreter-freshness for the empty-state.
+    try:
+        fresh = await pool.fetch_one(
+            """
+            SELECT
+                EXTRACT(EPOCH FROM (now() - max(created_at)))/60 AS last_signal_min,
+                count(*) FILTER (WHERE created_at > now() - interval '24 hours') AS signals_24h
+            FROM public.signal_interpretations
+            """,
+        )
+        if fresh:
+            lsm = fresh.get("last_signal_min")
+            radar_meta["last_signal_min"] = int(lsm) if lsm is not None else -1
+            radar_meta["signals_24h"] = int(fresh.get("signals_24h") or 0)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("unified-signals freshness query raised: %s", exc)
 
     return web.json_response({
         "ok": True,
@@ -1728,10 +2008,121 @@ async def handle_media(request: web.Request) -> web.Response:
         return _err(500, str(exc))
 
 
-async def handle_paper_vs_demo(request: web.Request) -> web.Response:
-    """GET /api/paper-vs-demo — paper vs demo comparison data."""
+async def _account_agent_map(pool) -> Dict[str, str]:
+    """Reverse map: "{exchange}/{account_name}" → agent_id (the scenario the
+    demo account mirrors). Used to attribute demo orders to their agent even
+    when the demo_orders.agent_id column was written before this attribution
+    existed (back-fill at read time)."""
+    rows = await pool.fetch_all("""
+        SELECT cae.agent_id, ea.exchange, ea.account_name
+        FROM public.competition_agent_exchanges cae
+        JOIN public.exchange_accounts ea ON ea.id = cae.exchange_account_id
+        WHERE cae.is_active = TRUE AND ea.is_active = TRUE
+          AND cae.competition_id = 'copy-trade-scenarios'
+    """)
+    return {f"{r['exchange']}/{r['account_name']}": r["agent_id"] for r in rows}
+
+
+async def handle_strategies(request: web.Request) -> web.Response:
+    """GET /api/strategies — graded technique/strategy ledger.
+
+    Aggregates technique_stats with technique_catalog descriptions:
+      * global rows (trader_handle='') => the strategy ledger
+      * per-trader rows  => who uses it and who is best with it
+    Returns win rate, avg RR, avg win%, avg loss%, total PnL, maturity
+    (sample-count based), per-symbol breakdown and per-trader breakdown.
+    """
     pool = await get_shared_pool()
-    
+    min_samples = max(int(request.query.get("min_samples", "1")), 1)
+    rows = await pool.fetch_all("""
+        SELECT ts.technique,
+               COALESCE(tc.description, '') AS description,
+               COALESCE(tc.category, '')    AS category,
+               ts.trader_handle, ts.symbol_base, ts.timeframe,
+               ts.wins, ts.losses, ts.total_pnl_usd, ts.sample_count,
+               ts.sum_rr, ts.sum_win_pct, ts.sum_loss_pct,
+               ts.last_outcome, ts.updated_at
+        FROM public.technique_stats ts
+        LEFT JOIN public.technique_catalog tc ON tc.technique = ts.technique
+        WHERE ts.sample_count >= %s
+        ORDER BY ts.technique, ts.trader_handle
+    """, (min_samples,))
+
+    strategies: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        t = r["technique"]
+        if t not in strategies:
+            strategies[t] = {
+                "technique": t, "description": r["description"],
+                "category": r["category"],
+                "wins": 0, "losses": 0, "sample_count": 0,
+                "total_pnl_usd": 0.0, "sum_rr": 0.0,
+                "sum_win_pct": 0.0, "sum_loss_pct": 0.0,
+                "traders": [], "symbols": [], "last_outcome": None,
+                "updated_at": None,
+            }
+        s = strategies[t]
+        is_global = (r["trader_handle"] or "") == ""
+        if is_global:
+            s["wins"] += int(r["wins"]); s["losses"] += int(r["losses"])
+            s["sample_count"] += int(r["sample_count"])
+            s["total_pnl_usd"] += float(r["total_pnl_usd"])
+            s["sum_rr"] += float(r["sum_rr"] or 0)
+            s["sum_win_pct"] += float(r["sum_win_pct"] or 0)
+            s["sum_loss_pct"] += float(r["sum_loss_pct"] or 0)
+            s["last_outcome"] = r["last_outcome"]
+            s["updated_at"] = r["updated_at"].isoformat() if r["updated_at"] else None
+        else:
+            total = int(r["wins"]) + int(r["losses"])
+            entry = {
+                "trader": r["trader_handle"],
+                "symbol": r["symbol_base"] or None,
+                "timeframe": r["timeframe"] or None,
+                "wins": int(r["wins"]), "losses": int(r["losses"]),
+                "win_rate": round(int(r["wins"]) / max(total, 1), 3),
+                "pnl_usd": float(r["total_pnl_usd"]),
+                "samples": int(r["sample_count"]),
+            }
+            s["traders"].append(entry)
+            if r["symbol_base"]:
+                s["symbols"].append(r["symbol_base"])
+
+    out = []
+    for s in strategies.values():
+        total = s["wins"] + s["losses"]
+        n = s["sample_count"]
+        s["win_rate"] = round(s["wins"] / max(total, 1), 3)
+        s["avg_rr"] = round(s["sum_rr"] / max(n, 1), 2)
+        s["avg_win_pct"] = round(s["sum_win_pct"] / max(s["wins"], 1), 2)
+        s["avg_loss_pct"] = round(s["sum_loss_pct"] / max(s["losses"], 1), 2)
+        s["total_pnl_usd"] = round(s["total_pnl_usd"], 2)
+        # Maturity: how much evidence backs this strategy
+        s["maturity"] = ("proven" if n >= 30 else "established" if n >= 10
+                          else "emerging" if n >= 3 else "candidate")
+        s["symbols"] = sorted(set(s["symbols"]))[:12]
+        s["traders"].sort(key=lambda x: (-x["win_rate"], -x["samples"]))
+        s["traders"] = s["traders"][:8]
+        for k in ("sum_rr", "sum_win_pct", "sum_loss_pct"):
+            s.pop(k, None)
+        out.append(s)
+    # Sort: maturity desc (by samples) then win rate
+    out.sort(key=lambda s: (-s["sample_count"], -s["win_rate"]))
+    return _json({"strategies": out, "count": len(out)})
+
+
+async def handle_paper_vs_demo(request: web.Request) -> web.Response:
+    """GET /api/paper-vs-demo — forensic paper-vs-demo(-vs-live) comparison.
+
+    Returns per-order LINE ITEMS (not just counts): exchange, account, agent,
+    symbol, direction, status, paper entry vs demo fill, slippage, fees, P&L,
+    leverage, notional, timestamps and the FULL reject reason. Plus an
+    accuracy block (how faithfully demo reproduces paper) and a reject-reason
+    breakdown. The "live" lane is wired structurally (live_* fields) so that
+    when a live account is mapped the same shape carries it — no schema change.
+    """
+    pool = await get_shared_pool()
+    acct_agent = await _account_agent_map(pool)
+
     # Summary stats
     paper = await pool.fetch_one("""
         SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE exit_price IS NOT NULL) as closed,
@@ -1741,16 +2132,19 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
     """)
     
     # Phase 1 (2026-05-29): added filled_notional + demo_pnl so the frontend
-    # "Demo Orders $" KPI is real data instead of a hardcoded $0.
+    # "Demo Orders $" KPI is real data instead of a hardcoded $0. Also counts
+    # cancelled + sums all known fees for the forensic "total fees" KPI.
     demo = await pool.fetch_one("""
         SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'filled') as filled,
                COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+               COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled,
                COALESCE(SUM(notional_usd) FILTER (WHERE status = 'filled'), 0) as filled_notional,
-               COALESCE(SUM(demo_pnl) FILTER (WHERE demo_pnl IS NOT NULL), 0) as demo_pnl
+               COALESCE(SUM(demo_pnl) FILTER (WHERE demo_pnl IS NOT NULL), 0) as demo_pnl,
+               COALESCE(SUM(COALESCE(entry_fee,0)+COALESCE(exit_fee,0)+COALESCE(funding_fee,0)), 0) as total_fees
         FROM public.demo_orders
-    """) or {"total": 0, "filled": 0, "rejected": 0, "pending": 0,
-             "filled_notional": 0, "demo_pnl": 0}
+    """) or {"total": 0, "filled": 0, "rejected": 0, "pending": 0, "cancelled": 0,
+             "filled_notional": 0, "demo_pnl": 0, "total_fees": 0}
 
     # Phase 1 (2026-05-29): DRIFT = (paper P&L − demo P&L) over MATCHED filled
     # pairs only (apples-to-apples). Comparing total paper P&L across all 388
@@ -1784,9 +2178,10 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
                ct.exit_price as paper_exit, ct.sl_price, ct.tp_price,
                ct.pnl as paper_pnl, ct.allocated, ct.leverage, ct.agent_id,
                ct.entered_at, ct.exited_at, ct.exit_reason,
-               dmo.exchange, dmo.account_name, dmo.exchange_order_id,
+               dmo.exchange, dmo.account_name, dmo.exchange_order_id, dmo.agent_id as demo_agent_id,
                dmo.demo_entry, dmo.status as demo_status, dmo.error_message,
-               dmo.demo_pnl, dmo.ordered_at, dmo.filled_at,
+               dmo.demo_pnl, dmo.ordered_at, dmo.filled_at, dmo.slippage_entry,
+               dmo.entry_fee, dmo.exit_fee, dmo.funding_fee, dmo.notional_usd as demo_notional,
                tp.actor_id, tp.instrument_symbol,
                si.id as signal_id
         FROM public.competition_trades ct
@@ -1795,14 +2190,19 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
         LEFT JOIN public.signal_interpretations si ON si.id = tp.signal_interpretation_id
         WHERE ct.contest_id = 'copy-trade-scenarios'
         ORDER BY ct.entered_at DESC
-        LIMIT 100
+        LIMIT 200
     """)
     
     trades = []
     for r in rows:
+        demo_acct_key = f"{r['exchange']}/{r['account_name']}" if r["exchange"] else None
+        demo_agent = r["demo_agent_id"] or (acct_agent.get(demo_acct_key) if demo_acct_key else None)
+        slip = float(r["slippage_entry"]) * 100 if r["slippage_entry"] is not None else None
+        fees = sum(float(r[k]) for k in ("entry_fee", "exit_fee", "funding_fee") if r[k] is not None) or None
         trades.append({
             "id": r["id"], "symbol": r["symbol"], "direction": r["direction"],
             "agent_id": r["agent_id"], "actor_id": r["actor_id"],
+            "demo_agent_id": demo_agent,
             "paper_entry": float(r["paper_entry"]) if r["paper_entry"] else None,
             "paper_exit": float(r["paper_exit"]) if r["paper_exit"] else None,
             "paper_pnl": float(r["paper_pnl"]) if r["paper_pnl"] else None,
@@ -1817,11 +2217,20 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
             "demo_account": r["account_name"],
             "demo_order_id": r["exchange_order_id"],
             "demo_entry": float(r["demo_entry"]) if r["demo_entry"] else None,
+            "demo_notional": float(r["demo_notional"]) if r["demo_notional"] else None,
             "demo_status": r["demo_status"],
             "demo_error": r["error_message"],
             "demo_pnl": float(r["demo_pnl"]) if r["demo_pnl"] is not None else None,
+            "slippage_pct": slip,
+            "entry_fee": float(r["entry_fee"]) if r["entry_fee"] is not None else None,
+            "exit_fee": float(r["exit_fee"]) if r["exit_fee"] is not None else None,
+            "funding_fee": float(r["funding_fee"]) if r["funding_fee"] is not None else None,
+            "fees_total": fees,
             "demo_ordered_at": r["ordered_at"].isoformat() if r["ordered_at"] else None,
             "demo_filled_at": r["filled_at"].isoformat() if r["filled_at"] else None,
+            # live lane — structurally present, populated when a live account is mapped
+            "live_exchange": None, "live_account": None, "live_entry": None,
+            "live_status": None, "live_pnl": None, "live_slippage_pct": None,
             "signal_id": r["signal_id"],
             "orphan": False,
         })
@@ -1835,7 +2244,9 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
         SELECT dmo.id, dmo.symbol, dmo.direction, dmo.exchange, dmo.account_name,
                dmo.exchange_order_id, dmo.demo_entry, dmo.status, dmo.error_message,
                dmo.demo_pnl, dmo.paper_entry, dmo.paper_sl, dmo.paper_tp,
-               dmo.leverage, dmo.ordered_at, dmo.filled_at, dmo.tracked_position_id
+               dmo.leverage, dmo.ordered_at, dmo.filled_at, dmo.tracked_position_id,
+               dmo.agent_id as demo_agent_id, dmo.slippage_entry,
+               dmo.entry_fee, dmo.exit_fee, dmo.funding_fee, dmo.notional_usd as demo_notional
         FROM public.demo_orders dmo
         WHERE NOT EXISTS (
             SELECT 1 FROM public.competition_trades ct
@@ -1843,12 +2254,16 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
               AND ct.contest_id = 'copy-trade-scenarios'
         )
         ORDER BY dmo.ordered_at DESC
-        LIMIT 100
+        LIMIT 200
     """)
     for r in orphans:
+        demo_acct_key = f"{r['exchange']}/{r['account_name']}" if r["exchange"] else None
+        demo_agent = r["demo_agent_id"] or (acct_agent.get(demo_acct_key) if demo_acct_key else None)
+        slip = float(r["slippage_entry"]) * 100 if r["slippage_entry"] is not None else None
+        fees = sum(float(r[k]) for k in ("entry_fee", "exit_fee", "funding_fee") if r[k] is not None) or None
         trades.append({
             "id": f"demo-{r['id']}", "symbol": r["symbol"], "direction": r["direction"],
-            "agent_id": None, "actor_id": None,
+            "agent_id": None, "actor_id": None, "demo_agent_id": demo_agent,
             # paper leg is empty — no paper agent took this signal
             "paper_entry": float(r["paper_entry"]) if r["paper_entry"] else None,
             "paper_exit": None, "paper_pnl": None,
@@ -1859,13 +2274,62 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
             "demo_exchange": r["exchange"], "demo_account": r["account_name"],
             "demo_order_id": r["exchange_order_id"],
             "demo_entry": float(r["demo_entry"]) if r["demo_entry"] else None,
+            "demo_notional": float(r["demo_notional"]) if r["demo_notional"] else None,
             "demo_status": r["status"], "demo_error": r["error_message"],
             "demo_pnl": float(r["demo_pnl"]) if r["demo_pnl"] is not None else None,
+            "slippage_pct": slip,
+            "entry_fee": float(r["entry_fee"]) if r["entry_fee"] is not None else None,
+            "exit_fee": float(r["exit_fee"]) if r["exit_fee"] is not None else None,
+            "funding_fee": float(r["funding_fee"]) if r["funding_fee"] is not None else None,
+            "fees_total": fees,
             "demo_ordered_at": r["ordered_at"].isoformat() if r["ordered_at"] else None,
             "demo_filled_at": r["filled_at"].isoformat() if r["filled_at"] else None,
+            "live_exchange": None, "live_account": None, "live_entry": None,
+            "live_status": None, "live_pnl": None, "live_slippage_pct": None,
             "signal_id": None,
             "orphan": True,
         })
+
+    # Reject-reason breakdown (so the operator sees WHY, grouped). The raw
+    # exchange messages embed a requestTime timestamp so they're all unique —
+    # we must classify into a human cause and aggregate in Python, keeping one
+    # sample raw message per cause for drill-down.
+    rej_rows = await pool.fetch_all("""
+        SELECT COALESCE(error_message, 'unknown') as reason
+        FROM public.demo_orders WHERE status = 'rejected'
+    """)
+    _rej_agg: Dict[str, Dict[str, Any]] = {}
+    for r in rej_rows:
+        cause = _classify_reject(r["reason"])
+        slot = _rej_agg.setdefault(cause, {"reason": cause, "count": 0, "raw": (r["reason"] or "")[:200]})
+        slot["count"] += 1
+    reject_summary = sorted(_rej_agg.values(), key=lambda x: -x["count"])
+
+    # Accuracy block — how faithfully demo reproduces paper, on MATCHED filled
+    # pairs (both legs have an entry price). entry_accuracy = 100 − mean(|slip|%).
+    acc_rows = await pool.fetch_all("""
+        SELECT dmo.slippage_entry
+        FROM public.demo_orders dmo
+        WHERE dmo.status = 'filled' AND dmo.demo_entry IS NOT NULL
+          AND dmo.slippage_entry IS NOT NULL
+    """)
+    matched_filled = len(acc_rows)
+    mean_slip_pct = None
+    entry_accuracy = None
+    if matched_filled:
+        mean_slip_pct = sum(abs(float(r["slippage_entry"])) for r in acc_rows) / matched_filled * 100
+        entry_accuracy = max(0.0, 100.0 - mean_slip_pct)
+    placed = (demo["filled"] or 0) + (demo["pending"] or 0) + (demo["cancelled"] or 0)
+    fill_rate = (float(demo["filled"]) / placed * 100) if placed else None
+    accuracy = {
+        "entry_accuracy_pct": round(entry_accuracy, 4) if entry_accuracy is not None else None,
+        "mean_slippage_pct": round(mean_slip_pct, 4) if mean_slip_pct is not None else None,
+        "matched_filled": matched_filled,
+        "fill_rate_pct": round(fill_rate, 1) if fill_rate is not None else None,
+        "score": round(entry_accuracy, 2) if entry_accuracy is not None else None,
+        "note": ("No demo orders have filled yet — accuracy becomes available "
+                 "once a resting demo limit order is hit." if not matched_filled else None),
+    }
 
     return _json({
         "ok": True,
@@ -1874,13 +2338,107 @@ async def handle_paper_vs_demo(request: web.Request) -> web.Response:
             "paper_pnl": float(paper["pnl"] or 0),
             "demo_total": demo["total"], "demo_filled": demo["filled"],
             "demo_rejected": demo["rejected"], "demo_pending": demo["pending"],
+            "demo_cancelled": demo.get("cancelled", 0),
             # Phase 1 (2026-05-29): real demo $ + drift (were hardcoded stubs)
             "demo_notional": float(demo["filled_notional"] or 0),
             "demo_pnl": float(demo["demo_pnl"] or 0),
+            "demo_fees": float(demo.get("total_fees") or 0),
             "drift": drift,
+            # live lane totals (zero until a live account is mapped)
+            "live_total": 0, "live_filled": 0, "live_pnl": 0.0,
         },
+        "accuracy": accuracy,
+        "reject_summary": reject_summary,
         "trades": trades,
     })
+
+
+def _classify_reject(msg: Optional[str]) -> str:
+    """Turn a raw exchange error string into a short human-readable cause."""
+    m = (msg or "").lower()
+    if "110007" in m or "ab not enough" in m or "not enough" in m or "insufficient" in m:
+        return "Insufficient margin / balance"
+    if "40774" in m or "unilateral position" in m or "position mode" in m:
+        return "Position-mode mismatch (one-way vs hedge)"
+    if "leverage" in m:
+        return "Leverage rejected by exchange"
+    if "min" in m and ("qty" in m or "notional" in m or "amount" in m):
+        return "Below exchange minimum size"
+    if "symbol" in m or "not found" in m or "does not exist" in m:
+        return "Symbol not tradable on this exchange"
+    if not msg:
+        return "Unknown"
+    return "Other exchange rejection"
+
+
+async def handle_paper_demo_log(request: web.Request) -> web.Response:
+    """GET /api/paper-demo/log?lines=N&event=mirror_placed — tail the forensic log.
+
+    Reads the append-only JSON-lines transaction log written by the demo bridge
+    (/opt/tickles/shared/logs/paper_demo.log). This is the "check the log"
+    surface the operator asked for — every mirror placement, rejection, fill,
+    and cancel, newest first.
+    """
+    try:
+        n = int(request.query.get("lines", "200") or 200)
+    except (TypeError, ValueError):
+        n = 200
+    ev = request.query.get("event") or None
+    try:
+        from shared.daemons.demo_forensic_log import read_tail, FORENSIC_LOG_PATH
+        events = read_tail(n, ev)
+        return _json({"ok": True, "path": FORENSIC_LOG_PATH, "count": len(events),
+                      "events": events})
+    except Exception as exc:
+        return _json({"ok": True, "events": [], "error": str(exc)[:200]})
+
+
+async def handle_paper_demo_exchange_state(request: web.Request) -> web.Response:
+    """GET /api/paper-demo/exchange-state — LIVE pull from each demo/live account.
+
+    On-demand (button-triggered, NOT auto-refreshed because it hits the
+    exchange network): for every active demo/live account, fetch the wallet
+    balance, open positions, and resting open orders straight from the
+    exchange. This is the "what is ACTUALLY on the exchange right now" view so
+    the operator can reconcile it against what our demo_orders table thinks.
+    """
+    pool = await get_shared_pool()
+    acct_agent = await _account_agent_map(pool)
+    accts = await pool.fetch_all(
+        "SELECT exchange, account_name, account_type FROM public.exchange_accounts "
+        "WHERE is_active = TRUE AND account_type IN ('demo','live') "
+        "ORDER BY account_type, exchange, account_name")
+    try:
+        from shared.execution.ccxt_adapter import CcxtExecutionAdapter
+    except Exception as exc:
+        return _json({"ok": False, "error": f"ccxt unavailable: {exc}"})
+
+    out = []
+    for a in accts:
+        ex, name, atype = a["exchange"], a["account_name"], a["account_type"]
+        entry = {"exchange": ex, "account": name, "type": atype,
+                 "agent": acct_agent.get(f"{ex}/{name}"),
+                 "balance": None, "positions": [], "open_orders": [], "error": None}
+        try:
+            adapter = CcxtExecutionAdapter(demo_trading=(atype == "demo"))
+            bal = await asyncio.wait_for(
+                adapter.fetch_balance(exchange=ex, account_name=name), timeout=15)
+            entry["balance"] = bal.get("USDT") if bal else None
+            entry["positions"] = await asyncio.wait_for(
+                adapter.fetch_positions(exchange=ex, account_name=name), timeout=15)
+            client = adapter._get_client(ex, name)
+            raw_orders = await asyncio.wait_for(
+                asyncio.to_thread(client.fetch_open_orders), timeout=15)
+            entry["open_orders"] = [{
+                "symbol": o.get("symbol"), "side": o.get("side"), "type": o.get("type"),
+                "price": float(o["price"]) if o.get("price") is not None else None,
+                "amount": float(o["amount"]) if o.get("amount") is not None else None,
+                "status": o.get("status"), "id": o.get("id"),
+            } for o in (raw_orders or [])]
+        except Exception as exc:
+            entry["error"] = str(exc)[:200]
+        out.append(entry)
+    return _json({"ok": True, "accounts": out})
 
 
 async def handle_mirror_config(request: web.Request) -> web.Response:
@@ -1929,7 +2487,10 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_get(prefix + "/api/traders-intel", handle_traders_intel)
     # Exchange accounts (Phase Demo Bridge)
     app.router.add_get(prefix + "/api/media/{id}", handle_media)
+    app.router.add_get(prefix + "/api/strategies", handle_strategies)
     app.router.add_get(prefix + "/api/paper-vs-demo", handle_paper_vs_demo)
+    app.router.add_get(prefix + "/api/paper-demo/log", handle_paper_demo_log)
+    app.router.add_get(prefix + "/api/paper-demo/exchange-state", handle_paper_demo_exchange_state)
     app.router.add_get(prefix + "/api/exchange-accounts", handle_exchange_accounts)
     app.router.add_post(prefix + "/api/exchange-accounts", handle_exchange_accounts)
     app.router.add_get(prefix + "/api/exchange-accounts/{id}", handle_exchange_account)

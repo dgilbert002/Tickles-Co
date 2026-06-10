@@ -84,7 +84,7 @@ INSERT INTO public.position_postmortems (
     regime_at_entry, regime_at_exit,
     lessons_for_actor, lessons_for_company,
     what_went_well, what_went_wrong, what_to_do_differently, edge_detected,
-    cost_usd, latency_ms, correlation_id
+    cost_usd, latency_ms, correlation_id, techniques_validated
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6, $7,
@@ -93,7 +93,7 @@ INSERT INTO public.position_postmortems (
     $13, $14,
     $15, $16,
     $17, $18, $19, $20,
-    $21, $22, $23
+    $21, $22, $23, $24::jsonb
 )
 ON CONFLICT (position_id, postmortem_version, prompt_version) DO NOTHING
 RETURNING id
@@ -634,9 +634,21 @@ class PostMortemService:
                        tp.signal_source, tp.actor_id, tp.actor_type,
                        tp.trader_profile_id, tp.timeframe, tp.company_id,
                        prof.handle_normalized AS trader_handle,
-                       prof.platform          AS trader_platform
+                       prof.platform          AS trader_platform,
+                       tp.exit_reason_trader, tp.partial_closes,
+                       si.pattern_tags        AS si_pattern_tags,
+                       (SELECT row_to_json(d) FROM (
+                            SELECT do2.exchange, do2.demo_entry, do2.exit_price AS demo_exit,
+                                   do2.demo_pnl, do2.slippage_entry, do2.slippage_exit,
+                                   do2.status AS demo_status
+                              FROM public.demo_orders do2
+                             WHERE do2.tracked_position_id = tp.id
+                               AND do2.status IN ('filled','closed')
+                             ORDER BY do2.filled_at DESC NULLS LAST LIMIT 1
+                        ) d)                   AS demo_fill
                   FROM public.tracked_positions tp
              LEFT JOIN public.trader_profiles  prof ON prof.id = tp.trader_profile_id
+             LEFT JOIN public.signal_interpretations si ON si.id = tp.signal_interpretation_id
                  WHERE tp.status = 'closed'
                    AND tp.postmortem_status = 'pending'
                    AND tp.company_id = $1
@@ -749,7 +761,49 @@ class PostMortemService:
             }
             for c in candles
         ]
-        return template.format(
+        # Extra context blocks appended AFTER the template so existing DB/JSON
+        # templates keep working without new placeholders.
+        extra_blocks = []
+        try:
+            _tags = position["si_pattern_tags"] if "si_pattern_tags" in position.keys() else None
+            if isinstance(_tags, str):
+                _tags = json.loads(_tags)
+            if isinstance(_tags, list) and _tags:
+                extra_blocks.append(
+                    "Techniques the vision LLM observed on the entry chart (max 5):\n"
+                    + json.dumps(_tags[:5])
+                    + "\nFor EACH technique, judge whether it actually played out in the candle "
+                    "data. Return this in techniques_validated as a list of "
+                    '{"technique": str, "played_out": true|false|null, "note": str<=120}.'
+                )
+        except Exception:
+            pass
+        try:
+            _trader_actions = position["exit_reason_trader"] if "exit_reason_trader" in position.keys() else None
+            if _trader_actions:
+                extra_blocks.append(
+                    "What the TRADER did during the trade (timestamped messages):\n"
+                    + str(_trader_actions)[:800]
+                )
+            _partials = position["partial_closes"] if "partial_closes" in position.keys() else None
+            if _partials and str(_partials) not in ("[]", "null"):
+                extra_blocks.append("Trader partial closes: " + str(_partials)[:400])
+        except Exception:
+            pass
+        try:
+            _demo = position["demo_fill"] if "demo_fill" in position.keys() else None
+            if isinstance(_demo, str):
+                _demo = json.loads(_demo)
+            if isinstance(_demo, dict) and _demo:
+                extra_blocks.append(
+                    "ACTUAL demo-exchange execution for this position (compare against the "
+                    "paper levels above -- slippage, fill quality, divergence):\n"
+                    + json.dumps(_demo, default=str)
+                )
+        except Exception:
+            pass
+
+        rendered = template.format(
             instrument_symbol=position["instrument_symbol"] or "unknown",
             instrument_exchange=position["instrument_exchange"] or "unknown",
             direction=position["direction"] or "unknown",
@@ -765,6 +819,9 @@ class PostMortemService:
             exit_reason=(position["exit_reason"] or "(none recorded)"),
             candles_json=json.dumps(candle_rows, separators=(",", ":")),
         )
+        if extra_blocks:
+            rendered = rendered + "\n\n" + "\n\n".join(extra_blocks)
+        return rendered
 
     async def _call_llm(
         self,
@@ -861,6 +918,9 @@ class PostMortemService:
                 Decimal("0"),  # cost_usd populated by api_cost_log; placeholder column value
                 latency_ms,
                 correlation_id[:36],
+                json.dumps(parsed.get("techniques_validated"))
+                if isinstance(parsed.get("techniques_validated"), (list, dict))
+                else None,
             )
         except Exception as exc:
             logger.exception(
@@ -1003,6 +1063,16 @@ class PostMortemService:
             )
             # Phase J — close the learning loop: push lessons into mem0
             await _push_lessons_to_mem0(self.company_id, position, parsed)
+            # Technique ledger — grade every technique the vision LLM observed
+            # on the chart that armed this position (win/loss up-vote loop).
+            try:
+                from shared.intelligence.technique_tracker import grade_techniques_for_position
+                await grade_techniques_for_position(
+                    conn, pos_id,
+                    validations=parsed.get("techniques_validated"),
+                )
+            except Exception as _tt_exc:
+                logger.debug("technique grading failed (best-effort): %s", _tt_exc)
         else:
             logger.info(
                 "postmortem: position_id=%s already had a postmortem (ON CONFLICT)",

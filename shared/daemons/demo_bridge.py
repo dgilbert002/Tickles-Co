@@ -89,7 +89,7 @@ AGENT_MODE: Dict[str, str] = {
 # Max concurrent OPEN demo positions per account, by mode — mirrors the paper
 # agent's concurrency rule so the demo never over-places and exhausts margin.
 MODE_MAX_CONCURRENT: Dict[str, int] = {
-    "spot_seq": 1, "spot_lev_3x": 1, "lev_3pct": 33, "lev_5pct": 20,
+    "spot_seq": 5, "spot_lev_3x": 3, "lev_3pct": 33, "lev_5pct": 20,
 }
 # Risk % / leverage knobs (env-tunable; defaults match copy_trade_monitor).
 DEMO_RISK_PCT_5  = float(os.environ.get("DEMO_RISK_PCT_5",  "5.0"))
@@ -166,7 +166,9 @@ class DemoBridge:
                     bal = await self._adapter.fetch_balance(
                         exchange=a["exchange"], account_name=a["account_name"])
                     usdt = float(bal.get("USDT") or 0.0)
-                    if usdt > 0:
+                    # Always update — even zero balance must be recorded
+                    # so sizing sees the real free balance, not the fallback.
+                    if "USDT" in bal:
                         self._acct_balance[key] = usdt
                 except Exception as exc:
                     LOG.debug("balance refresh %s failed: %s", key, exc)
@@ -194,7 +196,13 @@ class DemoBridge:
             sl_dist = 0.05
         if sl_dist < 0.005:
             sl_dist = 0.005
-        lev_from_sl = min((1.0 / sl_dist) * 0.97, DEMO_LEVERAGE_CAP)
+        # Liquidation-safe leverage — mirrors copy_trade_monitor.lev_after_buffer:
+        # L <= 1 / (sl_dist * safety + mmr) keeps the forced-liquidation price
+        # strictly beyond the stop (the old (1/sl_dist)*0.97 put liquidation
+        # BEFORE the stop for any stop tighter than ~5%).
+        _liq_safety = float(os.environ.get("DEMO_LIQ_SAFETY", "1.15"))
+        _liq_mmr = float(os.environ.get("DEMO_LIQ_MMR", "0.006"))
+        lev_from_sl = min(1.0 / (sl_dist * _liq_safety + _liq_mmr), DEMO_LEVERAGE_CAP)
 
         if mode == "spot_seq":
             allocated, leverage = bal, 1.0
@@ -375,14 +383,60 @@ class DemoBridge:
                      mode=mode, open_count=open_n, cap=cap)
                 continue
 
-            # Quantity from the per-account notional.
-            qty = notional_eff / entry if notional_eff > 0 and entry > 0 else 0.001
-            if entry >= 1000:
-                qty = round(qty, 3)
-            elif entry >= 1:
-                qty = round(qty, 1)
-            else:
-                qty = max(round(qty, 6), 0.001)
+            # Skip when sizing produces zero notional (free balance exhausted).
+            if notional_eff <= 0 or allocated <= 0:
+                LOG.debug("Signal #%d → %s/%s: SKIP (notional=%.2f allocated=%.2f balance=%.2f)",
+                          tp_id, acct["exchange"], acct["account_name"],
+                          notional_eff, allocated, balance)
+                continue
+
+            # Quantity from the per-account notional, rounded to exchange
+            # precision and checked against the symbol's minimum order size.
+            qty = notional_eff / entry if notional_eff > 0 and entry > 0 else 0.0
+            if qty <= 0:
+                continue
+
+            # Symbol availability gate — checked against the DEMO environment's
+            # actual market list (bitget PAPTRADING has only ~29 swaps; bybit
+            # demo has ~678). Skips guaranteed rejections, logs once per
+            # exchange/symbol pair so the gap is visible, not silent.
+            avail_cache = getattr(self, "_symbol_avail", {})
+            avail_key = f"{acct['exchange']}/{sym}"
+            if avail_key not in avail_cache:
+                try:
+                    avail_cache[avail_key] = await self._adapter.has_market(
+                        exchange=acct["exchange"], symbol=sym)
+                except Exception:
+                    avail_cache[avail_key] = True  # fail open
+                self._symbol_avail = avail_cache
+                if not avail_cache[avail_key]:
+                    LOG.info("Signal #%d: %s not listed on %s (demo env) — will skip this exchange",
+                             tp_id, sym, acct["exchange"])
+            if not avail_cache[avail_key]:
+                flog("mirror_skipped_no_market", tp_id=tp_id, agent=agent_id,
+                     exchange=acct["exchange"], account=acct["account_name"],
+                     symbol=sym)
+                continue
+
+            # Fetch exchange limits for this symbol (cached per bridge instance).
+            limits_cache = getattr(self, "_market_limits", {})
+            cache_key = f"{acct['exchange']}/{sym}"
+            if cache_key not in limits_cache:
+                try:
+                    limits_cache[cache_key] = await self._adapter.get_market_limits(
+                        exchange=acct["exchange"], symbol=sym)
+                except Exception:
+                    limits_cache[cache_key] = {"min_amount": 0.001, "amount_precision": 3}
+                self._market_limits = limits_cache
+            limits = limits_cache[cache_key]
+            min_amount = limits["min_amount"]
+            prec = limits["amount_precision"]
+            qty = round(qty, prec)
+            if qty < min_amount:
+                LOG.debug("Signal #%d → %s/%s: qty=%.6f below min=%.6f for %s — skip",
+                          tp_id, acct["exchange"], acct["account_name"],
+                          qty, min_amount, sym)
+                continue
 
             try:
                 intent = ExecutionIntent(

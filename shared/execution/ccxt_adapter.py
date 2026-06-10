@@ -513,10 +513,70 @@ class CcxtExecutionAdapter:
         client = self._get_client(exchange, account_name)
         try:
             bal = await asyncio.to_thread(client.fetch_balance)
-            return {k: float(v or 0) for k, v in bal.get("total", {}).items() if float(v or 0) > 0}
+            # ccxt returns both a flat "free" dict and per-currency objects.
+            # Prefer the flat free dict (available balance, no reserved margin).
+            free_dict = bal.get("free", {})
+            if free_dict:
+                # Return ALL free balances, including zeros — callers need to
+                # see free=0 to detect exhaustion and stop placing orders.
+                return {k: float(v or 0) for k, v in free_dict.items()}
+            # Fallback: extract "free" from each per-currency dict (legacy format).
+            result = {}
+            for k, v in bal.items():
+                if k in ("info", "free", "used", "total", "timestamp", "datetime"):
+                    continue
+                if isinstance(v, dict):
+                    fv = v.get("free", 0)
+                    if float(fv or 0) > 0:
+                        result[k] = float(fv)
+            return result
         except Exception as exc:
             LOG.warning("fetch_balance failed: %s", exc)
             return {}
+
+    async def get_market_limits(self, *, exchange: str, symbol: str) -> Dict[str, Any]:
+        """Return the minimum amount and precision for a given market symbol.
+
+        Returns a dict with keys ``min_amount`` (float) and ``amount_precision``
+        (int — number of decimal places). Falls back to conservative defaults
+        (min=0.001, precision=3) when the market info is unavailable.
+        """
+        try:
+            client = self._get_client(exchange, "default")
+            if not client.markets:
+                await asyncio.to_thread(client.load_markets)
+            market = client.market(symbol)
+            limits = market.get("limits", {}).get("amount", {})
+            precision = market.get("precision", {}).get("amount")
+            min_amount = float(limits.get("min", 0.001))
+            # Compute decimal places from precision if available
+            if precision is not None:
+                prec = abs(int(round(__import__("math").log10(float(precision)))))
+            else:
+                prec = 3
+            return {"min_amount": max(min_amount, 1e-6), "amount_precision": prec}
+        except Exception:
+            return {"min_amount": 0.001, "amount_precision": 3}
+
+    async def has_market(self, *, exchange: str, symbol: str) -> bool:
+        """True when ``symbol`` exists in this exchange's CURRENT environment.
+
+        Crucially this checks the environment the adapter actually trades in:
+        bitget demo (PAPTRADING) carries only ~29 swap markets while bitget
+        live has hundreds — HYPE/RENDER/AERO exist live but NOT in demo.
+        Checking here lets the bridge skip per-account instead of burning an
+        API call on a guaranteed 'does not have market symbol' rejection.
+        Fails OPEN (True) when markets can't be loaded, so a transient
+        load_markets error never silently suppresses orders.
+        """
+        try:
+            client = self._get_client(exchange, "default")
+            if not client.markets:
+                await asyncio.to_thread(client.load_markets)
+            return symbol in client.markets
+        except Exception as exc:
+            LOG.debug("has_market(%s, %s) failed open: %s", exchange, symbol, exc)
+            return True
 
     # ------------------------------------------------------------------
     # Cancel / Poll

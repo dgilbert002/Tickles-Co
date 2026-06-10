@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <script src="static/echarts.min.js"></script>
-  <link rel="stylesheet" href="static/app.css?v=20260529-floor-equity">
+  <link rel="stylesheet" href="static/app.css?v=20260529-model-picker2">
 </head>
 <body><script>if(localStorage.getItem('tickles.theme')==='light')document.body.classList.add('light');</script>
 <div id="app" class="app-shell">
@@ -28,13 +28,15 @@
       <button class="nav-link" data-tab="competition"><span>♛</span>Competition</button>
       <button class="nav-link" data-tab="positions"><span>◆</span>Positions</button>
       <button class="nav-link" data-tab="traders"><span>@</span>Trader Intel</button>
+      <button class="nav-link" data-tab="discord"><span>✉</span>Discord Feed</button>
       <button class="nav-link" data-tab="news"><span>☰</span>Discord Feed</button>
       <button class="nav-link" data-tab="telegram"><span>✈</span>Telegram Feed</button>
       <button class="nav-link" data-tab="learning"><span>✦</span>AI Learning</button>
+      <button class="nav-link" data-tab="strategies"><span>⚡</span>Strategies</button>
       <button class="nav-link" data-tab="ops"><span>$</span>Ops & Cost</button>
       <button class="nav-link" data-tab="settings"><span>⚙</span>Settings</button>
       <button class="nav-link" data-tab="exchanges"><span>💱</span>Exchange Accounts</button>
-      <button class="nav-link" data-tab="paperdemo"><span>⚖</span>Paper vs Demo</button>
+      <button class="nav-link" data-tab="paperdemo"><span>⚖</span>Paper vs Demo vs Live</button>
     </nav>
     <button class="theme-toggle" id="theme-btn">🌙 Dark</button>
     <div class="side-status"><i></i><span id="status-text">connecting</span></div>
@@ -59,7 +61,7 @@
       </div>
       <div class="floor-grid">
         <section class="panel span-2"><div class="panel-head"><h2>Signals approaching entry</h2><div class="filters"><input id="floor-signal-filter" class="input" placeholder="filter symbol / trader"><button class="mini" data-open="signals">All signals</button></div></div><div id="floor-signals" class="table-wrap"></div></section>
-        <section class="panel"><div class="panel-head"><h2>Competition leaders</h2><button class="mini" data-open="competition">Open</button></div><div id="floor-competition"></div></section>
+        <section class="panel"><div class="panel-head"><h2 id="leaders-title">Competition leaders</h2><div class="filters"><div class="view-toggle" id="leaders-toggle"><button class="active" data-lboard="paper">Competition</button><button data-lboard="demo">Demo accts</button></div><button class="mini" data-open="competition">Open</button></div></div><div id="floor-competition"></div></section>
         <section class="panel span-2"><div class="panel-head"><h2>Live positions</h2><div class="filters"><input id="floor-position-filter" class="input" placeholder="filter positions"><button class="mini" data-open="positions">All positions</button></div></div><div id="floor-positions" class="table-wrap"></div></section>
         <section class="panel"><div class="panel-head"><h2>Latest Discord</h2><button class="mini" data-open="news">Feed</button></div><div id="floor-news" class="discord-list"></div></section>
       </div>
@@ -169,7 +171,7 @@
       <div id="subtab-models" class="subtab-panel active">
       <div class="panel full">
         <div class="panel-head">
-          <div><h2>Vision-model settings</h2><p>Choose which OpenRouter vision model the InterpretationService uses for chart reading. Changes take effect within 60 seconds — no service restart required.</p></div>
+          <div><h2>AI model &amp; provider picker</h2><p>For every LLM slot (vision + text), choose the provider (OpenRouter or Requesty) and a model from the live, synced catalogue. Requesty routing policies are pinned on top. Vision slots show vision-capable models only. Changes take effect within 60 seconds — no service restart required.</p></div>
         </div>
         <div id="settings-body" class="settings-body"></div>
       </div>
@@ -212,11 +214,47 @@
       </div>
     </section>
 
+    <section id="tab-strategies" class="tab">
+      <div class="panel">
+        <div class="panel-head">
+          <div><h2>Detected Trading Strategies</h2>
+          <p>Techniques the vision LLM observes on charts, graded win/loss when the tracked position closes, validated by the post-mortem. Maturity grows with sample count.</p></div>
+          <div class="filters"><input id="strat-filter" class="input" placeholder="filter technique / trader / symbol"></div>
+        </div>
+        <div class="stats-row" id="strat-stats"></div>
+        <div id="strategies-body" class="table-wrap"></div>
+      </div>
+    </section>
     <section id="tab-paperdemo" class="tab">
       <div class="panel full">
-        <div class="panel-head"><h2>Paper vs Demo</h2><p>Side-by-side comparison of paper competition trades and demo exchange execution.</p></div>
+        <div class="panel-head">
+          <div><h2>Paper vs Demo vs Live — Forensic Audit</h2><p>Line-by-line reconciliation of every paper signal against its demo (and future live) exchange order: entry, slippage, fees, P&amp;L, timing and reject reasons.</p></div>
+          <div class="accuracy-badge" id="paperdemo-accuracy"></div>
+        </div>
         <div class="stats-row" id="paperdemo-stats"></div>
-        <div class="table-wrap" id="paperdemo-table"></div>
+        <div id="paperdemo-rejects"></div>
+        <div class="view-toggle" id="paperdemo-view" style="margin:14px 0 8px">
+          <button class="active" data-pdview="compare">Comparison</button>
+          <button data-pdview="exchange">Exchange state (live)</button>
+          <button data-pdview="log">Transaction log</button>
+        </div>
+        <div id="paperdemo-pane-compare">
+          <div class="table-wrap" id="paperdemo-table"></div>
+        </div>
+        <div id="paperdemo-pane-exchange" style="display:none">
+          <div class="row-between" style="margin-bottom:8px">
+            <span class="secondary small">Live pull from each demo/live account — balance, open positions and resting orders straight from the exchange.</span>
+            <button class="pill-btn small" id="btn-refresh-exchange">↻ Refresh exchange state</button>
+          </div>
+          <div id="paperdemo-exchange"><div class="empty">Click “Refresh exchange state” to pull live data from the exchanges.</div></div>
+        </div>
+        <div id="paperdemo-pane-log" style="display:none">
+          <div class="row-between" style="margin-bottom:8px">
+            <span class="secondary small">Forensic transaction log — every mirror placement, rejection, fill and cancel (newest first). File: shared/logs/paper_demo.log</span>
+            <button class="pill-btn small" id="btn-refresh-log">↻ Refresh log</button>
+          </div>
+          <div id="paperdemo-log"><div class="empty">Loading log…</div></div>
+        </div>
       </div>
     </section>
 
@@ -237,10 +275,49 @@
     </section>
   </main>
 
+  <!-- BIBLE-P6: Discord-style feed panel -->
+  <section id="tab-discord" class="tab discord-skin">
+    <div class="dsc-modeswitch">
+      <button id="dscModeFeed" class="dsc-modebtn dsc-modebtn-active">Feed</button>
+      <button id="dscModeConfig" class="dsc-modebtn">Config</button>
+      
+      <!-- Following Only Toggle Slider -->
+      <div class="dsc-toggle-wrap">
+        <span>Following Only</span>
+        <label class="dsc-switch">
+          <input type="checkbox" id="dscModeFollow">
+          <span class="dsc-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div id="dscFeedView">
+      <div class="dsc-wrap">
+        <div id="dscSidebar" class="dsc-sidebar"></div>
+        <div class="dsc-main">
+          <div class="dsc-header">
+            <span class="dsc-title" id="dscTitle"># select a channel</span>
+            <input id="dscSearch" class="dsc-search" placeholder="Search (e.g. BTC)"/>
+          </div>
+          <div id="dscRiver" class="dsc-river"></div>
+          
+          <!-- Jump to bottom banner -->
+          <div id="dscJumpBanner" class="dsc-jump-banner">
+            <span class="dsc-jump-text">New Messages Below</span>
+            <span class="dsc-jump-arrow">↓</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="dscConfigView" style="display:none;">
+      <div id="dscConfig" class="dsc-config"></div>
+    </div>
+  </section>
   <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
   <aside id="drawer" class="drawer hidden"><div id="drawer-resizer" title="Drag to resize"></div><div class="drawer-head"><div><div id="drawer-kicker" class="eyebrow">DETAIL</div><h2 id="drawer-title">Signal intelligence</h2></div><button id="drawer-close" class="drawer-close">×</button></div><div id="drawer-body" class="drawer-body"></div></aside>
 </div>
-<script src="static/app.js?v=22-floor-parallel"></script>
-<script src="static/mirror.js?v=3"></script>
+<script src="static/app.js?v=32-signals-pending"></script>
+<script src="static/mirror.js?v=5-forensic"></script>
+<link rel="stylesheet" href="static/css/discord-skin.css?v=bible15">
+<script src="static/js/discord-feed.js?v=bible22"></script>
 </body>
 </html>

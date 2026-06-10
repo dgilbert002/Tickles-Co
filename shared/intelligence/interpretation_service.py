@@ -77,7 +77,9 @@ from shared.intelligence.text_signal_extractor import (
     classify_message_type,
     extract_signal_from_text,
     strip_reply_prefix,
+    looks_signal_like,
 )
+from shared.intelligence.trade_intel import detect_trade_intel, apply_trade_intel
 from shared.intelligence.payload_store import (
     build_request_payload,
     build_response_payload,
@@ -87,6 +89,36 @@ from shared.intelligence.payload_store import (
 )
 
 logger = logging.getLogger("tickles.intelligence.interpretation")
+
+# ---------------------------------------------------------------------------
+# Rate-limit circuit breaker. One 429 silences ALL LLM paths for the
+# cooldown window.  Items touched during cooldown stay retriable.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_COOLDOWN_S = float(os.environ.get("INTERPRETATION_RL_COOLDOWN_S", "120"))
+_rl_cooldown_until: float = 0.0
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    m = str(exc).lower()
+    return "429" in m or "rate limit" in m or "too many requests" in m
+
+
+def _note_rate_limited(seconds: Optional[float] = None) -> None:
+    global _rl_cooldown_until
+    until = time.time() + (seconds or _RATE_LIMIT_COOLDOWN_S)
+    if until > _rl_cooldown_until:
+        _rl_cooldown_until = until
+        logger.warning(
+            "Rate limited: cooling down ALL LLM calls for %.0fs", seconds or _RATE_LIMIT_COOLDOWN_S,
+        )
+
+
+def _in_cooldown() -> bool:
+    return time.time() < _rl_cooldown_until
+
+
+class RateLimitedError(RuntimeError):
+    """LLM call was rejected by provider rate limiting. NOT retryable in-place."""
 
 # ---------------------------------------------------------------------------
 # Config (env-driven, no hardcodes)
@@ -1107,6 +1139,9 @@ async def run_prefilter(
                 prompt_hash=prompt_hash,
             )
     except Exception as exc:
+        if _is_rate_limit(exc):
+            _note_rate_limited()
+            raise RateLimitedError(f"prefilter rate limited: {exc}") from exc
         logger.warning("Pre-filter failed for %s: %s -- proceeding to primary model", instrument_symbol, exc)
         return None
 
@@ -1188,13 +1223,38 @@ async def run_llm_track(
     # identification but no output schema -- without this the model infers a
     # schema that omits ``instrument``.
     _OUTPUT_SCHEMA = (
-        "\n\nJSON OUTPUT FORMAT — Respond ONLY with this exact structure:\n"
-        '{"instrument": "ticker or UNKNOWN (read from chart header/message/watermark)",\n'
-        ' "direction": "long" | "short" | "neutral" | "unclear",\n'
+        "\n\nJSON OUTPUT FORMAT — Respond ONLY with this exact structure (every key, no markdown):\n"
+        "{\n"
+        ' "instrument": "ticker or UNKNOWN (read from chart header/message/watermark)",\n'
+        ' "timeframe": "chart timeframe e.g. 4h, 1d, 15m, or \\"\\" if unreadable",\n'
+        ' "setup_state": "fresh" | "in_play" | "played_out" | "invalidated" | "unclear",\n'
+        ' "trader_trades": [  // setups the TRADER is explicitly calling (one per leg; [] if none)\n'
+        '   {"direction": "long"|"short", "entry": "price", "stop_loss": "price",\n'
+        '    "tp1": "price or null", "tp2": null, "tp3": null,\n'
+        '    "confidence": 0.0-1.0, "trade_type": "swing|scalp|position|unclear",\n'
+        '    "timeframe": "leg timeframe if different", "rationale": "trader\'s stated/visible logic (max 200 chars)",\n'
+        '    "evidence": "what on the chart proves the trader called this (max 150 chars)"}\n'
+        " ],\n"
+        ' "chart_hacker_trades": [  // YOUR OWN independent setup(s) on this chart — same shape; [] if you would not trade\n'
+        " ],\n"
+        ' "chart_analysis": {"chart_patterns": ["visible patterns"], "key_levels": [{"type": "support|resistance|fib|vwap", "price": "..."}]},\n'
+        ' "techniques": ["max 5 SPECIFIC techniques/patterns the trader is using, '
+        "e.g. order_block_retest, anchored_vwap, fib_618_retrace, session_open_range, "
+        'liquidity_sweep, double_top, smc_bos — snake_case, be precise, [] if none"],\n'
+        ' "market_commentary": "1-2 sentences: what is the trader trying to do and is the '
+        'broader structure with or against them (max 250 chars)",\n'
+        ' "ai_agreement_with_trader": 0.0-1.0,  // how much YOU agree with the trader\'s call\n'
+        ' "ai_comment_on_trader": "your verdict on the trader\'s setup (max 200 chars)",\n'
+        ' "trader_market_view": "the trader\'s implied market view (max 150 chars)",\n'
+        ' "chart_hacker_market_view": "YOUR market view for this instrument (max 150 chars)",\n'
+        ' "direction": "long"|"short"|"neutral"|"unclear",  // legacy: dominant trade direction\n'
         ' "confidence": 0.0-1.0,\n'
         ' "reasoning": "brief text (max 300 chars)",\n'
-        ' "levels": {"entry": "...", "stop_loss": "...", "take_profit": "..."}}\n'
-        "No markdown, no prose outside the JSON. Always include the instrument field."
+        ' "levels": {"entry": "...", "stop_loss": "...", "take_profit": "..."}  // legacy: dominant trade levels\n'
+        "}\n"
+        "RULES: trader_trades is ONLY for setups with explicit evidence the trader called them. "
+        "Your own read goes in chart_hacker_trades. Multiple position boxes = multiple legs. "
+        "No prose outside the JSON. Always include instrument, trader_trades, chart_hacker_trades, techniques."
     )
     system_prompt += _OUTPUT_SCHEMA
 
@@ -1275,6 +1335,24 @@ async def run_llm_track(
                 trader_trades       = parsed.get("trader_trades") or []
                 chart_hacker_trades = parsed.get("chart_hacker_trades") or []
                 chart_analysis      = parsed.get("chart_analysis") or {}
+                if not isinstance(chart_analysis, dict):
+                    chart_analysis = {}
+                # Technique learning loop -- the output schema asks for a
+                # top-level "techniques" list (max 5) and "market_commentary".
+                # Fold them into chart_analysis: techniques merge into
+                # chart_patterns (deduped) so the existing pattern_tags
+                # derivation persists them; commentary is kept verbatim.
+                _tl_techniques = parsed.get("techniques")
+                if isinstance(_tl_techniques, list) and _tl_techniques:
+                    _existing = chart_analysis.get("chart_patterns")
+                    _merged = list(_existing) if isinstance(_existing, list) else []
+                    for _t in _tl_techniques[:5]:
+                        if isinstance(_t, str) and _t.strip() and _t not in _merged:
+                            _merged.append(_t.strip())
+                    chart_analysis["chart_patterns"] = _merged
+                _tl_comment = parsed.get("market_commentary")
+                if isinstance(_tl_comment, str) and _tl_comment.strip():
+                    chart_analysis["market_commentary"] = _tl_comment.strip()[:400]
 
                 # Coerce to lists in case the LLM returned a dict by mistake
                 if not isinstance(trader_trades, list):
@@ -1389,7 +1467,12 @@ async def run_llm_track(
                     prompt_source=_prompt_source,
                     setup_state=str(parsed.get("setup_state", parsed.get("chart_state", ""))).strip(),
                 )
+            except RateLimitedError:
+                raise  # from prefilter -- already noted
             except Exception as exc:
+                if _is_rate_limit(exc):
+                    _note_rate_limited()
+                    raise RateLimitedError(str(exc)) from exc
                 last_exc = exc
                 wait = cfg.llm_backoff_base * (2 ** attempt)
                 logger.warning(
@@ -2380,15 +2463,15 @@ async def write_signal_interpretation(
       * Writes prefilter_provider, vision_model_requested, vision_model_resolved,
         prompt_version, prompt_hash, llm_raw_request_path, llm_raw_response_path,
         and correlation_id columns (all Phase 2 schema additions).
-      * Uses ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING
-        for idempotency.
+      * Uses ON CONFLICT (news_item_id, model_version, param_hash) DO UPDATE
+        so the call always returns an existing or newly-inserted id.
 
     Phase 9 addition:
       * instrument_resolved_from tracks whether the symbol came from the message
         text, context window, or LLM inference ('message','context','inferred','unknown').
 
     Returns:
-        Inserted row ID, or None on conflict (already exists).
+        Row ID (new or existing — never None when the row exists or was created).
     """
     llm = consensus.llm_result
     quant = consensus.quant_result
@@ -2484,7 +2567,7 @@ async def write_signal_interpretation(
         "  $48, "
         "  NOW()"
         ")"
-        "ON CONFLICT (news_item_id, model_version, param_hash) DO NOTHING "
+        "ON CONFLICT (news_item_id, model_version, param_hash) DO UPDATE SET updated_at = NOW() "
         "RETURNING id"
     )
     params = (
@@ -2494,14 +2577,14 @@ async def write_signal_interpretation(
         llm.model_used if llm else "",
         param_hash,
         candle_data_hash,
-        llm.direction if llm else "unclear",
+        llm.direction if llm and llm.direction in ("long", "short", "neutral", "unclear") else "unclear",
         round(llm.confidence, 4) if llm else 0.0,
         llm.reasoning if llm else "",
         json.dumps(llm.levels if llm else {}),
-        quant.direction if quant else "unclear",
+        quant.direction if quant and quant.direction in ("long", "short", "neutral", "unclear") else "unclear",
         round(quant.confidence, 4) if quant else 0.0,
         json.dumps(quant.indicators if quant else {}),
-        consensus.direction,
+        consensus.direction if consensus.direction in ("long", "short", "unclear") else "unclear",
         round(consensus.confidence, 4),
         consensus.method,
         instrument_symbol,
@@ -2544,11 +2627,9 @@ async def write_signal_interpretation(
     )
     row = await shared_pool.fetch_one(sql, params)
     if row is None:
-        logger.debug(
-            "signal_interpretation dedup skip: news_item_id=%s model=%s hash=%s",
+        logger.error(
+            "signal_interpretation write failed — no id returned: news_item_id=%s",
             news_item_id,
-            llm.model_used if llm else "",
-            param_hash,
         )
         return None
     return int(row["id"])
@@ -2620,6 +2701,90 @@ _BARE_CRYPTO_BASES = {
     "KAS", "VIRTUAL", "BEAM", "ICP", "ALGO", "BRETT", "WLD",
     "DOLO", "FLUX", "MITO", "YB",
 }
+
+
+def _extract_symbol_for_chart(content: str, source_url: str) -> Optional[str]:
+    """Extract the symbol adjacent to a specific chart URL in a multi-chart message.
+
+    When a trader posts several charts in one message (e.g. ``LINK / ETH / ZEC / GOLD``),
+    the global ``_extract_symbol_from_text()`` returns the first symbol for every chart.
+    This function matches each chart's source URL to the corresponding line in the
+    message and returns the symbol immediately before or after it.
+
+    TradingView URLs contain a shortcode (e.g. ``ZME8tCM2``) that appears in both
+    the message URL ``tradingview.com/x/ZME8tCM2/`` and the snapshot CDN URL
+    ``s3.tradingview.com/snapshots/.../ZME8tCM2.png``.
+
+    Returns the canonical slash form (e.g. ``ETH/USDT``, ``XAU/USD``) or ``None``.
+    """
+    if not content or not source_url:
+        return None
+    # Extract TradingView shortcode from the snapshot CDN URL
+    shortcode = None
+    m = _re.search(r"tradingview\.com.*?/([A-Za-z0-9_-]{6,20})(?:\.\w+)?(?:\?|$)", source_url)
+    if not m:
+        # Try plain path match for non-TradingView URLs
+        m = _re.search(r"/([A-Za-z0-9_-]{6,20})(?:\.\w+)?$", source_url)
+    if m:
+        shortcode = m.group(1)
+    if not shortcode or len(shortcode) < 6:
+        return None
+
+    # Find the line in the message that references this shortcode
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        if shortcode in line:
+            # Check the line BELOW first (TradingView convention: URL → symbol),
+            # then the line itself, then the line above.
+            candidates = []
+            if i + 1 < len(lines):
+                candidates.append(lines[i + 1].strip())  # below first
+            candidates.append(line.strip())  # then the URL line itself
+            if i > 0:
+                candidates.append(lines[i - 1].strip())  # above last
+            for cand in candidates:
+                if cand and len(cand) >= 2 and len(cand) <= 10:
+                    sym = _extract_symbol_from_text(cand)
+                    if sym:
+                        logger.debug(
+                            "_extract_symbol_for_chart: shortcode=%s matched symbol=%s",
+                            shortcode, sym,
+                        )
+                        return sym
+            break
+
+    return None
+
+
+def _extract_chart_context(content: str, source_url: str) -> str:
+    """Scope the message context to just the lines relevant to this specific chart.
+
+    When a trader posts multiple charts in one message, the full message
+    mentions all symbols and confuses the prefilter/vision model. This
+    extracts a 3-line window around the matching chart URL so the model
+    only sees context for THIS chart.
+
+    Returns the full content if no chart-specific match is found.
+    """
+    if not content or not source_url:
+        return content or ""
+    # Extract shortcode (same as _extract_symbol_for_chart)
+    shortcode = None
+    m = _re.search(r"tradingview\.com.*?/([A-Za-z0-9_-]{6,20})(?:\.\w+)?(?:\?|$)", source_url)
+    if not m:
+        m = _re.search(r"/([A-Za-z0-9_-]{6,20})(?:\.\w+)?$", source_url)
+    if m:
+        shortcode = m.group(1)
+    if not shortcode or len(shortcode) < 6:
+        return content
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        if shortcode in line:
+            # Return URL line + symbol line below (the Trader convention)
+            start = i
+            end = min(len(lines), i + 2)
+            return "\n".join(lines[start:end])
+    return content
 
 
 def _extract_symbol_from_text(text: str) -> Optional[str]:
@@ -3955,6 +4120,7 @@ class InterpretationService:
         news_item_id = media_row["news_item_id"]
         local_path = media_row["local_path"]
         source_id = media_row.get("source_id")
+        source_url = media_row.get("source_url", "")
         headline = media_row.get("headline", "")
         content = media_row.get("content", "")
         instruments_jsonb = media_row.get("instruments")
@@ -3990,17 +4156,30 @@ class InterpretationService:
             # the LLM -- which has its own anti-guessing rules).
             clean_headline = strip_reply_prefix(headline or "")
             clean_content = strip_reply_prefix(content or "")
-            # Try regex extraction from headline + content (reply-quote-stripped)
-            symbol = _extract_symbol_from_text(
-                f"{clean_headline} {clean_content}"
-            )
+            # First: try to match this specific chart to its symbol from the
+            # message (critical for multi-chart messages like "LINK / ETH / ZEC / GOLD").
+            symbol = _extract_symbol_for_chart(clean_content, source_url or "")
+            resolved_from = None
             if symbol:
-                exchange = "bybit"  # default venue; LLM/quant can refine
+                exchange = "bybit"
+                resolved_from = "chart_url"
                 logger.info(
-                    "media_id=%s: instrument resolved from text: %s",
+                    "media_id=%s: instrument resolved from chart URL match: %s",
                     media_id, symbol,
                 )
             else:
+                # Try regex extraction from headline + content (reply-quote-stripped)
+                symbol = _extract_symbol_from_text(
+                    f"{clean_headline} {clean_content}"
+                )
+                if symbol:
+                    exchange = "bybit"
+                    resolved_from = "text"
+                    logger.info(
+                        "media_id=%s: instrument resolved from text: %s",
+                        media_id, symbol,
+                    )
+            if not symbol:
                 # Let the LLM identify the instrument from the chart image.
                 # Use a placeholder; we'll replace it after the LLM responds.
                 symbol = "UNKNOWN"
@@ -4127,7 +4306,7 @@ class InterpretationService:
                 direction=text_signal["direction"],
                 entry=text_signal["entry"],
                 stop_loss=text_signal.get("stop_loss"),
-                take_profit=text_signal.get("take_profits", [None])[0],
+                take_profit=(text_signal.get("take_profits") or [None])[0],
                 hours=8,
                 tolerance_pct=0.02,
             )
@@ -4161,6 +4340,12 @@ class InterpretationService:
         clean_headline_for_ctx = strip_reply_prefix(headline or "")
         clean_content_for_ctx = strip_reply_prefix(content or "")
         news_context = f"{clean_headline_for_ctx}\n{clean_content_for_ctx}"[:1000]
+        # When a trader posts multiple charts in one message, scope the
+        # context to just this specific chart so the prefilter/vision model
+        # doesn't get confused by other symbols mentioned in the message.
+        chart_context = _extract_chart_context(clean_content_for_ctx, source_url or "")
+        if chart_context and chart_context != clean_content_for_ctx:
+            news_context = f"{clean_headline_for_ctx}\n{chart_context}"[:1000]
         context_window_raw = media_row.get("context_window")
         ctx_txt = _format_context_window(context_window_raw, author)
         if ctx_txt:
@@ -4173,6 +4358,36 @@ class InterpretationService:
             direction=None,  # not yet known at this stage
             trader_handle=author if author and author != "unknown" else None,
         )
+        # Phase B -- log the recall so its usefulness can be measured once the
+        # resulting position closes (match_recall_to_outcome in postmortem).
+        if recall_context:
+            try:
+                from shared.intelligence.recall_log import record_recall
+                async with shared_pool.acquire() as _rc_conn:
+                    await record_recall(
+                        _rc_conn,
+                        actor_id="chart_hacker",
+                        company_id=company,
+                        query_summary=(recall_context or "")[:500],
+                        correlation_id=cid,
+                        query_symbol=symbol if symbol != "UNKNOWN" else None,
+                        signal_source="discord" if news_source != "telegram" else "telegram",
+                    )
+            except Exception as _rc_exc:
+                logger.debug("record_recall failed (best-effort): %s", _rc_exc)
+        # Technique track record -- proven winners/losers from closed trades,
+        # so the model knows which observed techniques actually pay.
+        try:
+            from shared.intelligence.technique_tracker import top_techniques_context
+            _tech_ctx = await top_techniques_context(
+                shared_pool,
+                trader_handle=author if author and author != "unknown" else None,
+                symbol=symbol if symbol != "UNKNOWN" else None,
+            )
+            if _tech_ctx:
+                recall_context = (recall_context + "\n\n" + _tech_ctx) if recall_context else _tech_ctx
+        except Exception as _tt_exc:
+            logger.debug("technique context failed (best-effort): %s", _tt_exc)
         # Inject source-specific color scheme rules for the vision LLM
         source_color_rules = await _load_source_color_rules(shared_pool, news_source)
         if source_color_rules:
@@ -4217,6 +4432,16 @@ class InterpretationService:
                 chart_hacker_quant=pre_llm_quant,
             )
             self._rate_limiter.report_success()
+        except RateLimitedError as exc:
+            logger.info("media_id=%s deferred: rate limited (%s)", media_id, exc)
+            # Reset to a re-claimable status so the next post-cooldown cycle
+            # picks it up at zero extra cost.
+            await update_media_status(
+                shared_pool, media_id,
+                "downloaded" if local_path and Path(local_path).exists() else "pending",
+                expected_processed_at=claim_ts,
+            )
+            return {"media_id": media_id, "status": "deferred_rate_limit"}
         except RuntimeError as exc:
             logger.error("LLM track failed for media_id=%s: %s", media_id, exc)
             await update_media_status(
@@ -4596,6 +4821,19 @@ class InterpretationService:
                     )
                     if pid:
                         positions_created.append(pid)
+                        # Phase B -- link the decision-time recall row(s) to
+                        # this position so outcome matching can grade them.
+                        try:
+                            from shared.intelligence.recall_log import link_recall_by_correlation
+                            async with shared_pool.acquire() as _lr_conn:
+                                await link_recall_by_correlation(
+                                    _lr_conn,
+                                    correlation_id=cid,
+                                    position_id=int(pid),
+                                    actor_id="chart_hacker",
+                                )
+                        except Exception as _lr_exc:
+                            logger.debug("link_recall failed (best-effort): %s", _lr_exc)
                 except Exception as exc:
                     logger.warning(
                         "Phase J %s tracked_position write failed (sig_id=%s): %s",
@@ -4701,6 +4939,18 @@ class InterpretationService:
                     )
                     if legacy_pid:
                         positions_created.append(legacy_pid)
+                        # Phase B -- link decision-time recall to this position
+                        try:
+                            from shared.intelligence.recall_log import link_recall_by_correlation
+                            async with shared_pool.acquire() as _lr_conn:
+                                await link_recall_by_correlation(
+                                    _lr_conn,
+                                    correlation_id=cid,
+                                    position_id=int(legacy_pid),
+                                    actor_id="chart_hacker",
+                                )
+                        except Exception as _lr_exc:
+                            logger.debug("link_recall (legacy) failed: %s", _lr_exc)
                 except Exception as exc:
                     logger.warning(
                         "Legacy tracked_position fallback failed (sig_id=%s): %s",
@@ -4825,14 +5075,55 @@ class InterpretationService:
             await self._mark_news_terminal(news_item_id, "skipped")
             return {"news_item_id": news_item_id, "status": "skipped_commentary"}
 
+        # --- Trade intel: position-management updates from the trader ---
+        # "moving SL to BE", "closed my SOL short", "taking partials" --
+        # these are NOT new setups; they modify the trader's OPEN position.
+        # Free regex detection; applied to tracked_positions so the copy
+        # agents, position monitor and postmortem all see what the trader
+        # actually did.
+        intel = detect_trade_intel(strip_reply_prefix(content))
+        if intel is not None:
+            shared_pool_ti = await self._ensure_pool()
+            result = await apply_trade_intel(
+                shared_pool_ti,
+                author=author,
+                text=strip_reply_prefix(content),
+                intel=intel,
+                news_item_id=news_item_id,
+            )
+            if result.get("applied"):
+                await self._mark_news_terminal(news_item_id, "skipped")
+                return {
+                    "news_item_id": news_item_id,
+                    "status": f"trade_intel_{intel['kind']}",
+                    "position_ids": result.get("position_ids", []),
+                }
+            # Not applied (no matching position / ambiguous): fall through --
+            # the message may still contain a NEW setup.
+
+        # Only run the expensive LLM for messages that look like trade
+        # setups.  Unknown messages get a local semantic second opinion
+        # (free, ~10-30ms) instead of a blind LLM call or blind drop.
+        use_llm = (msg_type == "trade_setup")
+        if not use_llm and msg_type == "unknown":
+            use_llm = await looks_signal_like(content)
+
+        # Mid-storm: defer rather than process. A None signal here would
+        # mark the item terminally non_signal -- an outage verdict, not a
+        # classifier verdict. No terminal mark => retried next cycle.
+        if use_llm and _in_cooldown():
+            return {"news_item_id": news_item_id, "status": "deferred_rate_limit"}
+
         # Extract signal
         try:
             signal = await extract_signal_from_text(
                 text=content,
                 author=author,
                 context={"channel": headline, "source_id": source_id},
-                use_llm_fallback=True,
+                use_llm_fallback=use_llm,
             )
+        except RateLimitedError:
+            return {"news_item_id": news_item_id, "status": "deferred_rate_limit"}
         except Exception as e:
             logger.debug("Text extraction failed for news_item_id=%s: %s", news_item_id, e)
             signal = None
@@ -5113,6 +5404,12 @@ class InterpretationService:
         Processes both media items (images/charts) and text-only news items
         in parallel tracks.
         """
+        # Skip the entire tick during rate-limit cooldown.
+        if _in_cooldown():
+            remaining = _rl_cooldown_until - time.time()
+            logger.info("run_cycle skipped: rate-limit cooldown (%.0fs remaining)", remaining)
+            return {"processed": 0, "skipped_rate_limit_cooldown": True}
+
         shared_pool = await self._ensure_pool()
 
         # ── Slice 4: Feed hygiene ─────────────────────────────────────
@@ -5201,18 +5498,34 @@ class InterpretationService:
                             "status": "cancelled",
                             "reason": "stop requested",
                         }
+                    # Cooldown gate: don't start items mid-storm.
+                    if self._stop.is_set() or _in_cooldown():
+                        try:
+                            await update_media_status(
+                                shared_pool, row["media_id"],
+                                "downloaded" if row.get("local_path") else "pending",
+                                expected_processed_at=row.get("claim_ts"),
+                            )
+                        except Exception:
+                            pass
+                        return {"media_id": row.get("media_id"), "status": "deferred_rate_limit"}
                     async with _sem:
                         try:
                             result = await self._process_one(row)
                             return result
+                        except RateLimitedError:
+                            # Already handled inside _process_one_impl --
+                            # row was requeued to downloaded/pending.
+                            return {"media_id": row.get("media_id"), "status": "deferred_rate_limit"}
                         except Exception as exc:
                             last_exc = exc
-                            # Only retry on transient-looking errors
+                            # Only retry on genuinely transient errors
+                            # (timeouts, 5xx).  429/rate-limit is NOT transient --
+                            # it means STOP and is handled by the circuit breaker.
                             msg = str(exc).lower()
                             transient = any(
                                 tag in msg
                                 for tag in (
-                                    "429", "rate limit", "too many requests",
                                     "503", "502", "504",
                                     "timeout", "timed out",
                                     "connection", "connect",

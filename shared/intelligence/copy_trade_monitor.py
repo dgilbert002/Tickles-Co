@@ -249,15 +249,30 @@ def compute_pnl(entry: float, exit_px: float, direction: str, notional: float):
 def lev_after_buffer(sl_dist: float) -> float:
     """Liquidation-safe leverage.
 
-    Max leverage where liquidation ~= the stop is (1/sl_dist). We drop a 3x
-    LEVERAGE buffer (not a price %) so a forced liquidation can't trigger just
-    before the stop — e.g. a 12x-capable setup trades at 9x. Tight stops still
-    get high leverage/notional (intended). Floored at 1x, capped by leverage_cap.
-    Buffer + cap are tunable via SIZING keys liq_buffer_x / leverage_cap.
+    GOAL: maximum leverage such that the forced-liquidation price sits
+    STRICTLY BEYOND the stop loss (further from entry), so the SL always
+    fires before the exchange liquidates (liquidation carries extra fees).
+
+    MATH (isolated margin, linear perp, approx):
+        liq_distance ≈ 1/L - mmr        (mmr = maintenance margin rate)
+    We require  liq_distance >= sl_dist * liq_safety  (default 1.15 =
+    liquidation 15% further out than the stop), which solves to:
+        L <= 1 / (sl_dist * liq_safety + mmr)
+
+    The OLD formula ((1/sl_dist) - 3) was a leverage-unit buffer and was
+    UNSAFE for tight stops: at sl_dist=1% it produced 97x whose liquidation
+    sat at ~0.53% -- liquidated long before the 1% stop. The proportional
+    form is safe at every stop width (verified numerically 0.5%..10%).
+
+    Tunables via SIZING keys: liq_safety (default 1.15), liq_mmr (default
+    0.006 = 0.6%, conservative tier-1 maintenance margin + fee pad),
+    leverage_cap (default 100).
     """
     if sl_dist < 0.005:
         sl_dist = 0.005
-    raw = (1.0 / sl_dist) - float(_sizing("liq_buffer_x", 3.0))
+    safety = float(_sizing("liq_safety", 1.15))
+    mmr = float(_sizing("liq_mmr", 0.006))
+    raw = 1.0 / (sl_dist * safety + mmr)
     return max(min(raw, float(_sizing("leverage_cap", 100.0))), 1.0)
 
 
@@ -584,7 +599,7 @@ class LiveCopyTradeMonitor:
                   AND tp.entry_price > 0
 
 
-                  AND tp.signal_timestamp >= NOW() - INTERVAL '7 days'
+                  AND tp.signal_timestamp >= NOW() - INTERVAL '30 days'
                   AND (
                     tp.actor_id LIKE 'jarvais_trader_%'
                     OR tp.actor_id = 'jarvais_chart_hacker'
@@ -1067,28 +1082,85 @@ class LiveCopyTradeMonitor:
                     )
 
     async def _update_contest_scores(self):
-        """Push current agent balances to contest_participants."""
+        """Push canonical agent stats to contest_participants.
+
+        Historical stats (trades, wins, losses, realized PnL) come from
+        ``competition_trades`` — the single source of truth.  Only the
+        *open-positions* count and *unrealized PnL* still read from the
+        in-memory agent state because they represent live state that has no
+        settled DB equivalent yet.  After the dashboard update we sync the
+        in-memory counters back to the DB-derived values so they survive a
+        restart without manual intervention.
+        """
         # Compute unrealized P&L from open positions using latest candle prices
         unrealized = await self._compute_unrealized_pnl()
-        
+
         pool = await self._ensure_pool()
+
+        # --- Fetch canonical per-agent stats from competition_trades ---
+        db_stats: Dict[str, Dict[str, float]] = {}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT agent_id,
+                       COUNT(*)                                      AS total_trades,
+                       SUM(CASE WHEN pnl > 0  THEN 1 ELSE 0 END)     AS wins,
+                       SUM(CASE WHEN pnl < 0  THEN 1 ELSE 0 END)     AS losses,
+                       COALESCE(SUM(pnl), 0)                          AS total_pnl
+                  FROM public.competition_trades
+                 WHERE company_id = 'jarvais'
+                   AND pnl IS NOT NULL
+                 GROUP BY agent_id
+            """)
+            for r in rows:
+                db_stats[r["agent_id"]] = {
+                    "trades": int(r["total_trades"]),
+                    "wins":   int(r["wins"]),
+                    "losses": int(r["losses"]),
+                    "pnl":    float(r["total_pnl"]),
+                }
+
         for agent_name, agent in self._agents.items():
             agent_id = NAME_TO_ID.get(agent_name)
             if not agent_id:
                 continue
-            wc = agent["wins"]
-            lc = agent["losses"]
-            tc = agent["trades"]
+
+            # Canonical stats from the trade log (DB), fall back to memory
+            # when no trades have settled yet (fresh agent).
+            st = db_stats.get(agent_id, {})
+            tc = st.get("trades", agent["trades"])
+            wc = st.get("wins", agent["wins"])
+            lc = st.get("losses", agent["losses"])
+            rpnl = st.get("pnl", agent["total_pnl"])
+
+            # Sync in-memory counters so the running agent always matches
+            # the canonical log — heals any drift from manual backfills or
+            # external corrections without a restart.
+            # NOTE: do NOT overwrite agent["balance"] or agent["total_fees"] —
+            # the running balance includes entry fees deducted at position-open
+            # time that competition_trades doesn't track (its ``pnl`` is net
+            # AFTER exit fees but BEFORE entry fees). Fees are maintained by
+            # the open/close hot paths.
+            agent["trades"]    = tc
+            agent["wins"]      = wc
+            agent["losses"]    = lc
+            agent["total_pnl"] = rpnl
+
             upnl = unrealized.get(agent_name, 0.0)
+            # Dashboard equity from canonical DB sources:
+            #   realized = SUM(competition_trades.pnl)
+            #   unrealized = from live open positions
+            # This is immune to balance drift from manual backfills.
+            equity = agent["starting"] + rpnl + upnl
+
             score = {
-                "equity": round(agent["balance"], 2),
-                "total_realized_pnl_usd": round(agent["total_pnl"], 2),
+                "equity": round(equity, 2),
+                "total_realized_pnl_usd": round(rpnl, 2),
                 "unrealized_pnl_usd": round(upnl, 2),
-                "return_pct": round((agent["balance"] / agent["starting"] - 1) * 100, 1),
+                "return_pct": round((equity / agent["starting"] - 1) * 100, 1),
                 "total_trades": tc,
                 "winning_trades": wc,
                 "losing_trades": lc,
-                "win_rate": round(wc / max(tc, 1), 3),
+                "win_rate": round(wc / max(wc + lc, 1), 3),
                 "open_positions": len(agent["open_positions"]),
                 "total_fees": round(agent["total_fees"], 2),
                 "starting_balance_usd": agent["starting"],

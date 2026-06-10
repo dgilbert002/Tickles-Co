@@ -1449,6 +1449,30 @@ def _build_tools(_ctx: ToolContext) -> List[Tuple[McpTool, Any]]:
             ),
             _handle_critic_compare,
         ),
+        (
+            McpTool(
+                name="intelligence.techniques_top",
+                description=(
+                    "Graded technique ledger: which observed trading techniques "
+                    "(order blocks, anchored VWAP, fib retrace, liquidity sweeps, ...) "
+                    "actually win, per trader and symbol, from closed tracked positions. "
+                    "Use this before taking a setup: a technique with a proven track "
+                    "record is a reason to size up; a losing one is a warning."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "trader": {"type": "string", "description": "Trader handle filter (optional)."},
+                        "symbol": {"type": "string", "description": "Base symbol filter, e.g. BTC (optional)."},
+                        "minSamples": {"type": "integer", "description": "Minimum closed trades (default 1)."},
+                        "limit": {"type": "integer", "description": "Max rows (default 25, cap 100)."},
+                    },
+                },
+                read_only=True,
+                tags={"category": "intelligence"},
+            ),
+            _handle_techniques_top,
+        ),
     ]
 
 
@@ -1800,6 +1824,67 @@ async def _handle_critic_compare(p: Dict[str, Any]) -> Dict[str, Any]:
         )
     except Exception as exc:
         logger.exception("critic_compare failed")
+        return {"ok": False, "error": str(exc)}
+
+
+async def _handle_techniques_top(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Query the graded technique ledger (technique_stats).
+
+    Params:
+        trader (str, optional): Filter to one trader handle (plus globals).
+        symbol (str, optional): Filter to one base symbol (plus globals).
+        minSamples (int, optional): Minimum closed trades (default 1).
+        limit (int, optional): Max rows (default 25).
+
+    Returns:
+        Dict with techniques list: technique, trader, symbol, wins, losses,
+        win_rate, total_pnl_usd, sample_count, last_outcome.
+    """
+    try:
+        pool = await _get_pool()
+        min_samples = max(int(p.get("minSamples", 1)), 1)
+        limit = min(int(p.get("limit", 25)), 100)
+        trader = str(p.get("trader", "") or "").lower()
+        symbol = str(p.get("symbol", "") or "").upper()
+        for sep in ("/", ":", "-"):
+            if sep in symbol:
+                symbol = symbol.split(sep)[0]
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT technique, trader_handle, symbol_base, timeframe,
+                       wins, losses, total_pnl_usd, sample_count,
+                       last_outcome, last_position_id, updated_at
+                FROM public.technique_stats
+                WHERE sample_count >= $1
+                  AND ($2 = '' OR trader_handle = $2 OR trader_handle = '')
+                  AND ($3 = '' OR symbol_base = $3 OR symbol_base = '')
+                ORDER BY (wins::float / GREATEST(wins + losses, 1)) DESC,
+                         total_pnl_usd DESC
+                LIMIT $4
+                """,
+                min_samples, trader, symbol, limit,
+            )
+        techniques = []
+        for r in rows:
+            total = r["wins"] + r["losses"]
+            techniques.append({
+                "technique": r["technique"],
+                "trader": r["trader_handle"] or None,
+                "symbol": r["symbol_base"] or None,
+                "timeframe": r["timeframe"] or None,
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "win_rate": round(r["wins"] / max(total, 1), 3),
+                "total_pnl_usd": float(r["total_pnl_usd"]),
+                "sample_count": r["sample_count"],
+                "last_outcome": r["last_outcome"],
+                "last_position_id": r["last_position_id"],
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            })
+        return {"ok": True, "count": len(techniques), "techniques": techniques}
+    except Exception as exc:
+        logger.exception("techniques_top failed")
         return {"ok": False, "error": str(exc)}
 
 

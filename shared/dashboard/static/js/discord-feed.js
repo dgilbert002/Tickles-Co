@@ -182,6 +182,10 @@
     document.getElementById("dscSidebar").appendChild(row);
   }
   function getUnread(ch){var u=state.unread[ch];if(!u){u={count:0,last:0};state.unread[ch]=u;}return u;}
+  // Persist unread/seen state across page reloads (single-operator dashboard).
+  function saveUnread(){try{localStorage.setItem('dsc_unread',JSON.stringify(state.unread));}catch(e){}}
+  function loadUnread(){try{var s=localStorage.getItem('dsc_unread');if(s)state.unread=JSON.parse(s)||{};}catch(e){}}
+  loadUnread();
 
   function getProperName(authorHandle, it) {
     if (it && it.metadata) {
@@ -205,7 +209,7 @@
     state.seenTopTime = 0;
     state.seenBottomId = 0;
     state.seenBottomTime = 0;
-    if (state.unread[name]) { state.unread[name].count = 0; }
+    if (state.unread[name]) { state.unread[name].count = 0; saveUnread(); }
     try { localStorage.setItem("dsc_lastChannel", name); } catch(e){}
     renderTree();
     document.getElementById("dscTitle").textContent = "# " + (dis || name);
@@ -677,6 +681,7 @@
           var newMsgsCount = items.filter(function(it){ return it.channel_name === ch && it.id > u.last; }).length;
           u.count += newMsgsCount;
           u.last = c.l;
+          saveUnread();
         }
       });
       renderTree();

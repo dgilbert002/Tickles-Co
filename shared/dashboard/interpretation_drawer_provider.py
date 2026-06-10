@@ -704,14 +704,14 @@ class InterpretationDrawerProvider:
                 "direction": rec["llm_direction"],
                 "confidence": _opt_decimal(rec["llm_confidence"]),
                 "reasoning": rec["llm_reasoning"],
-                "levels": rec["llm_levels"],
+                "levels": _opt_json(rec["llm_levels"]),
                 "inferred_thesis": rec["llm_inferred_thesis"],
                 "cost_usd": _opt_decimal(rec["llm_cost_usd"]),
             },
             "quant": {
                 "direction": rec["quant_direction"],
                 "confidence": _opt_decimal(rec["quant_confidence"]),
-                "indicators": rec["quant_indicators"],
+                "indicators": _opt_json(rec["quant_indicators"]),
                 "cost_usd": _opt_decimal(rec["quant_cost_usd"]),
             },
             "instrument": {
@@ -722,17 +722,17 @@ class InterpretationDrawerProvider:
                 "resolved_from": rec["instrument_resolved_from"],
             },
             "chart_hacker": {
-                "chart_analysis": rec["chart_analysis"],
-                "trader_trades": rec["trader_trades"],
-                "chart_hacker_trades": rec["chart_hacker_trades"],
+                "chart_analysis": _opt_json(rec["chart_analysis"]),
+                "trader_trades": _opt_json(rec["trader_trades"]),
+                "chart_hacker_trades": _opt_json(rec["chart_hacker_trades"]),
                 "ai_agreement_score": _opt_decimal(rec["ai_agreement_score"]),
                 "ai_comment": rec["ai_comment"],
             },
             "tags": {
-                "pattern": rec["pattern_tags"],
-                "setup": rec["setup_tags"],
-                "regime": rec["regime_tags"],
-                "session": rec["session_tags"],
+                "pattern": _opt_json(rec["pattern_tags"]),
+                "setup": _opt_json(rec["setup_tags"]),
+                "regime": _opt_json(rec["regime_tags"]),
+                "session": _opt_json(rec["session_tags"]),
             },
             "thesis": {
                 "trader_stated": rec["trader_stated_thesis"],
@@ -744,7 +744,7 @@ class InterpretationDrawerProvider:
             "prefilter": {
                 "provider": rec["prefilter_provider"],
                 "model": rec["prefilter_model"],
-                "result": rec["prefilter_result"],
+                "result": _opt_json(rec["prefilter_result"]),
                 "cost_usd": _opt_decimal(rec["prefilter_cost_usd"]),
             },
             "vision": {
@@ -806,6 +806,22 @@ class InterpretationDrawerProvider:
             # available (snapshot path) and fall back to JSONB here.
             "levels": _coalesce_levels_from_jsonb(rec.get("llm_levels")),
         }
+
+
+def _opt_json(value: Any) -> Any:
+    """Decode an asyncpg JSONB value that may arrive as a raw JSON string.
+
+    asyncpg returns jsonb columns as ``str`` unless a codec is registered on
+    the pool. The drawer's consumers (dashboard JS) need real objects --
+    a string here makes every Array.isArray() check silently fail.
+    """
+    if isinstance(value, str):
+        import json
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+    return value
 
 
 def _opt_int(value: Any) -> Optional[int]:

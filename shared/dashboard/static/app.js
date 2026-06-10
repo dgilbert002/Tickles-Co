@@ -4,7 +4,7 @@ function toggleTheme(){document.body.classList.toggle('light');localStorage.setI
 function updateThemeBtn(){const b=document.getElementById('theme-btn');if(b)b.textContent=document.body.classList.contains('light')?'☀️ Light':'🌙 Dark'}
 window.toggleTheme=toggleTheme;window.updateThemeBtn=updateThemeBtn;
 document.addEventListener('DOMContentLoaded',function(){var b=document.getElementById('theme-btn');if(b){b.addEventListener('click',function(){var bd=document.body;bd.classList.toggle('light');var m=bd.classList.contains('light')?'light':'dark';localStorage.setItem('tickles.theme',m);b.textContent=m==='light'?'☀️ Light':'🌙 Dark'})}});
-const state={tab:'floor',company:'all',snap:null,competitions:null,learning:null,news:null,agentPerf:null,sort:{},charts:{},timer:null,expandedAgent:null,timeSpacing:localStorage.getItem('tickles.replay.spacing')||'contiguous'};
+const state={tab:'floor',company:'all',snap:null,competitions:null,learning:null,news:null,agentPerf:null,sort:{},compSort:null,charts:{},timer:null,expandedAgent:null,timeSpacing:localStorage.getItem('tickles.replay.spacing')||'contiguous'};
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
 const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
 const Z=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
@@ -27,42 +27,100 @@ const dispSymbol=s=>{if(!s)return'UNKNOWN';const m=String(s).match(/^([A-Z0-9]+)
 
 async function api(path,opt={}){const u=new URL(path.replace(/^\//,''),document.baseURI);if(!opt.skipCompany&&state.company!=='all')u.searchParams.set('company',state.company);const r=await fetch(u);const j=await r.json();if(!r.ok)throw j;return j}
 async function load(){try{const needsSnap=['floor','radar','signals','positions','traders','ops'].includes(state.tab)||!state.snap;if(needsSnap)state.snap=await api('/api/snapshot');if(state.tab==='competition'||state.tab==='floor')state.competitions=await api('/api/competitions');if(state.tab==='learning'||state.tab==='floor'||state.tab==='traders')state.learning=await fetchLearning();if(state.tab==='news')state.news=await api('/api/news/feed?window=30d&source=discord&limit=40');else if(state.tab==='floor')state.news=await api('/api/news/feed?window=30d&limit=40');
-      if(state.tab==='telegram')state.telegram=await api('/api/news/feed?window=30d&limit=40&source=telegram');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');if(state.tab==='settings'){state.settings=null;await fetchSettings();}render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
+      if(state.tab==='telegram')state.telegram=await api('/api/news/feed?window=30d&limit=40&source=telegram');if(state.tab==='traders'||state.tab==='floor')state.agentPerf=await api('/api/agent-performance');if(state.tab==='settings'){state.settings=null;await fetchSettings();}if(state.tab==='strategies')state.strategies=await api('/api/strategies');render();$('#updated-at').textContent='updated now';$('#status-text').textContent='live'}catch(e){console.error(e);$('#status-text').textContent='API issue'}}
 async function fetchLearning(){const [skill,feed,brain,traders]=await Promise.all([api('/api/learning/skill-summary?window=1m'),api('/api/learning/memory-feed?window=1m'),api('/api/learning/agent-brain?window=1m'),api('/api/traders-intel')]);return{skill,feed,brain,traders}}
-function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings'],exchanges:['EXCHANGE MANAGEMENT','Exchange Accounts'],paperdemo:['PAPER vs DEMO','Paper vs Demo']};if(!names[tab])return;$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
-function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage();if(state.tab==='exchanges'){renderExchangeAccounts();renderMirrorConfig()}if(state.tab==='paperdemo')renderPaperDemo()}
+function switchTab(tab){state.tab=tab;state.expandedAgent=null;state._agentCache=null;$$('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$$('.tab').forEach(t=>t.classList.toggle('active',t.id===`tab-${tab}`));const names={floor:['TRADING COMPANY','Trading Floor'],unified:['LIVE ENTRY WATCH','Signals & Radar'],competition:['CONTEST MODE','Competition'],positions:['RISK MONITOR','Positions'],traders:['DISCORD ALPHA','Trader Intel'],news:['SOCIAL TAPE','Discord Feed'],telegram:['TELEGRAM','Telegram Feed'],learning:['MEMORY + SKILL','AI Learning'],strategies:['EDGE LIBRARY','Strategies'],ops:['RUN COST','Ops & Cost'],settings:['CONFIGURATION','Settings'],exchanges:['EXCHANGE MANAGEMENT','Exchange Accounts'],paperdemo:['PAPER · DEMO · LIVE','Paper vs Demo vs Live'],discord:['DISCORD RIVER','Discord Feed v2']};if(!names[tab])return;$('#eyebrow').textContent=names[tab][0];$('#page-title').textContent=names[tab][1];load()}
+function render(){renderStats();if(state.tab==='floor')renderFloor();if(state.tab==='unified'||state.tab==='radar'||state.tab==='signals')renderUnifiedPage();if(state.tab==='competition')renderCompetition();if(state.tab==='positions')renderPositionsPage();if(state.tab==='traders')renderTradersPage();if(state.tab==='news')renderNewsPage();if(state.tab==='telegram')renderTelegramPage();if(state.tab==='learning')renderLearningPage();if(state.tab==='ops')renderOpsPage();if(state.tab==='settings')renderSettingsPage();if(state.tab==='exchanges'){renderExchangeAccounts();renderMirrorConfig()}if(state.tab==='paperdemo')renderPaperDemo();if(state.tab==='strategies')renderStrategiesPage();if(state.tab==='discord')renderDiscordPage()}function renderDiscordPage(){if(window.DiscordFeed){DiscordFeed.boot()}else{setTimeout(function(){if(window.DiscordFeed)DiscordFeed.boot()},500)}}
 function renderStats(){const s=state.snap||{};const pnl=Z(s.open_positions_unrealized_pnl);$('#stat-pnl').textContent=usd(pnl);$('#stat-pnl').className=pnl>=0?'success':'danger';$('#stat-open-count').textContent=`${s.open_positions_count||0} open positions`;$('#stat-signals').textContent=s.signals_today_count||0;$('#stat-ingest').textContent=`${s.ingest_depth||0} ingest depth`;$('#stat-top').textContent=s.top_actor_name||'—';$('#stat-edge').textContent=s.top_actor_score?`$${fmt(s.top_actor_score,2)} equity`:'—';$('#stat-cost').textContent=`$${fmt(s.api_cost_today_usd,4)}`;$('#stat-budget').textContent=`$${fmt(s.budget_remaining_usd||s.budget_limit_usd||100,0)} remaining`}
 
 /* ─── row helpers ─── */
 function rowMain(sym,sub){return`<div class="main-cell"><div class="token-dot">${esc(initials(sym))}</div><div><div class="primary">${esc(sym)}</div><div class="secondary">${esc(sub||'')}</div></div></div>`}
 
 /* ─── competition — INLINE expand, no drawer ─── */
+const COMP_SORT_LS='tickles.comp.sort';
+const COMP_COLS=[
+  {key:'rank',label:'#',num:true,sortable:false},
+  {key:'agent',label:'Agent',sortable:true},
+  {key:'strategy',label:'Strategy',sortable:true},
+  {key:'balance',label:'Balance',num:true,sortable:true},
+  {key:'liveEq',label:'Live Eq',num:true,sortable:true},
+  {key:'pnl',label:'P&L',num:true,sortable:true},
+  {key:'return',label:'Return',num:true,sortable:true},
+  {key:'winRate',label:'Win%',num:true,sortable:true},
+  {key:'wl',label:'W/L',num:true,sortable:true},
+  {key:'open',label:'Opn',num:true,sortable:true},
+];
+function loadCompSort(){try{const raw=localStorage.getItem(COMP_SORT_LS);if(!raw)return{key:'liveEq',dir:-1};const o=JSON.parse(raw);return{key:o.key||'liveEq',dir:o.dir===1?1:-1}}catch(e){return{key:'liveEq',dir:-1}}}
+function saveCompSort(sort){try{localStorage.setItem(COMP_SORT_LS,JSON.stringify(sort))}catch(e){}}
+function compMetrics(p){
+  const eq=Z(p.scores?.equity),unreal=Z(p.scores?.unrealized_pnl_usd),liveEq=eq+unreal;
+  const starting=Z(p.scores?.starting_balance_usd)||1000;
+  const wins=Z(p.scores?.winning_trades??p.scores?.wins);
+  const losses=Z(p.scores?.losing_trades??p.scores?.losses);
+  const closed=wins+losses;
+  return{agent:p.agent_id||'',strategy:p.strategy_ref||'',eq,liveEq,unreal,
+    rpct:Z(p.scores?.return_pct),liveReturn:starting>0?((liveEq/starting)-1)*100:0,
+    pnl:Z(p.scores?.total_realized_pnl_usd),winRate:Z(p.scores?.win_rate),
+    wins,losses,totalTrades:Z(p.scores?.total_trades)||closed,open:Z(p.scores?.open_positions),meta:p};
+}
+function compSortValue(m,key){
+  switch(key){
+    case 'agent':return m.agent.toLowerCase();
+    case 'strategy':return m.strategy.toLowerCase();
+    case 'balance':return m.eq;case 'liveEq':return m.liveEq;case 'pnl':return m.pnl;
+    case 'return':return m.rpct;case 'winRate':return m.winRate;
+    case 'wl':return m.wins/(m.wins+m.losses||1);case 'open':return m.open;
+    default:return m.liveEq;
+  }
+}
+function compWlCell(w,l){if(!w&&!l)return'<span class="secondary">—</span>';return`<span class="success">${w}W</span><span class="secondary"> · </span><span class="danger">${l}L</span>`}
+function sortCompParticipants(participants,sort){
+  const key=sort?.key||'liveEq',dir=sort?.dir??-1;
+  return(participants||[]).slice().sort((a,b)=>{
+    const ma=compMetrics(a),mb=compMetrics(b),va=compSortValue(ma,key),vb=compSortValue(mb,key);
+    if(typeof va==='string')return dir*va.localeCompare(vb);
+    return dir*(va-vb);
+  });
+}
+function wireCompSort(){
+  const sort=state.compSort||loadCompSort();state.compSort=sort;
+  $$('#competition-body .comp-table th.sortable').forEach(th=>{
+    th.classList.remove('sort-asc','sort-desc');
+    if(th.dataset.key===sort.key)th.classList.add(sort.dir===1?'sort-asc':'sort-desc');
+    th.onclick=e=>{e.stopPropagation();const key=th.dataset.key;let dir=-1;
+      const cur=state.compSort||loadCompSort();
+      if(cur.key===key)dir=cur.dir===-1?1:-1;
+      const next={key,dir};state.compSort=next;saveCompSort(next);renderCompetition()};
+  });
+}
 async function renderCompetition(){
   const c=state.competitions?.competitions?.[0];
   if(!c){$('#competition-body').innerHTML='<div class="empty">No active competition</div>';return}
-  const rows=(c.participants||[]).sort((a,b)=>(a.rank||99)-(b.rank||99)).map(p=>{
-    const eq=Z(p.scores?.equity), unreal=Z(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal, rpct=Z(p.scores?.return_pct);
-    const starting=Z(p.scores?.starting_balance_usd)||1000;
-    const liveReturn=((liveEq/starting)-1)*100;
+  const sort=state.compSort||loadCompSort();state.compSort=sort;
+  const sorted=sortCompParticipants(c.participants||[],sort);
+  const head=COMP_COLS.map(col=>{
+    const cls=[col.num?'num':'',col.sortable?'sortable':''].filter(Boolean).join(' ');
+    const style=col.key==='balance'?' style="min-width:70px"':col.key==='liveEq'?' style="min-width:80px"':col.key==='pnl'?' style="min-width:90px"':col.key==='return'?' style="min-width:80px"':col.key==='winRate'?' style="min-width:55px"':'';
+    return`<th class="${cls}"${style} data-key="${col.sortable?col.key:''}">${esc(col.label)}</th>`;
+  }).join('');
+  const rows=sorted.map((p,i)=>{
+    const m=compMetrics(p);
     return `<tr class="comp-row" data-agent="${esc(p.agent_id)}" id="comp-tr-${esc(p.agent_id)}">
-      <td class="num rank">#${p.rank}</td>
-      <td title="${esc(p.metadata?.description||'')}">${rowMain(p.agent_id,(p.metadata?.description||p.strategy_ref||'').split('.')[0])}</td>
-      <td>${esc(p.strategy_ref||'—')}</td>
-      <td class="num mono">$${fmt(eq,2)}</td>
-      <td class="num mono"><strong>$${fmt(liveEq,2)}</strong></td>
-      <td class="num">${usd(p.scores?.total_realized_pnl_usd)}<br><span class="secondary small">unreal ${usd(p.scores?.unrealized_pnl_usd)}</span></td>
-      <td class="num ${rpct>=0?'success':'danger'}">${pct(rpct)}<br><span class="secondary small">${pct(liveReturn)} live</span></td>
-      <td class="num">${fmt(Z(p.scores?.win_rate)*100,1)}%</td>
-      <td class="num">${p.scores?.total_trades||0}</td>
-      <td class="num">${p.scores?.open_positions||0}</td>
+      <td class="num rank" data-col="rank">#${i+1}</td>
+      <td data-col="agent" title="${esc(p.metadata?.description||'')}">${rowMain(p.agent_id,(p.metadata?.description||p.strategy_ref||'').split('.')[0])}</td>
+      <td data-col="strategy">${esc(p.strategy_ref||'—')}</td>
+      <td class="num mono" data-col="balance">$${fmt(m.eq,2)}</td>
+      <td class="num mono" data-col="liveEq"><strong>$${fmt(m.liveEq,2)}</strong></td>
+      <td class="num" data-col="pnl">${usd(m.pnl)}<br><span class="secondary small">unreal ${usd(m.unreal)}</span></td>
+      <td class="num ${m.rpct>=0?'success':'danger'}" data-col="return">${pct(m.rpct)}<br><span class="secondary small">${pct(m.liveReturn)} live</span></td>
+      <td class="num" data-col="winRate">${fmt(m.winRate*100,1)}%</td>
+      <td class="num" data-col="wl">${compWlCell(m.wins,m.losses)}</td>
+      <td class="num" data-col="open">${m.open}</td>
     </tr>`;
   });
-  $('#competition-body').innerHTML=`<div class="comp-scroll"><table class="data-table comp-table"><thead><tr>
-    <th class="num">#</th><th>Agent</th><th>Strategy</th><th class="num" style="min-width:70px">Balance</th><th class="num" style="min-width:80px">Live Eq</th><th class="num" style="min-width:90px">P&L</th><th class="num" style="min-width:80px">Return</th>
-    <th class="num" style="min-width:55px">Win</th><th class="num">Trd</th><th class="num">Opn</th>
-  </tr></thead><tbody>${rows.join('')}</tbody></table><div id="comp-expand-zone"></div>`;
+  $('#competition-body').innerHTML=`<div class="comp-scroll"><table class="data-table comp-table"><thead><tr>${head}</tr></thead><tbody>${rows.join('')}</tbody></table><div id="comp-expand-zone"></div></div>`;
+  wireCompSort();
   $$('#competition-body .comp-row').forEach(tr=>tr.onclick=()=>toggleAgentExpand(tr.dataset.agent));
-  // Restore expanded agent after refresh
   if(state.expandedAgent&&state._agentCache&&state._agentCache.agentId===state.expandedAgent){
     setTimeout(()=>toggleAgentExpand(state.expandedAgent,true),50);
   }
@@ -148,6 +206,9 @@ function renderAgentInline(agentId,d){
   const eq=Z(a.equity_usd), unreal=Z(a.unrealized_pnl_usd), liveEq=eq+unreal;
   const starting=Z(a.starting_balance_usd)||1000;
   const liveReturn=((liveEq/starting)-1)*100;
+  const sc=safeJson(a.scores)||{};
+  const wins=Z(sc.winning_trades??sc.wins);
+  const losses=Z(sc.losing_trades??sc.losses);
 
   const html=`<div class="comp-detail">
     <div class="comp-detail-tabs">
@@ -162,7 +223,8 @@ function renderAgentInline(agentId,d){
       <div><label>Return</label><strong>${fmt(a.return_pct,1)}%</strong></div>
       <div><label>Live Return</label><strong class="${liveReturn>=0?'success':'danger'}">${fmt(liveReturn,1)}%</strong></div>
       <div><label>Win Rate</label><strong>${fmt(Z(a.win_rate)*100,1)}%</strong></div>
-      <div><label>Trades</label><strong>${a.total_trades||0}</strong></div>
+      <div><label>W / L</label><strong>${wins} / ${losses}</strong></div>
+      <div><label>Open</label><strong>${a.open_positions||open.length||0}</strong></div>
     </div>
     <div id="comp-live-panel" class="comp-panel">
       <table class="pos-table"><thead><tr>
@@ -240,7 +302,7 @@ async function renderUnifiedPage(){
   $('#unified-list-panel').classList.toggle('hidden',view!=='list');
   $('#unified-card-panel').classList.toggle('hidden',view!=='card');
   try{
-    const d=await api('/api/unified-signals?limit=120');
+    const d=await api('/api/unified-signals?limit=120&status=pending');
     let rows=d.signals||[];
     const statusEl=$('#unified-status');const sf=statusEl?.value||'';
     // Always exclude unclear + no-entry signals (commentary, not trade setups)
@@ -280,17 +342,41 @@ async function renderUnifiedPage(){
       wireRows();
       radarRows.forEach((s,i)=>{const cs=s.mini_candles||s._candles;if(cs&&cs.length)drawMiniRadar(`mini-radar-${i}`,cs,s)});
     }else{
-      renderUnifiedTable(rows);
+      // B (2026-05-29): in "Approaching entry" mode with nothing armed, show the
+      // honest empty-state instead of a blank table (matches the card view).
+      if(sf!=='all'&&rows.length===0){
+        const el=$('#unified-list-table');if(el)el.innerHTML=radarEmptyState(d.radar_meta);
+      }else{
+        renderUnifiedTable(rows);
+      }
     }
   }catch(e){console.warn('unified signals failed',e)}
 }
 // Phase 3 (2026-05-29): radar membership helpers.
 // Pre-entry = waiting to trigger (pending/signal/no-position-yet).
-function isPreEntry(s){const st=String(s.position_status||'').toLowerCase();return st===''||st==='pending'||st==='signal';}
+// B (2026-05-29): "approaching" = ARMED only. An armed setup is a real pending
+// tracked_position (confidence>=0.4, demo order placed) that WILL fire when
+// price reaches entry. Read-but-not-armed interpretations (position_status
+// 'signal'/'' — low conviction, deduped, no levels) are NOT approaching; they
+// live under "All active signals" so the radar stops looking falsely full.
+function isPreEntry(s){return s.armed===true||String(s.position_status||'').toLowerCase()==='pending';}
 // Just-filled = activated (pending->open) within the last 30 min.
 function isJustFilled(s){if(String(s.position_status||'').toLowerCase()!=='open')return false;const t=s.position_activated_at?Date.parse(s.position_activated_at):NaN;return Number.isFinite(t)&&(Date.now()-t)<30*60*1000;}
 // Honest empty-state: explains WHY nothing is waiting instead of "No signals".
-function radarEmptyState(m){m=m||{};return `<div class="empty radar-empty"><strong>No setups waiting to trigger right now.</strong><div class="secondary" style="margin-top:6px">Last 24h: <b>${m.filled_24h||0}</b> reached a trade · <b>${m.cancelled_24h||0}</b> filtered out (${m.no_setup_24h||0} no-setup AI charts, ${m.dupes_24h||0} duplicates, ${m.unsupported_24h||0} unsupported symbols).</div><div class="secondary" style="margin-top:6px">New trader setups appear here the instant the interpreter reads them and stay until price reaches the entry.</div></div>`;}
+function radarEmptyState(m){
+  m=m||{};
+  const lsm=Number(m.last_signal_min);
+  let fresh='';
+  if(Number.isFinite(lsm)&&lsm>=0){
+    const txt=lsm<90?`${lsm}m ago`:(lsm<1440?`${Math.round(lsm/60)}h ago`:`${Math.round(lsm/1440)}d ago`);
+    fresh=`<div class="secondary" style="margin-top:6px">Interpreter last read a setup <b>${txt}</b> · <b>${m.signals_24h||0}</b> read in the last 24h.</div>`;
+  }
+  return `<div class="empty radar-empty"><strong>No armed setups approaching entry right now.</strong>`+
+    `<div class="secondary" style="margin-top:6px">Only high-conviction setups (a pending order is placed) appear here. Read-but-not-armed signals are under <b>All active signals</b>.</div>`+
+    fresh+
+    `<div class="secondary" style="margin-top:6px">Last 24h: <b>${m.filled_24h||0}</b> reached a trade · <b>${m.cancelled_24h||0}</b> filtered out (${m.no_setup_24h||0} no-setup AI charts, ${m.dupes_24h||0} duplicates, ${m.unsupported_24h||0} unsupported symbols).</div>`+
+    `</div>`;
+}
 function renderUnifiedTable(rows){
   let r=rows;const f=$('#unified-filter')?.value;if(f)r=filterRows(r,f,['symbol','trader_display_name','trader_handle_normalized','position_status','headline']);
   table('#unified-list-table',[
@@ -593,7 +679,42 @@ function floorPosRows(rows,limit){return rows.slice(0,limit||rows.length).map(p=
     +`<td class="num ${Z(p.pnl_pct)>=0?'success':'danger'}">${p.pnl_pct?pct(Z(p.pnl_pct)*100):'—'}</td>`
     +`<td class="num">$${fmt(p.notional_usd,0)}</td></tr>`;
 }).join('')}
-function renderCompetitionMini(){const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}
+// Phase 6 (2026-05-29): Competition leaders ↔ Demo accounts toggle.
+// The floor "Competition leaders" panel can now flip between the paper
+// competition standings and the mapped DEMO accounts ranked by profit, so the
+// operator can watch real demo execution alongside the paper contest.
+function wireLeadersToggle(){
+  document.querySelectorAll('#leaders-toggle button').forEach(function(b){
+    b.classList.toggle('active',b.dataset.lboard===(state.leaderBoard||'paper'));
+    b.onclick=function(){state.leaderBoard=b.dataset.lboard;
+      document.querySelectorAll('#leaders-toggle button').forEach(x=>x.classList.toggle('active',x===b));
+      var t=$('#leaders-title'); if(t)t.textContent=(state.leaderBoard==='demo'?'Demo accounts':'Competition leaders');
+      renderCompetitionMini();};
+  });
+}
+async function renderLeadersDemo(){
+  var box=$('#floor-competition'); if(!box)return;
+  try{
+    // exchange-accounts carries last synced balance; mirror-config maps agents.
+    var ad=await api('/api/exchange-accounts',{skipCompany:true});
+    var accts=(ad.accounts||[]).filter(a=>a.accountType==='demo');
+    var map={};
+    try{var mc=await api('/api/mirror-config',{skipCompany:true});(mc.mappings||[]).forEach(m=>{map[m.exchange+'/'+m.account_name]=m.agent_id;});}catch(e){}
+    if(!accts.length){box.innerHTML='<div class="empty">No demo accounts mapped</div>';return;}
+    var rows=accts.map(function(a){
+      var bal=Z(a.lastBalance);var start=1000;var pnl=bal-start;
+      var agent=map[a.exchange+'/'+a.accountName]||'—';
+      return {bal:bal,pnl:pnl,agent:agent,name:a.exchange+'/'+a.accountName};
+    }).sort((x,y)=>y.bal-x.bal);
+    box.innerHTML='<div class="competition-card"><div class="secondary">Demo accounts · '+rows.length+' mapped · ranked by balance</div><div class="leader-mini scroll">'+rows.map(function(r,i){
+      return '<div class="leader-row"><div class="rank-badge">#'+(i+1)+'</div><div><div class="primary">'+esc(r.name)+'</div><div class="secondary">agent: '+esc(r.agent)+'</div></div><div class="num '+(r.pnl>=0?'success':'danger')+'" title="balance vs $1000 start">$'+fmt(r.bal,2)+'<div class="secondary small">'+(r.pnl>=0?'+':'')+'$'+fmt(r.pnl,2)+'</div></div></div>';
+    }).join('')+'</div></div>';
+  }catch(e){box.innerHTML='<div class="empty">Failed to load demo accounts</div>';}
+}
+function renderCompetitionMini(){
+  wireLeadersToggle();
+  if(state.leaderBoard==='demo'){renderLeadersDemo();return;}
+  const c=state.competitions?.competitions?.[0];if(!c){$('#floor-competition').innerHTML='<div class="empty">No competition</div>';return}
   // Phase 5 (2026-05-29): show ALL participants (scrollable), ranked by LIVE
   // EQUITY (closed balance + unrealized), and surface both closed + equity.
   const ps=(c.participants||[]).slice().sort((a,b)=>{
@@ -637,7 +758,7 @@ function sigRows(rows,limit){const fmtOrDash=(v,d=6)=>{const x=Number(v);return 
 // shows the correct number for both live and historic positions.
 const POS_CLOSED_STATUSES=new Set(['closed','expired','cancelled','invalidated','deleted']);
 function posRows(rows,limit){return rows.slice(0,limit||rows.length).map(p=>{const closed=POS_CLOSED_STATUSES.has(String(p.status||'').toLowerCase());const pnl=Z(closed?(p.realized_pnl_usd_final??p.realized_pnl_usd??p.pnl_usd):(p.unrealized_pnl_usd??p.pnl_usd));return`<tr data-call="${esc(p.signal_interpretation_id||'')}" data-news="${esc(p.news_item_id||'')}"><td>${rowMain(dispSymbol(p.instrument_symbol),`${traderName(p)} · ${rel(p.signal_timestamp||p.opened_at)}`)}</td><td>${pill(p.direction,p.direction)}</td><td>${pill(p.status,p.status)}</td><td class="num mono">${fmt(p.entry_price,6)}</td><td class="num mono">${fmt(p.current_price,6)}</td><td class="num ${pnl>=0?'success':'danger'}">${usd(pnl)}</td><td class="num ${Z(p.pnl_pct)>=0?'success':'danger'}">${pct(Z(p.pnl_pct)*100)}</td><td class="num">$${fmt(p.notional_usd,0)}</td><td>${esc(p.signal_source||p._source||'—')}</td></tr>`}).join('')}
-function renderOpsPage(){const s=state.snap||{};const c=chart('cost-chart');if(c)c.setOption({backgroundColor:'transparent',grid:{left:55,right:20,top:20,bottom:35},xAxis:{type:'category',data:['Spent','Remaining','Limit'],axisLabel:{color:'#8f8f9b'}},yAxis:{type:'value',axisLabel:{color:'#8f8f9b',formatter:v=>'$'+v},splitLine:{lineStyle:{color:'#2b2b34'}}},series:[{type:'bar',barWidth:34,data:[Z(s.api_cost_today_usd),Z(s.budget_remaining_usd||100),Z(s.budget_limit_usd||100)],itemStyle:{borderRadius:[10,10,0,0],color:p=>['#fc72ff','#35d07f','#7a5cff'][p.dataIndex]}}]});$('#services-grid').innerHTML=(s.services||[]).map(x=>{const hb=x.heartbeat;let st='disabled';if(hb)st=hb.is_stale?'stale':'live';else if(x.enabled_on_vps)st='enabled';return`<div class="service"><strong>${esc(x.name)}</strong><span>${esc(x.kind||'daemon')} · ${st}</span></div>`}).join('')||'<div class="empty">Service registry not available</div>'}
+function renderOpsPage(){const s=state.snap||{};const c=chart('cost-chart');if(c)c.setOption({backgroundColor:'transparent',grid:{left:55,right:20,top:20,bottom:35},xAxis:{type:'category',data:['Spent','Remaining','Limit'],axisLabel:{color:'#8f8f9b'}},yAxis:{type:'value',axisLabel:{color:'#8f8f9b',formatter:v=>'$'+v},splitLine:{lineStyle:{color:'#2b2b34'}}},series:[{type:'bar',barWidth:34,data:[Z(s.api_cost_today_usd),Z(s.budget_remaining_usd||100),Z(s.budget_limit_usd||100)],itemStyle:{borderRadius:[10,10,0,0],color:p=>['#fc72ff','#35d07f','#7a5cff'][p.dataIndex]}}]});$('#services-grid').innerHTML=(s.services||[]).map(x=>{const hb=x.heartbeat;let st='disabled';if(hb){st=hb.is_stale?'stale':((hb.status&&hb.status!=='ok')?'degraded':'live')}else if(x.enabled_on_vps)st='enabled';const warn=(st==='stale'||st==='degraded');const tip=hb&&hb.message?` title="${esc(hb.message)}"`:'';return`<div class="service${warn?' service-warn':''}"${tip}><strong>${esc(x.name)}</strong><span>${esc(x.kind||'daemon')} · ${st}</span></div>`}).join('')||'<div class="empty">Service registry not available</div>'}
 
 /* ─── Round 10 (2026-05-24): Vision-model picker ─────────────────────────── */
 /* The Settings tab fetches /api/settings/vision-models, builds 3 dropdowns
@@ -747,50 +868,82 @@ async function _putAPI(path,body){
 
 async function fetchSourcesAndPrompts(){
   try{
-    const [src,pr]=await Promise.all([
+    const [src,pr,grp]=await Promise.all([
       api('/api/settings/sources',{skipCompany:true}),
-      api('/api/settings/prompts',{skipCompany:true})
+      api('/api/settings/prompts',{skipCompany:true}),
+      api('/api/settings/source-groups',{skipCompany:true}),
     ]);
     state.sources=src.sources||[];
     state.prompts=pr.prompts||[];
-  }catch(e){console.error('fetchSourcesAndPrompts error',e);state.sources=[];state.prompts=[];}
+    state.sourceGroups=(grp.groups||[]);
+  }catch(e){console.error('fetchSourcesAndPrompts error',e);state.sources=[];state.prompts=[];state.sourceGroups=[];}
   renderSourcesTree();
 }
 
 function renderSourcesTree(){
   const el=$('#sources-tree');
   if(!el)return;
-  const sources=state.sources||[];
+  const groups=state.sourceGroups||[];
   const prompts=state.prompts||[];
-  if(!sources.length){el.innerHTML='<div class="empty">Loading sources…</div>';return;}
+
+  // If no groups yet, show old flat view as fallback
+  if(!groups.length){
+    const sources=state.sources||[];
+    if(!sources.length){el.innerHTML='<div class="empty">Loading sources…</div>';return;}
+    renderFlatSources(el, sources, prompts);
+    return;
+  }
 
   let h='';
 
-  sources.forEach(src=>{
-    const srcLabel=src.source.toUpperCase();
-    const srcClass=src.source==='telegram'?'src-telegram':src.source==='discord'?'src-discord':'src-api';
-    const channels=Object.values(src.channels||{});
+  groups.forEach(grp=>{
+    const srcLabel=grp.source.toUpperCase();
+    const srcClass=grp.source==='telegram'?'src-telegram':grp.source==='discord'?'src-discord':'src-api';
+    const channels=grp.channels||[];
+    const totalTraders=channels.reduce((s,c)=>s+(c.trader_count||0),0);
+    const totalTracked=channels.reduce((s,c)=>s+(c.tracked_count||0),0);
+    const allTracked=totalTracked===totalTraders&&totalTraders>0;
+    const someTracked=totalTracked>0&&!allTracked;
+    const chWithTraders=channels.filter(c=>(c.trader_count||0)>0);
 
-    channels.forEach(ch=>{
-      const users=ch.users||[];
-      const allTracked=users.every(u=>u.is_tracked);
+    // Group header panel
+    h+=`<div class="panel full" style="margin-top:0;border-left:4px solid var(--c-accent)">
+      <div class="panel-head">
+        <div>
+          <h2>${esc(grp.name)} <span class="src-tag ${srcClass}">${esc(srcLabel)}</span></h2>
+          <p>${channels.length} channel${channels.length!==1?'s':''} · ${totalTraders} trader${totalTraders!==1?'s':''} ·
+            <label class="check-inline">
+              <input type="checkbox" class="group-all-cb" data-group-id="${grp.id}"
+                ${allTracked?'checked':''}> Track all
+            </label>
+          </p>
+        </div>
+      </div>
+      <div class="settings-body" style="padding:0;grid-template-columns:1fr">`;
 
-      h+=`<div class="panel full" style="margin-top:0">
-        <div class="panel-head">
+    // Channel sub-panels for channels with traders
+    chWithTraders.forEach(ch=>{
+      const chAllTracked=ch.tracked_count===ch.trader_count&&ch.trader_count>0;
+      const chSomeTracked=ch.tracked_count>0&&!chAllTracked;
+      const traders=ch.traders||[];
+
+      h+=`<div class="panel" style="margin:0;border-radius:0;border-left:none;border-right:none">
+        <div class="panel-head" style="background:var(--c-bg2)">
           <div>
-            <h2>${esc(ch.channel_name)} <span class="src-tag ${srcClass}">${esc(srcLabel)}</span></h2>
-            <p>${users.length} trader${users.length!==1?'s':''} · 
+            <h3 style="margin:0;font-size:13px">${esc(ch.name)}</h3>
+            <p style="margin:2px 0 0;font-size:11px">${ch.trader_count} trader${ch.trader_count!==1?'s':''} ·
+              ${ch.tracked_count} tracked ·
               <label class="check-inline">
-                <input type="checkbox" class="channel-all-cb" data-channel="${esc(ch.channel_id)}" 
-                  ${allTracked?'checked':''}> Follow all
+                <input type="checkbox" class="channel-all-cb" data-channel-id="${ch.id}"
+                  data-group-id="${grp.id}" ${chAllTracked?'checked':''}> Track channel
               </label>
             </p>
           </div>
         </div>
         <div class="table-wrap">
-        <table class="data-table">
+        <table class="data-table dense">
           <thead><tr>
-            <th style="width:40px">On</th>
+            <th style="width:36px">On</th>
             <th>Trader</th>
             <th>Type</th>
             <th>Media</th>
@@ -799,7 +952,7 @@ function renderSourcesTree(){
           </tr></thead>
           <tbody>`;
 
-      users.forEach(u=>{
+      traders.forEach(u=>{
         const score=u.accuracy_score!=null&&u.accuracy_samples>0
           ? `${(u.accuracy_score*100).toFixed(0)}% <span class="secondary">n=${u.accuracy_samples}</span>`
           : '<span class="secondary">—</span>';
@@ -807,7 +960,7 @@ function renderSourcesTree(){
                          u.trader_type==='bot'?'<span class="badge badge-bot">bot</span>':
                          `<span class="badge neutral">${esc(u.trader_type||'—')}</span>`;
 
-        h+=`<tr class="user-row" data-trader-id="${u.id}">
+        h+=`<tr class="user-row" data-trader-id="${u.id}" data-channel-id="${ch.id}" data-group-id="${grp.id}">
           <td><input type="checkbox" class="user-cb" data-trader-id="${u.id}" ${u.is_tracked?'checked':''}></td>
           <td><span class="primary">${esc(u.display_name||u.handle)}</span>
             ${u.handle!==u.display_name?`<br><span class="secondary mono">${esc(u.handle)}</span>`:''}</td>
@@ -827,9 +980,28 @@ function renderSourcesTree(){
 
       h+=`</tbody></table></div></div>`;
     });
+
+    // Channels without traders (informational only)
+    const emptyChannels=channels.filter(c=>(c.trader_count||0)===0);
+    if(emptyChannels.length){
+      h+=`<div class="panel" style="margin:0;border-radius:0;border-left:none;border-right:none;opacity:0.6">
+        <div class="panel-head" style="background:var(--c-bg2)">
+          <h3 style="margin:0;font-size:12px;color:var(--c-secondary)">${emptyChannels.length} channel${emptyChannels.length!==1?'s':''} with no tracked traders</h3>
+        </div>
+        <div class="table-wrap">
+        <table class="data-table dense">
+          <thead><tr><th>Channel</th></tr></thead>
+          <tbody>`;
+      emptyChannels.forEach(ch=>{
+        h+=`<tr><td class="secondary">${esc(ch.name)}</td></tr>`;
+      });
+      h+=`</tbody></table></div></div>`;
+    }
+
+    h+=`</div></div>`;
   });
 
-  // Prompt management
+  // Prompt management section
   h+=`<div class="panel full" style="margin-top:14px">
     <div class="panel-head">
       <h2>Prompt Library</h2>
@@ -850,12 +1022,86 @@ function renderSourcesTree(){
 
   el.innerHTML=h;
 
-  // Wire events
+  // Wire events — three levels
+  document.querySelectorAll('#sources-tree .group-all-cb').forEach(cb=>cb.onchange=()=>toggleGroupAll(cb));
+  document.querySelectorAll('#sources-tree .channel-all-cb').forEach(cb=>cb.onchange=()=>toggleChannelAllNew(cb));
+  document.querySelectorAll('#sources-tree .user-cb').forEach(cb=>cb.onchange=()=>toggleUserNew(cb));
+  document.querySelectorAll('#sources-tree .media-types').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
+  document.querySelectorAll('#sources-tree .prompt-pick').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
+  // Prompt editor buttons
+  document.querySelectorAll('#sources-tree [data-prompt-key]').forEach(btn=>btn.onclick=()=>openPromptModal(btn.dataset.promptKey));
+  const newBtn=$('#btn-new-prompt');
+  if(newBtn)newBtn.onclick=()=>openPromptModal('new');
+}
+
+/* ─── Flat source view (fallback when source-groups API unavailable) ─── */
+function renderFlatSources(el, sources, prompts){
+  let h='';
+  sources.forEach(src=>{
+    const srcLabel=src.source.toUpperCase();
+    const srcClass=src.source==='telegram'?'src-telegram':src.source==='discord'?'src-discord':'src-api';
+    const channels=Object.values(src.channels||{});
+    channels.forEach(ch=>{
+      const users=ch.users||[];
+      const allTracked=users.every(u=>u.is_tracked);
+      h+=`<div class="panel full" style="margin-top:0">
+        <div class="panel-head">
+          <div>
+            <h2>${esc(ch.channel_name)} <span class="src-tag ${srcClass}">${esc(srcLabel)}</span></h2>
+            <p>${users.length} trader${users.length!==1?'s':''} · 
+              <label class="check-inline">
+                <input type="checkbox" class="channel-all-cb" data-channel="${esc(ch.channel_id)}" 
+                  ${allTracked?'checked':''}> Follow all
+              </label>
+            </p>
+          </div>
+        </div>
+        <div class="table-wrap"><table class="data-table">
+          <thead><tr><th style="width:40px">On</th><th>Trader</th><th>Type</th><th>Media</th><th>Prompt</th><th style="width:60px">Score</th></tr></thead>
+          <tbody>`;
+      users.forEach(u=>{
+        const score=u.accuracy_score!=null&&u.accuracy_samples>0
+          ? `${(u.accuracy_score*100).toFixed(0)}% <span class="secondary">n=${u.accuracy_samples}</span>`
+          : '<span class="secondary">—</span>';
+        const typeBadge=u.trader_type==='pro'?'<span class="badge badge-pro">pro</span>':
+                         u.trader_type==='bot'?'<span class="badge badge-bot">bot</span>':
+                         `<span class="badge neutral">${esc(u.trader_type||'—')}</span>`;
+        h+=`<tr class="user-row" data-trader-id="${u.id}">
+          <td><input type="checkbox" class="user-cb" data-trader-id="${u.id}" ${u.is_tracked?'checked':''}></td>
+          <td><span class="primary">${esc(u.display_name||u.handle)}</span>
+            ${u.handle!==u.display_name?`<br><span class="secondary mono">${esc(u.handle)}</span>`:''}</td>
+          <td>${typeBadge}</td>
+          <td><select class="select media-types" data-trader-id="${u.id}" style="width:auto;padding:4px 8px;font-size:12px">
+            <option value="all" ${u.tracked_media_types==='all'?'selected':''}>All</option>
+            <option value="media" ${u.tracked_media_types==='media'?'selected':''}>Media only</option>
+            <option value="text" ${u.tracked_media_types==='text'?'selected':''}>Text only</option>
+          </select></td>
+          <td><select class="select prompt-pick" data-trader-id="${u.id}" style="width:auto;padding:4px 8px;font-size:12px">
+            <option value="">Channel default</option>
+            ${prompts.map(p=>`<option value="${esc(p.key)}" ${u.prompt_id===p.key?'selected':''}>${esc(p.key.replace('/prompt',''))}</option>`).join('')}
+          </select></td>
+          <td>${score}</td>
+        </tr>`;
+      });
+      h+=`</tbody></table></div></div>`;
+    });
+  });
+  // Prompt management
+  h+=`<div class="panel full" style="margin-top:14px">
+    <div class="panel-head"><h2>Prompt Library</h2><button class="pill-btn" id="btn-new-prompt">+ New Prompt</button></div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Key</th><th>Preview</th><th style="width:80px"></th></tr></thead>
+      <tbody>`;
+  prompts.forEach(p=>{
+    h+=`<tr><td class="mono">${esc(p.key)}</td><td class="secondary">${esc(p.preview||'')}</td>
+      <td><button class="pill-btn" data-prompt-key="${esc(p.key)}" style="padding:4px 12px;font-size:11px">Edit</button></td></tr>`;
+  });
+  h+=`</tbody></table></div></div>`;
+  el.innerHTML=h;
   document.querySelectorAll('#sources-tree .channel-all-cb').forEach(cb=>cb.onchange=()=>toggleChannelAll(cb));
   document.querySelectorAll('#sources-tree .user-cb').forEach(cb=>cb.onchange=()=>toggleUser(cb));
   document.querySelectorAll('#sources-tree .media-types').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
   document.querySelectorAll('#sources-tree .prompt-pick').forEach(sel=>sel.onchange=()=>updateUserTrack(sel));
-  // Prompt editor buttons
   document.querySelectorAll('#sources-tree [data-prompt-key]').forEach(btn=>btn.onclick=()=>openPromptModal(btn.dataset.promptKey));
   const newBtn=$('#btn-new-prompt');
   if(newBtn)newBtn.onclick=()=>openPromptModal('new');
@@ -912,6 +1158,77 @@ async function updateUserTrack(el){
   try{
     await _putAPI('/api/settings/track',body);
   }catch(e){console.error('track update failed',e);}
+}
+
+/* ─── Group-level toggle — batch tracks all channels + traders in group ─── */
+async function toggleGroupAll(cb){
+  const groupId=cb.dataset.groupId;
+  const checked=cb.checked;
+  // Toggle all channel checkboxes in this group
+  document.querySelectorAll(`#sources-tree .channel-all-cb[data-group-id="${groupId}"]`).forEach(chCb=>{
+    chCb.checked=checked;
+  });
+  // Toggle all trader checkboxes in this group
+  document.querySelectorAll(`#sources-tree .user-row[data-group-id="${groupId}"]`).forEach(row=>{
+    const userCb=row.querySelector('.user-cb');
+    if(userCb){userCb.checked=checked;}
+  });
+  // Batch API call
+  try{
+    await _putAPI('/api/settings/source-groups',{action:'track_group',id:parseInt(groupId),tracked:checked});
+  }catch(e){console.error('group track failed',e);}
+}
+
+/* ─── Channel-level toggle — batch tracks all traders in channel ─── */
+async function toggleChannelAllNew(cb){
+  const channelId=cb.dataset.channelId;
+  const groupId=cb.dataset.groupId;
+  const checked=cb.checked;
+  // Toggle all trader checkboxes in this channel
+  document.querySelectorAll(`#sources-tree .user-row[data-channel-id="${channelId}"]`).forEach(row=>{
+    const userCb=row.querySelector('.user-cb');
+    if(userCb){userCb.checked=checked;}
+  });
+  // Update group-level checkbox state
+  updateGroupCbState(groupId);
+  // Batch API call
+  try{
+    await _putAPI('/api/settings/source-groups',{action:'track_channel',id:parseInt(channelId),tracked:checked});
+  }catch(e){console.error('channel track failed',e);}
+}
+
+/* ─── Trader-level toggle (new tree) — individual + cascade up ─── */
+async function toggleUserNew(cb){
+  await updateUserTrack(cb);
+  // Update channel all checkbox
+  const row=cb.closest('.user-row');
+  if(row){
+    const channelId=row.dataset.channelId;
+    const groupId=row.dataset.groupId;
+    if(channelId){
+      const userCbs=document.querySelectorAll(`#sources-tree .user-row[data-channel-id="${channelId}"] .user-cb`);
+      const allChecked=Array.from(userCbs).every(c=>c.checked);
+      const someChecked=Array.from(userCbs).some(c=>c.checked);
+      const chAllCb=document.querySelector(`#sources-tree .channel-all-cb[data-channel-id="${channelId}"]`);
+      if(chAllCb){
+        chAllCb.checked=allChecked;
+        chAllCb.indeterminate=someChecked&&!allChecked;
+      }
+    }
+    if(groupId)updateGroupCbState(groupId);
+  }
+}
+
+/* ─── Update group-level checkbox based on all channels ─── */
+function updateGroupCbState(groupId){
+  const chCbs=document.querySelectorAll(`#sources-tree .channel-all-cb[data-group-id="${groupId}"]`);
+  const allChecked=Array.from(chCbs).every(c=>c.checked);
+  const someChecked=Array.from(chCbs).some(c=>c.checked);
+  const grpCb=document.querySelector(`#sources-tree .group-all-cb[data-group-id="${groupId}"]`);
+  if(grpCb){
+    grpCb.checked=allChecked;
+    grpCb.indeterminate=someChecked&&!allChecked;
+  }
 }
 
 /* ─── Prompt modal ─── */
@@ -1018,6 +1335,161 @@ async function savePrompt(key,closeFn){
   }catch(e){alert('Save failed: '+(e.error||e));}
 }
 
+/* ─── Round 14 (2026-05-29): provider-aware all-slots model picker ───────── */
+const _mpCatalogue={};  // slot -> {policies:[], models:[]}
+const _mpFilter={};     // slot -> {provider:'all', q:'', selected:'<model_id>'}
+
+function _provBadge(p){
+  const cls=p==='requesty'?'prov-requesty':'prov-openrouter';
+  return `<span class="mp-badge ${cls}">${p==='requesty'?'Requesty':'OpenRouter'}</span>`;
+}
+function _costLabel(m){
+  const i=m.input_cost_per_mtok, o=m.output_cost_per_mtok;
+  if(i==null&&o==null)return '<span class="mp-cost mp-cost-na">cost varies</span>';
+  const f=v=>v==null?'?':('$'+Number(v).toFixed(v<1?3:2));
+  return `<span class="mp-cost">${f(i)} / ${f(o)} per M</span>`;
+}
+function _ctxLabel(m){
+  if(!m.context_length)return '';
+  const k=m.context_length>=1000?Math.round(m.context_length/1000)+'k':m.context_length;
+  return `<span class="mp-ctx">${k} ctx</span>`;
+}
+
+async function renderModelPicker(){
+  const body=$('#settings-body');
+  if(!body)return;
+  body.innerHTML='<div class="empty">Loading model slots\u2026</div>';
+  let slots=[];
+  try{
+    const r=await api('/api/settings/slots',{skipCompany:true});
+    slots=r.slots||[];
+  }catch(e){
+    body.innerHTML=`<div class="empty">Could not load slots: ${esc(String(e.error||e.message||e))}</div>`;
+    return;
+  }
+  body.style.display='block';  // break out of the inherited 3-col grid
+  let h=`<div class="mp-topbar">
+    <button class="pill-btn" id="mp-refresh">\u21bb Refresh model list from providers</button>
+    <span class="secondary small" id="mp-refresh-status"></span>
+  </div><div class="mp-grid">`;
+  h+=slots.map(s=>{
+    const kindTag=s.vision
+      ?'<span class="mp-badge kind-vision">vision</span>'
+      :'<span class="mp-badge kind-text">text</span>';
+    return `<div class="mp-card" data-slot="${s.slot}">
+      <div class="mp-head">
+        <h3>${esc(s.label)} ${kindTag}</h3>
+        <div class="mp-current">${_provBadge(s.provider||'openrouter')}
+          <span class="mono">${esc(s.model||'\u2014')}</span>
+          ${sourceBadge(s.provider_source)} ${sourceBadge(s.model_source)}</div>
+      </div>
+      <div class="mp-controls">
+        <div class="mp-providers">
+          <button class="mp-prov active" data-prov="all">All</button>
+          <button class="mp-prov" data-prov="openrouter">OpenRouter</button>
+          <button class="mp-prov" data-prov="requesty">Requesty</button>
+        </div>
+        <input class="input mp-search" placeholder="Search ${s.vision?'vision ':''}models\u2026">
+      </div>
+      <div class="mp-list" id="mp-list-${s.slot}"><div class="empty">Loading models\u2026</div></div>
+      <div class="mp-status" id="mp-status-${s.slot}"></div>
+    </div>`;
+  }).join('');
+  h+='</div>';
+  body.innerHTML=h;
+
+  const refreshBtn=$('#mp-refresh');
+  if(refreshBtn)refreshBtn.onclick=async ()=>{
+    const st=$('#mp-refresh-status'); if(st)st.textContent='Refreshing\u2026';
+    try{
+      const r=await fetch(new URL('api/settings/catalogue/refresh',document.baseURI),{method:'POST'});
+      const j=await r.json(); if(!r.ok||!j.ok)throw j;
+      const s=j.summary||{};
+      if(st)st.textContent=`Synced OpenRouter ${s.openrouter||0} + Requesty ${s.requesty||0}.`;
+      Object.keys(_mpCatalogue).forEach(k=>delete _mpCatalogue[k]);
+      slots.forEach(s=>_loadSlotCatalogue(s.slot));
+    }catch(e){if(st)st.textContent='\u26a0 '+(e.error||e.message||'refresh failed');}
+  };
+
+  slots.forEach(s=>{
+    _mpFilter[s.slot]={provider:'all',q:'',selected:s.model};
+    const card=$(`.mp-card[data-slot="${s.slot}"]`);
+    if(!card)return;
+    card.querySelectorAll('.mp-prov').forEach(btn=>{
+      btn.onclick=()=>{
+        card.querySelectorAll('.mp-prov').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        _mpFilter[s.slot].provider=btn.dataset.prov;
+        _renderSlotList(s.slot);
+      };
+    });
+    const search=card.querySelector('.mp-search');
+    if(search)search.oninput=()=>{_mpFilter[s.slot].q=search.value.trim().toLowerCase();_renderSlotList(s.slot);};
+    _loadSlotCatalogue(s.slot);
+  });
+}
+
+async function _loadSlotCatalogue(slot){
+  if(_mpCatalogue[slot]){_renderSlotList(slot);return;}
+  try{
+    const r=await api(`/api/settings/catalogue?slot=${encodeURIComponent(slot)}`,{skipCompany:true});
+    _mpCatalogue[slot]={policies:r.policies||[],models:r.models||[]};
+  }catch(e){
+    const el=$(`#mp-list-${slot}`);
+    if(el)el.innerHTML=`<div class="empty">Could not load: ${esc(String(e.error||e.message||e))}</div>`;
+    return;
+  }
+  _renderSlotList(slot);
+}
+
+function _mpItem(slot,m,selected){
+  const sel=(m.model_id===selected)?' selected':'';
+  const pol=m.is_policy?'<span class="mp-badge policy">policy</span>':'';
+  return `<button class="mp-item${sel}" data-slot="${slot}" data-prov="${m.provider}" data-model="${esc(m.model_id)}" title="${esc(m.model_id)}">
+    <span class="mp-item-name">${esc(m.label||m.model_id)}</span>
+    <span class="mp-item-meta">${_provBadge(m.provider)}${pol}${_ctxLabel(m)}${_costLabel(m)}</span>
+  </button>`;
+}
+
+function _renderSlotList(slot){
+  const el=$(`#mp-list-${slot}`); if(!el)return;
+  const cat=_mpCatalogue[slot]; if(!cat){el.innerHTML='<div class="empty">Loading\u2026</div>';return;}
+  const f=_mpFilter[slot]||{provider:'all',q:''};
+  const match=m=>{
+    if(f.provider!=='all'&&m.provider!==f.provider)return false;
+    if(f.q&&!(`${m.label} ${m.model_id}`.toLowerCase().includes(f.q)))return false;
+    return true;
+  };
+  const pols=(cat.policies||[]).filter(match), mods=(cat.models||[]).filter(match);
+  let h='';
+  if(pols.length)h+='<div class="mp-group">Routing policies</div>'+pols.map(m=>_mpItem(slot,m,f.selected)).join('');
+  if(mods.length)h+='<div class="mp-group">Models</div>'+mods.map(m=>_mpItem(slot,m,f.selected)).join('');
+  if(!h)h='<div class="empty">No matching models.</div>';
+  el.innerHTML=h;
+  el.querySelectorAll('.mp-item').forEach(btn=>{
+    btn.onclick=()=>_selectModel(slot,btn.dataset.prov,btn.dataset.model);
+  });
+}
+
+async function _selectModel(slot,provider,model){
+  const st=$(`#mp-status-${slot}`); if(st)st.textContent='Saving\u2026';
+  try{
+    const r=await fetch(new URL('api/settings/slot',document.baseURI),{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({slot,provider,model})
+    });
+    const j=await r.json(); if(!r.ok||!j.ok)throw j;
+    if(st)st.textContent=`Saved \u2014 ${provider} / ${model}. Effective within 60 s.`;
+    _mpFilter[slot].selected=model;
+    const card=$(`.mp-card[data-slot="${slot}"]`);
+    if(card){
+      const cur=card.querySelector('.mp-current');
+      if(cur)cur.innerHTML=`${_provBadge(provider)}<span class="mono">${esc(model)}</span> ${sourceBadge('db')} ${sourceBadge('db')}`;
+    }
+    _renderSlotList(slot);
+  }catch(e){if(st)st.textContent='\u26a0 '+(e.error||e.message||'save failed');}
+}
+
 function renderSettingsPage(){
   const body=$('#settings-body');
   if(!state.settings){
@@ -1027,29 +1499,13 @@ function renderSettingsPage(){
     });
     return;
   }
-  const {slots,catalogue,history}=state.settings;
-  const cards=SLOT_ORDER.map(slot=>{
-    const info=slots[slot]||{};
-    const meta=SLOT_LABELS[slot];
-    const opts=modelOptions(slot,catalogue,info.model);
-    const notes=modelNotes(catalogue,info.model);
-    return `<div class="settings-card" data-slot="${slot}">
-      <div class="settings-card-head">
-        <h3>${esc(meta.title)} ${sourceBadge(info.source)}</h3>
-        <p class="secondary">${esc(meta.blurb)}</p>
-      </div>
-      <label class="settings-label">Model
-        <select class="select wide settings-select" data-slot="${slot}">${opts}</select>
-      </label>
-      <div class="model-notes" id="notes-${slot}">${notes}</div>
-      <div class="settings-actions">
-        <button class="pill-btn settings-test-btn" data-slot="${slot}">Test on a recent chart</button>
-        <span class="settings-test-status" id="test-status-${slot}"></span>
-      </div>
-      <div class="settings-test-result" id="test-result-${slot}"></div>
-    </div>`;
-  }).join('');
-  body.innerHTML=cards;
+  const {history}=state.settings;
+
+  /* Round 14 (2026-05-29): provider-aware, all-slots model picker.
+     Replaces the old 3 fixed dropdowns. Pulls live OpenRouter + Requesty
+     catalogues, pins routing policies on top, filters by provider + search,
+     and shows provider / context / $-per-Mtok per row. */
+  renderModelPicker();
 
   /* Agent sizing knobs (Phase 1.5) */
   renderSizingPanel();
@@ -1269,7 +1725,7 @@ function drawDiscordTabs(signals,res){
     <div class="discord-avatar">${initials(trader)}</div>
     <div><div class="discord-user">${esc(trader)}</div>
     <div class="discord-text big">${esc(msg.content||msg.headline||signals[0]?.raw_signal_text||'')}</div>
-    ${isTelegram&&signals.length?`<div class="discord-meta" style="margin-top:6px">${signals.map(s=>`<span class=\"pill ${s.consensus_direction||'long'}\">${esc(dispSymbol(s.instrument_symbol))} ${esc(s.consensus_direction||'')} · E ${fmt(s.entry_price,4)} · SL ${fmt(s.stop_loss,4)} · TP ${fmt(s.take_profit_1,4)}</span>`).join(' ')}</div>`:''}
+    ${isTelegram&&signals.length?`<div class="discord-meta" style="margin-top:6px">${signals.map(s=>`<span class=\"pill ${s.consensus_direction||'long'}\">${esc(dispSymbol(s.instrument_symbol))} ${esc(s.consensus_direction||'')} · E ${fmt(s.entry_price??s.levels?.entry,4)} · SL ${fmt(s.stop_loss??s.levels?.stop_loss,4)} · TP ${fmt(s.take_profit_1??s.levels?.take_profit_1,4)}</span>`).join(' ')}</div>`:''}
     </div>
   </div>`;
 
@@ -1332,13 +1788,30 @@ async function renderCoinTab(group,sym){
     if(item.type==='sig'){
       const s=item.data;
       const mid=s.media?.id;
+      // Rich interpretation panel: trader's logic, AI's read, techniques.
+      const ch=s.chart_hacker||{};
+      const th=s.thesis||{};
+      const tags=s.tags||{};
+      const traderTrades=Array.isArray(ch.trader_trades)?ch.trader_trades:[];
+      const aiTrades=Array.isArray(ch.chart_hacker_trades)?ch.chart_hacker_trades:[];
+      const patterns=Array.isArray(tags.pattern)?tags.pattern:[];
+      const ca=(ch.chart_analysis&&typeof ch.chart_analysis==='object')?ch.chart_analysis:{};
+      const commentary=ca.market_commentary||'';
+      const tradeRow=(t,who)=>`<div class="drawer-trade-row"><span class="pill ${esc(t.direction||'')}">${esc(who)} ${esc(t.direction||'?')}</span> E ${fmt(t.entry,4)} · SL ${fmt(t.stop_loss||t.sl,4)} · TP ${fmt(t.tp1||t.take_profit,4)}${t.confidence?` · ${fmt(t.confidence,2)} conf`:''}${t.rationale?`<div class="secondary" style="margin-top:2px">${esc(String(t.rationale).slice(0,220))}</div>`:''}</div>`;
       h+=`<div class="drawer-panel chart-panel">
         <div class="chart-toolbar"><div><h3>${esc(dispSymbol(s.instrument_symbol))} · ${esc(s.consensus_direction||'')} · ${s.consensus_confidence?fmt(s.consensus_confidence,3):''} conf</h3>
-        <p>Entry ${fmt(s.entry_price,4)} · SL ${fmt(s.stop_loss,4)} · TP ${fmt(s.take_profit_1,4)}</p></div></div>
+        <p>Entry ${fmt(s.entry_price??s.levels?.entry,4)} · SL ${fmt(s.stop_loss??s.levels?.stop_loss,4)} · TP ${fmt(s.take_profit_1??s.levels?.take_profit_1,4)}</p></div></div>
         <div class="chart-split">
           ${mid?`<div class="posted-chart"><img class="chart-img xl" src="api/media/${mid}" loading="lazy" decoding="async" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=empty>Chart image not available</div>'"></div>`:''}
           <div id="disc-chart-${esc(s.id)}" class="replay-chart"></div>
         </div>
+        ${traderTrades.length?`<div class="drawer-section"><h4>Trader's setup${traderTrades.length>1?'s':''}</h4>${traderTrades.map(t=>tradeRow(t,'Trader')).join('')}</div>`:''}
+        ${th.trader_stated?`<div class="drawer-section"><h4>Trader's logic</h4><div class="secondary">${esc(String(th.trader_stated).slice(0,400))}</div></div>`:''}
+        ${aiTrades.length?`<div class="drawer-section"><h4>ChartHacker would trade</h4>${aiTrades.map(t=>tradeRow(t,'AI')).join('')}</div>`:''}
+        ${s.llm&&s.llm.reasoning?`<div class="drawer-section"><h4>AI interpretation</h4><div class="secondary">${esc(String(s.llm.reasoning).slice(0,400))}</div></div>`:''}
+        ${commentary?`<div class="drawer-section"><h4>Market commentary</h4><div class="secondary">${esc(String(commentary).slice(0,300))}</div></div>`:''}
+        ${patterns.length?`<div class="drawer-section"><h4>Techniques observed</h4>${patterns.slice(0,8).map(p=>`<span class="pill" style="margin-right:4px">${esc(p)}</span>`).join('')}</div>`:''}
+        ${ch.ai_agreement_score!=null?`<div class="drawer-section secondary">AI ↔ Trader agreement: ${fmt(ch.ai_agreement_score,2)}${ch.ai_comment?` — ${esc(String(ch.ai_comment).slice(0,200))}`:''}</div>`:''}
       </div>`;
     }else{
       const m=item.data;
@@ -1375,9 +1848,13 @@ async function loadChartTab(sig,idx){
   }
 }
 
-function drawReplayInline(r,parentEl){
-  if(!r||!r.ok){parentEl.innerHTML='<div class="empty">No replay data</div>';return}
+function drawReplayInline(raw,parentEl){
+  if(!raw||!raw.ok){parentEl.innerHTML='<div class="empty">No replay data</div>';return}
+  const base=raw;
+  const legIdx=raw.selected_leg??raw._selectedLeg??0;
+  const r=mergeReplayLeg(base,legIdx);
   const sig=r.signal||{}, pos=r.position||{}, levels=sig.levels||{}, trader=r.trader||{}, news=r.news||{};
+  const legTabs=replayLegTabsHtml(base,legIdx);
   const traderName=trader.handle_raw||trader.display_name||trader.handle_normalized||news.author||'trader';
   const outcome=pos.outcome||pos.status||'tracking';
   const pnl=Z(pos.realized_pnl_usd_final??pos.realized_pnl_usd??pos.unrealized_pnl_usd);
@@ -1387,6 +1864,7 @@ function drawReplayInline(r,parentEl){
   const callIso=r.call_ts?String(r.call_ts):'';
   const callPretty=callIso?callIso.slice(0,16).replace('T',' ')+' UTC':'';
   parentEl.innerHTML=`
+    ${legTabs}
     <section class="drawer-panel chart-panel">
       <div class="chart-toolbar"><div><h3>${esc(r.symbol)} · ${esc(r.timeframe)} · ${r.coverage?.candle_count||0} candles</h3><p>${esc(sig.direction||'')} · ${sig.confidence?fmt(sig.confidence,3):''} confidence${callPretty?` · call ${esc(callPretty)}`:''}</p></div><div class="replay-actions"><button class="mini" id="replay-play">Replay</button><button class="mini" id="replay-reset">Reset</button><button class="mini" id="replay-spacing">Spacing: ${state.timeSpacing==='realtime'?'Time':'Bars'}</button></div></div>
       <div class="chart-split">
@@ -1420,6 +1898,7 @@ function drawReplayInline(r,parentEl){
       spacingBtn.textContent=`Spacing: ${state.timeSpacing==='realtime'?'Time':'Bars'}`;
       renderReplayChart(r,chartId);
     };
+    wireReplayLegTabs(base,r.id,(payload)=>drawReplayInline(payload,parentEl));
   },100);
 }
 
@@ -1509,6 +1988,47 @@ function renderDiscordCallBody(news,sig,r,traderName){
   }
   return `<div class="discord-msg large"><div class="discord-avatar">${initials(traderName)}</div><div>${head}${bodyHtml}</div></div>`;
 }
+function replayLegLabel(leg){
+  const dir=String(leg.direction||'').toUpperCase()||'?';
+  const src=leg.source==='chart_hacker'?'CH':'TR';
+  const entry=leg.levels?.entry;
+  let label=`${src} ${dir} @ ${entry?fmt(entry,2):'—'}`;
+  if(!leg.armed)label+=' (unarmed)';
+  else if(leg.chart_hacker_endorsed)label+=' ✓';
+  return label;
+}
+function mergeReplayLeg(r,legIdx){
+  const legs=r?.legs||[];
+  const leg=legs[legIdx];
+  if(!leg)return r;
+  const pos=leg.position?{...leg.position,id:leg.position_id||leg.position.id,signal_source:leg.source,chart_hacker_endorsed:leg.chart_hacker_endorsed}: {};
+  return {...r,_selectedLeg:legIdx,symbol:leg.symbol||r.symbol,exchange:leg.exchange||r.exchange,timeframe:leg.timeframe||r.timeframe,candles:leg.candles||[],coverage:leg.coverage||r.coverage,position:pos,signal:{...(r.signal||{}),direction:leg.direction,levels:leg.levels||{},signal_source:leg.source}};
+}
+function replayLegTabsHtml(base,activeIdx){
+  const legs=base.legs||[];
+  if(legs.length<=1)return '';
+  const st=base.stats||{};
+  const statLine=`<p class="replay-leg-stats">${st.legs_armed||0} armed · ${st.legs_total||legs.length} legs · ${st.trader_trades_extracted||0} trader · ${st.chart_hacker_trades_extracted||0} CH extracted</p>`;
+  const tabs=legs.map((leg,i)=>{
+    const cls=['replay-leg-tab'];
+    if(i===activeIdx)cls.push('active');
+    if(!leg.armed)cls.push('unarmed');
+    if(leg.chart_hacker_endorsed)cls.push('endorsed');
+    return `<button type="button" class="${cls.join(' ')}" data-replay-leg="${i}">${esc(replayLegLabel(leg))}</button>`;
+  }).join('');
+  return `${statLine}<div class="replay-legs">${tabs}</div>`;
+}
+function wireReplayLegTabs(base,interpId,onSelect){
+  const render=onSelect||((payload)=>drawReplay(payload));
+  document.querySelectorAll('[data-replay-leg]').forEach(btn=>{
+    btn.addEventListener('click',async()=>{
+      const idx=parseInt(btn.getAttribute('data-replay-leg'),10);
+      if(!Number.isFinite(idx))return;
+      if(base.legs&&base.legs[idx]?.candles?.length){render({...base,selected_leg:idx});return}
+      try{const fresh=await api(`/api/signal-replay?id=${encodeURIComponent(interpId)}&leg=${idx}`);render(fresh)}catch(e){console.error('leg switch failed',e)}
+    });
+  });
+}
 async function openCall(id,news){
   if(!id&&!news)return;
   openDrawer('Signal intelligence','CALL DETAIL','<div class="empty">Loading chart, candles, levels and memory…</div>');
@@ -1522,15 +2042,17 @@ async function openCall(id,news){
     else{drawCallFallback(res,id)}
   }catch(e){console.error('openCall failed',e);$('#drawer-body').innerHTML='<div class="empty">Could not load chart/replay intelligence</div>'}
 }
-function drawReplay(r){
-  if(!r||!r.ok){$('#drawer-body').innerHTML='<div class="empty">No replay data available</div>';return}
+function drawReplay(raw){
+  if(!raw||!raw.ok){$('#drawer-body').innerHTML='<div class="empty">No replay data available</div>';return}
+  const base=raw;
+  const legIdx=raw.selected_leg??raw._selectedLeg??0;
+  const r=mergeReplayLeg(base,legIdx);
   const sig=r.signal||{}, pos=r.position||{}, levels=sig.levels||{}, trader=r.trader||{}, news=r.news||{};
+  const legTabs=replayLegTabsHtml(base,legIdx);
   $('#drawer-title').textContent=`${r.symbol} ${sig.direction||''}`;
-  // 2026-05-24 (Round 9) — surface signal_source in the kicker so the user
-  // can immediately see whether a position was an explicit trader call or
-  // an AI-inferred opinion from ChartHacker.
   const src=String(pos.signal_source||sig.signal_source||'').toLowerCase();
-  const srcTag=src==='chart_hacker'?' · AI INFERRED (ChartHacker)':(src==='trader'?' · TRADER CALL':'');
+  const endorsed=!!pos.chart_hacker_endorsed;
+  const srcTag=src==='chart_hacker'?' · AI INFERRED (ChartHacker)':(src==='trader'?(endorsed?' · TRADER CALL · CH ENDORSED':' · TRADER CALL'):'');
   $('#drawer-kicker').textContent=`CALL DETAIL | INTERP ID: ${r.id}${pos.id ? ` · POS ID: ${pos.id}` : ''}${srcTag}`;
   const traderName=trader.handle_raw||trader.display_name||trader.handle_normalized||news.author||'trader';
   const outcome=pos.outcome||pos.status||'tracking';
@@ -1538,6 +2060,7 @@ function drawReplay(r){
   const media=r.media_url||r.annotated_chart_url;
   $('#drawer-body').innerHTML=`
     <div class="replay-layout">
+      ${legTabs}
       <section class="drawer-panel chart-panel">
         <div class="chart-toolbar"><div><h3>Trader chart / reconstructed replay</h3><p>${esc(r.symbol)} · ${esc(r.exchange)} · ${esc(r.timeframe)} · ${r.coverage?.candle_count||0} candles</p></div><div class="replay-actions"><button class="mini" id="replay-play">Replay</button><button class="mini" id="replay-reset">Reset</button><button class="mini" id="replay-spacing">Spacing: ${state.timeSpacing==='realtime'?'Time':'Bars'}</button></div></div>
         <div class="chart-split">
@@ -1557,6 +2080,7 @@ function drawReplay(r){
   renderReplayChart(r);
   // Round 12 (2026-05-24): trade-journey chart in the standalone drawer.
   if(pos&&pos.id){setTimeout(()=>renderTradeJourney(pos.id),120)}
+  wireReplayLegTabs(base,r.id);
   $('#replay-play')?.addEventListener('click',()=>animateReplay(r));
   $('#replay-reset')?.addEventListener('click',()=>renderReplayChart(r));
   $('#replay-spacing')?.addEventListener('click',()=>{
@@ -1894,7 +2418,7 @@ async function renderTradeJourney(positionId){
     tooltip:{trigger:'axis',axisPointer:{type:'cross'},
       formatter:(arr)=>{
         if(!arr||!arr.length)return '';
-        const t=arr[0].axisValue||'';
+        const t=String(arr[0].axisValue||'');
         const lines=[`<div style="margin-bottom:4px"><b>${t.replace('T',' ').slice(0,19)}</b></div>`];
         arr.forEach(a=>{const v=Array.isArray(a.value)?a.value[1]:a.value;lines.push(`${a.marker} ${a.seriesName}: <b>${fmt(v,a.seriesName==='Price'?6:2)}${a.seriesName==='P&L %'?'%':''}</b>`)});
         return lines.join('<br/>');
@@ -2035,19 +2559,62 @@ function updateCompNumbers(){
   (c.participants||[]).forEach(p=>{
     const tr=document.getElementById('comp-tr-'+p.agent_id);
     if(!tr)return;
-    const eq=Z(p.scores?.equity), unreal=Z(p.scores?.unrealized_pnl_usd), liveEq=eq+unreal;
-    const rpct=Z(p.scores?.return_pct), starting=Z(p.scores?.starting_balance_usd)||1000;
-    const liveReturn=((liveEq/starting)-1)*100;
-    const cells=tr.querySelectorAll('td');
-    if(cells.length>=8){
-      cells[2].innerHTML='$'+fmt(eq,2);                    // Balance
-      cells[3].innerHTML='<strong>$'+fmt(liveEq,2)+'</strong>'; // Live Equity
-      cells[4].innerHTML=usd(p.scores?.total_realized_pnl_usd)+'<br><span class="secondary small">unreal '+usd(p.scores?.unrealized_pnl_usd)+'</span>'; // P&L
-      cells[5].innerHTML='<span class="'+(rpct>=0?'success':'danger')+'">'+pct(rpct)+'</span><br><span class="secondary small">'+pct(liveReturn)+' live</span>'; // Return
-      cells[6].textContent=fmt(Z(p.scores?.win_rate)*100,1)+'%'; // Win
-      cells[7].textContent=p.scores?.total_trades||0;      // Trades
-      cells[8].textContent=p.scores?.open_positions||0;    // Open
-    }
+    const m=compMetrics(p);
+    const set=(col,html)=>{const el=tr.querySelector(`td[data-col="${col}"]`);if(el)el.innerHTML=html};
+    set('balance','$'+fmt(m.eq,2));
+    set('liveEq','<strong>$'+fmt(m.liveEq,2)+'</strong>');
+    set('pnl',usd(m.pnl)+'<br><span class="secondary small">unreal '+usd(m.unreal)+'</span>');
+    set('return',`<span class="${m.rpct>=0?'success':'danger'}">${pct(m.rpct)}</span><br><span class="secondary small">${pct(m.liveReturn)} live</span>`);
+    const wr=tr.querySelector('td[data-col="winRate"]');
+    if(wr)wr.textContent=fmt(m.winRate*100,1)+'%';
+    set('wl',compWlCell(m.wins,m.losses));
+    const op=tr.querySelector('td[data-col="open"]');
+    if(op)op.textContent=String(m.open);
   });
   $('#updated-at').textContent=new Date().toLocaleTimeString();
+}
+
+
+/* ─── Strategies tab — the graded technique/edge library ─── */
+function renderStrategiesPage(){
+  const data=state.strategies||{strategies:[]};
+  const list=data.strategies||[];
+  const q=($('#strat-filter')?.value||'').toLowerCase();
+  const rows=list.filter(s=>{
+    if(!q)return true;
+    return s.technique.includes(q)||(s.description||'').toLowerCase().includes(q)
+      ||(s.symbols||[]).some(x=>x.toLowerCase().includes(q))
+      ||(s.traders||[]).some(t=>(t.trader||'').toLowerCase().includes(q));
+  });
+  const proven=list.filter(s=>s.maturity==='proven').length;
+  const est=list.filter(s=>s.maturity==='established').length;
+  const best=list.filter(s=>s.sample_count>=3).sort((a,b)=>b.win_rate-a.win_rate)[0];
+  const stats=$('#strat-stats');
+  if(stats)stats.innerHTML=
+    '<div class="stat"><label>Strategies</label><strong>'+list.length+'</strong><span>'+proven+' proven · '+est+' established</span></div>'+
+    '<div class="stat"><label>Best (n≥3)</label><strong>'+(best?esc(best.technique):'—')+'</strong><span>'+(best?fmt(best.win_rate*100,0)+'% over '+best.sample_count+' trades':'need more closed trades')+'</span></div>'+
+    '<div class="stat"><label>Total graded</label><strong>'+list.reduce((a,s)=>a+s.sample_count,0)+'</strong><span>technique-trade outcomes</span></div>';
+  const mBadge=m=>({proven:'<span class="pill long">PROVEN</span>',established:'<span class="pill">ESTABLISHED</span>',emerging:'<span class="pill short">EMERGING</span>',candidate:'<span class="pill" style="opacity:.5">CANDIDATE</span>'}[m]||'');
+  const html=rows.map(s=>{
+    const wr=fmt(s.win_rate*100,0)+'%';
+    const wrCls=s.win_rate>=0.55?'success':(s.win_rate<=0.4?'danger':'');
+    const pnlCls=s.total_pnl_usd>=0?'success':'danger';
+    const traders=(s.traders||[]).map(t=>'<span class="pill" title="'+esc(t.trader)+': '+t.wins+'W/'+t.losses+'L'+(t.symbol?' on '+esc(t.symbol):'')+'">'+esc(t.trader)+' '+fmt(t.win_rate*100,0)+'%</span>').join(' ');
+    return '<tr>'+
+      '<td><div class="row-main"><strong>'+esc(s.technique)+'</strong> '+mBadge(s.maturity)+'</div>'+
+      '<div class="secondary small" style="max-width:420px">'+esc(s.description||'(no description yet — auto-described as samples accrue)')+'</div></td>'+
+      '<td class="num"><strong class="'+wrCls+'">'+wr+'</strong><div class="secondary small">'+s.wins+'W / '+s.losses+'L</div></td>'+
+      '<td class="num mono">'+(s.avg_rr?fmt(s.avg_rr,2):'—')+'</td>'+
+      '<td class="num mono"><span class="success">+'+fmt(s.avg_win_pct,1)+'%</span> / <span class="danger">-'+fmt(s.avg_loss_pct,1)+'%</span></td>'+
+      '<td class="num mono '+pnlCls+'">'+(s.total_pnl_usd>=0?'+':'')+'$'+fmt(Math.abs(s.total_pnl_usd),2)+'</td>'+
+      '<td class="num">'+s.sample_count+'</td>'+
+      '<td>'+((s.symbols||[]).slice(0,5).map(x=>'<span class="pill">'+esc(x)+'</span>').join(' ')||'<span class="secondary">—</span>')+'</td>'+
+      '<td>'+(traders||'<span class="secondary">—</span>')+'</td>'+
+    '</tr>';
+  }).join('');
+  $('#strategies-body').innerHTML=rows.length
+    ?'<table class="data-table"><thead><tr><th>Strategy / Technique</th><th class="num">Win rate</th><th class="num">Avg RR</th><th class="num">Avg win/loss</th><th class="num">P&L</th><th class="num">Trades</th><th>Coins</th><th>Traders</th></tr></thead><tbody>'+html+'</tbody></table>'
+    :'<div class="empty">No graded techniques yet — they appear as tracked positions close.</div>';
+  const f=$('#strat-filter');
+  if(f&&!f._wired){f._wired=true;f.addEventListener('input',()=>renderStrategiesPage());}
 }

@@ -16,6 +16,11 @@ _DIM = int(os.getenv("REASON_EMBED_DIM", "384"))
 
 _model: Optional[object] = None
 _lock = asyncio.Lock()
+# HF fast tokenizers (Rust) are NOT thread-safe: concurrent encode() calls
+# from parallel interpretation workers raise "Already borrowed". Serialise
+# all encodes through this lock (encoding is ~ms on CPU; contention is cheap,
+# a lost agreement score is not).
+_encode_lock = asyncio.Lock()
 
 
 async def _ensure_model() -> object:
@@ -49,7 +54,8 @@ async def embed(text: str) -> list[float]:
         return [0.0] * _DIM
     m = await _ensure_model()
     try:
-        vec = await asyncio.to_thread(m.encode, text, normalize_embeddings=True)
+        async with _encode_lock:
+            vec = await asyncio.to_thread(m.encode, text, normalize_embeddings=True)
         result = vec.tolist()
         if len(result) != _DIM:
             raise RuntimeError(
