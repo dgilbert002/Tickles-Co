@@ -1277,17 +1277,35 @@ async def run_llm_track(
 
     # Inject quant context into the prompt when available (RSI, EMA, ATR, price)
     if chart_hacker_quant is not None:
+        # Multi-timeframe quant: each timeframe's RSI/EMA/ATR is prefixed
+        # (e.g. "15m_rsi14", "1h_ema20") so the LLM can cross-reference the
+        # chart's actual timeframe.
+        parts = ["Quant signals (live market data at analysis time):"]
+        # Single QuantResult (backward compat) or merged QuantResult from
+        # run_quant_multiframe (indicators dict carries 15m_/1h_/4h_ prefixes).
         qdir = getattr(chart_hacker_quant, "direction", "unclear") or "unclear"
         qconf = getattr(chart_hacker_quant, "confidence", 0.0) or 0.0
-        qind = getattr(chart_hacker_quant, "indicators", {}) or {}
-        parts = [f"Quant signals (live market data at analysis time):"]
         parts.append(f"  Direction: {qdir} (confidence {qconf:.0%})")
-        if qind.get("rsi14") is not None:
-            parts.append(f"  RSI(14): {round(qind['rsi14'],1)}")
-        if qind.get("ema20") is not None and qind.get("ema50") is not None:
-            parts.append(f"  EMA20: {round(qind['ema20'],4)} EMA50: {round(qind['ema50'],4)} (crossover: {'bullish' if qind['ema20'] > qind['ema50'] else 'bearish'})")
-        if qind.get("atr14") is not None:
-            parts.append(f"  ATR(14): {round(qind['atr14'],4)}")
+        qind = getattr(chart_hacker_quant, "indicators", {}) or {}
+        # Group indicators by timeframe prefix for readability
+        per_tf: Dict[str, List[str]] = {}
+        for k, v in qind.items():
+            if "_" in k:
+                tf, key = k.split("_", 1)
+                per_tf.setdefault(tf, []).append(f"{key}={round(float(v),4) if isinstance(v,(int,float)) else v}")
+            elif k in ("current_price", "price_source"):
+                pass  # stamped separately
+        for tf in ("15m", "1h", "4h"):
+            if tf in per_tf:
+                parts.append(f"  [{tf}] {', '.join(per_tf[tf])}")
+        # Legacy single-timeframe fallback
+        if not per_tf:
+            if qind.get("rsi14") is not None:
+                parts.append(f"  RSI(14): {round(qind['rsi14'],1)}")
+            if qind.get("ema20") is not None and qind.get("ema50") is not None:
+                parts.append(f"  EMA20: {round(qind['ema20'],4)} EMA50: {round(qind['ema50'],4)} (crossover: {'bullish' if qind['ema20'] > qind['ema50'] else 'bearish'})")
+            if qind.get("atr14") is not None:
+                parts.append(f"  ATR(14): {round(qind['atr14'],4)}")
         if qind.get("current_price") is not None:
             parts.append(f"  Current price: {qind['current_price']}")
         user_text += "\n\n" + "\n".join(parts)
@@ -1504,7 +1522,7 @@ def _resolve_quant_timeframe(chart_timeframe: Optional[str]) -> str:
     raw = str(chart_timeframe).strip().lower()
     if raw in ("1h", "4h", "1d", "1w", "1m", "5m", "15m", "30m"):
         return raw
-    mm = re.match(r"^(\d+)([mh])$", raw)
+    mm = _re.match(r"^(\d+)([mh])$", raw)
     if mm:
         val, unit = int(mm.group(1)), mm.group(2)
         if unit == "h":
@@ -1881,6 +1899,73 @@ def _bollinger(closes: List[float], period: int = 20, k: float = 2.0) -> Dict[st
 # ---------------------------------------------------------------------------
 # Consensus Engine
 # ---------------------------------------------------------------------------
+# Canonical timeframes for multi-timeframe quant analysis.
+# 1m is excluded — its noise on higher-timeframe charts caused the
+# consensus gate to kill valid support-bounce longs (NEAR 4h, BONK 1d).
+_QUANT_TIMEFRAMES = ("15m", "1h", "4h")
+
+
+async def run_quant_multiframe(
+    shared_pool: DatabasePool,
+    company_pool: DatabasePool,
+    instrument_symbol: str,
+    exchange: str,
+    freshness_threshold: float,
+) -> Tuple[QuantResult, Dict[str, QuantResult]]:
+    """Run quant tracks in parallel across multiple timeframes, return a merged result.
+
+    Returns (merged, per_tf) where merged is the consensus of all timeframes
+    and per_tf is {timeframe: QuantResult}. The LLM prompt gets the per-timeframe
+    breakdown; consensus gets the merged result.
+    """
+    import asyncio as _asyncio
+
+    async def _one(tf: str) -> Tuple[str, QuantResult]:
+        try:
+            q = await run_quant_track(
+                shared_pool, company_pool, instrument_symbol, exchange,
+                freshness_threshold, timeframe_hint=tf,
+            )
+            return (tf, q)
+        except Exception:
+            return (tf, QuantResult(direction="unclear", confidence=0.0, indicators={}, cost_usd=0.0))
+
+    tasks = [_one(tf) for tf in _QUANT_TIMEFRAMES]
+    results: Dict[str, QuantResult] = {}
+    for coro in _asyncio.as_completed(tasks):
+        tf, q = await coro
+        results[tf] = q
+
+    # Merge: majority-vote direction weighted by confidence, avg confidence
+    votes: Dict[str, float] = {"long": 0.0, "short": 0.0, "unclear": 0.0, "neutral": 0.0}
+    total_conf = 0.0
+    merged_indicators: Dict[str, Any] = {}
+    for tf, q in results.items():
+        d = q.direction
+        if d in votes:
+            votes[d] += q.confidence
+        total_conf += q.confidence
+        # Prefix each timeframe's indicators
+        for k, v in (q.indicators or {}).items():
+            merged_indicators[f"{tf}_{k}"] = v
+        # Also stamp the last candle close as the canonical current price
+        if q.indicators and q.indicators.get("current_price") is not None:
+            merged_indicators.setdefault("current_price", q.indicators["current_price"])
+
+    # Best direction
+    best_d = max(votes, key=votes.get)
+    best_v = votes[best_d]
+    avg_conf = best_v / max(total_conf, 1e-9) if total_conf > 0 else 0.0
+
+    merged = QuantResult(
+        direction=best_d if best_v >= votes.get("unclear", 0) + votes.get("neutral", 0) else "unclear",
+        confidence=round(avg_conf, 4),
+        indicators=merged_indicators,
+        cost_usd=0.0,
+    )
+    return merged, results
+
+
 def run_consensus(llm: LlmResult, quant: Optional[QuantResult]) -> ConsensusResult:
     """Merge LLM and quant tracks into a single interpretation.
 
@@ -4437,19 +4522,20 @@ class InterpretationService:
                 model=_rl_model,
                 estimated_cost_usd=0.005,
             )
-            # Run quant BEFORE LLM so live market data goes into the prompt
-            signal_at = media_row.get("published_at") or media_row.get("collected_at")
+            # Run quant BEFORE LLM so live market data goes into the prompt.
+            # Multi-timeframe (15m, 1h, 4h) gives the LLM the full picture —
+            # a daily chart with bearish 1m momentum is a normal pullback, not
+            # a bearish signal. The 4h/1h RSI tells the real story.
             pre_llm_quant = None
             try:
                 from shared.utils.db import get_company_pool as _gcp
                 _cp = await _gcp(company)
-                pre_llm_quant = await run_quant_track(
+                pre_llm_quant, _ = await run_quant_multiframe(
                     shared_pool=shared_pool,
                     company_pool=_cp,
                     instrument_symbol=symbol,
                     exchange=exchange,
                     freshness_threshold=self.cfg.freshness_threshold_s,
-                    as_of=signal_at,
                 )
             except Exception as _qe:
                 logger.debug("pre-LLM quant failed for %s: %s — proceeding without", symbol, _qe)
@@ -4664,13 +4750,12 @@ class InterpretationService:
         from shared.utils.db import get_company_pool
 
         company_pool = await get_company_pool(company)
-        quant_result = await run_quant_track(
+        quant_result, _ = await run_quant_multiframe(
             shared_pool=shared_pool,
             company_pool=company_pool,
             instrument_symbol=symbol,
             exchange=exchange,
             freshness_threshold=self.cfg.freshness_threshold_s,
-            timeframe_hint=llm_result.timeframe if llm_result and llm_result.timeframe else None,
         )
 
         # --- Stamp interpretation-time price into quant_indicators (Slice 2) ---
