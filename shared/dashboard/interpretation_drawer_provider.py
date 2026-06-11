@@ -820,6 +820,15 @@ def _opt_json(value: Any) -> Any:
         try:
             return json.loads(value)
         except (json.JSONDecodeError, TypeError):
+            # Malformed JSONB (truncated, NaN/Infinity, trailing garbage) would
+            # otherwise reach the frontend as a string and silently fail every
+            # Array.isArray() check -> empty drawer section with no error. Log
+            # so corrupt rows are diagnosable instead of invisible.
+            logger.warning(
+                "drawer: failed to decode JSONB string (len=%d, head=%r) -- "
+                "returning raw; frontend will treat as empty",
+                len(value), value[:80],
+            )
             return value
     return value
 

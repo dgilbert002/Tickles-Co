@@ -9,6 +9,10 @@ const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll
 const esc=v=>v==null?'':String(v).replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));
 const Z=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
 const fmt=(v,d=2)=>{const x=Number(v);return Number.isFinite(x)?x.toFixed(d):'—'};
+// Level formatter: prefers the first POSITIVE value (a 0 from a NUMERIC column
+// means "no level recorded" — ?? would wrongly keep it, || drops it but also
+// drops the JSONB fallback). Renders '—' when neither is a positive price.
+const lvl=(primary,fallback,d=4)=>{const a=Number(primary);if(Number.isFinite(a)&&a>0)return a.toFixed(d);const b=Number(fallback);return Number.isFinite(b)&&b>0?b.toFixed(d):'—'};
 const usd=v=>`${Z(v)>=0?'+':'-'}$${Math.abs(Z(v)).toFixed(2)}`;
 const pct=v=>`${Z(v)>=0?'+':''}${fmt(v,2)}%`;
 const rel=iso=>{if(!iso)return'—';const s=Math.max(0,Math.floor((Date.now()-new Date(iso))/1000));if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`};
@@ -1725,7 +1729,7 @@ function drawDiscordTabs(signals,res){
     <div class="discord-avatar">${initials(trader)}</div>
     <div><div class="discord-user">${esc(trader)}</div>
     <div class="discord-text big">${esc(msg.content||msg.headline||signals[0]?.raw_signal_text||'')}</div>
-    ${isTelegram&&signals.length?`<div class="discord-meta" style="margin-top:6px">${signals.map(s=>`<span class=\"pill ${s.consensus_direction||'long'}\">${esc(dispSymbol(s.instrument_symbol))} ${esc(s.consensus_direction||'')} · E ${fmt(s.entry_price??s.levels?.entry,4)} · SL ${fmt(s.stop_loss??s.levels?.stop_loss,4)} · TP ${fmt(s.take_profit_1??s.levels?.take_profit_1,4)}</span>`).join(' ')}</div>`:''}
+    ${isTelegram&&signals.length?`<div class="discord-meta" style="margin-top:6px">${signals.map(s=>`<span class=\"pill ${s.consensus_direction||'long'}\">${esc(dispSymbol(s.instrument_symbol))} ${esc(s.consensus_direction||'')} · E ${lvl(s.entry_price,s.levels?.entry,4)} · SL ${lvl(s.stop_loss,s.levels?.stop_loss,4)} · TP ${lvl(s.take_profit_1,s.levels?.take_profit_1,4)}</span>`).join(' ')}</div>`:''}
     </div>
   </div>`;
 
@@ -1800,7 +1804,7 @@ async function renderCoinTab(group,sym){
       const tradeRow=(t,who)=>`<div class="drawer-trade-row"><span class="pill ${esc(t.direction||'')}">${esc(who)} ${esc(t.direction||'?')}</span> E ${fmt(t.entry,4)} · SL ${fmt(t.stop_loss||t.sl,4)} · TP ${fmt(t.tp1||t.take_profit,4)}${t.confidence?` · ${fmt(t.confidence,2)} conf`:''}${t.rationale?`<div class="secondary" style="margin-top:2px">${esc(String(t.rationale).slice(0,220))}</div>`:''}</div>`;
       h+=`<div class="drawer-panel chart-panel">
         <div class="chart-toolbar"><div><h3>${esc(dispSymbol(s.instrument_symbol))} · ${esc(s.consensus_direction||'')} · ${s.consensus_confidence?fmt(s.consensus_confidence,3):''} conf</h3>
-        <p>Entry ${fmt(s.entry_price??s.levels?.entry,4)} · SL ${fmt(s.stop_loss??s.levels?.stop_loss,4)} · TP ${fmt(s.take_profit_1??s.levels?.take_profit_1,4)}</p></div></div>
+        <p>Entry ${lvl(s.entry_price,s.levels?.entry,4)} · SL ${lvl(s.stop_loss,s.levels?.stop_loss,4)} · TP ${lvl(s.take_profit_1,s.levels?.take_profit_1,4)}</p></div></div>
         <div class="chart-split">
           ${mid?`<div class="posted-chart"><img class="chart-img xl" src="api/media/${mid}" loading="lazy" decoding="async" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=empty>Chart image not available</div>'"></div>`:''}
           <div id="disc-chart-${esc(s.id)}" class="replay-chart"></div>

@@ -276,7 +276,30 @@ def lev_after_buffer(sl_dist: float) -> float:
     return max(min(raw, float(_sizing("leverage_cap", 100.0))), 1.0)
 
 
-_OPTION_RE = re.compile(r"-\d{5,8}-\d+(?:\.\d+)?-[PC]$", re.IGNORECASE)
+def be_lock_leverage(be_sl_offset: float = 0.001) -> float:
+    """Liquidation-safe leverage for a breakeven-locked position.
+
+    When a position is moved to breakeven, the SL sits ``be_sl_offset`` away
+    from entry (default 0.1%). Naively jumping to 100x leverage to free margin
+    puts the forced-liquidation price AT or INSIDE that 0.1% stop (at 100x with
+    real maintenance margin ~0.5-1%, liq distance is <= 0), so the exchange
+    liquidates before the breakeven stop can fire — defeating the whole point
+    of the BE lock and incurring liquidation fees.
+
+    We reuse the same liquidation-safe formula keyed on the BE stop distance,
+    but with a HIGHER maintenance-margin assumption (be_liq_mmr default 0.010 =
+    1.0%) because the freed-margin leverage lands in the exchange's high-lev
+    tier where maintenance margin is ~1%, not the ~0.6% of low-lev tiers. At a
+    0.1% stop this yields ~90x (verified liquidation-safe against a real 1.0%
+    MMR), not a naive 100x whose liquidation sits AT the stop. Tunable via
+    be_liq_safety / be_liq_mmr / leverage_cap.
+    """
+    if be_sl_offset < 0.0005:
+        be_sl_offset = 0.0005
+    safety = float(_sizing("be_liq_safety", _sizing("liq_safety", 1.15)))
+    mmr = float(_sizing("be_liq_mmr", 0.010))
+    raw = 1.0 / (be_sl_offset * safety + mmr)
+    return max(min(raw, float(_sizing("leverage_cap", 100.0))), 1.0)
 
 
 def is_option_symbol(symbol: str) -> bool:
@@ -894,13 +917,16 @@ class LiveCopyTradeMonitor:
                     if triggered:
                         old_lev = pos["leverage"]
                         pos["be_locked"] = True
-                        pos["leverage"] = 100.0
-                        pos["allocated"] = pos["allocated"] * (old_lev / 100.0)
+                        # Liquidation-safe BE leverage (NOT a naive 100x, which
+                        # would put liquidation at/inside the 0.1% BE stop).
+                        be_lev = be_lock_leverage(0.001)
+                        pos["leverage"] = be_lev
+                        pos["allocated"] = pos["allocated"] * (old_lev / be_lev)
                         await self._persist_be_lock(agent_name, pos)
                         logger.info(
-                            "BE LOCK (pre-check) %s %s %s @%.6g → SL=%.6g lev=100x alloc=%.4f",
+                            "BE LOCK (pre-check) %s %s %s @%.6g → SL=%.6g lev=%.0fx alloc=%.4f",
                             agent_name, pos["symbol"], pos["direction"],
-                            pos["entry"], pos["sl"], pos["allocated"])
+                            pos["entry"], pos["sl"], pos["leverage"], pos["allocated"])
 
             candles = await self._get_candles(sym, since)
             if not candles:
@@ -938,17 +964,19 @@ class LiveCopyTradeMonitor:
                             triggered = True
                             pos["sl"] = pos["entry"] * 0.999  # SL→BE+fees
                         if triggered:
-                            # Keep notional constant: adjust allocated when leverage jumps to 100x
+                            # Keep notional constant; raise leverage to free
+                            # margin but stay liquidation-safe (NOT naive 100x).
                             old_lev = pos["leverage"]
                             pos["be_locked"] = True
-                            pos["leverage"] = 100.0
-                            pos["allocated"] = pos["allocated"] * (old_lev / 100.0)
+                            be_lev = be_lock_leverage(0.001)
+                            pos["leverage"] = be_lev
+                            pos["allocated"] = pos["allocated"] * (old_lev / be_lev)
                             # Persist BE lock to DB so it survives restarts
                             await self._persist_be_lock(agent_name, pos)
                             logger.info(
-                                "BE LOCK %s %s %s @%.6g → SL=%.6g lev=100x alloc=%.4f",
+                                "BE LOCK %s %s %s @%.6g → SL=%.6g lev=%.0fx alloc=%.4f",
                                 agent_name, pos["symbol"], pos["direction"],
-                                pos["entry"], pos["sl"], pos["allocated"])
+                                pos["entry"], pos["sl"], pos["leverage"], pos["allocated"])
 
             for pos, exit_px, reason, ts in to_close:
                 await self._close_agent_position(agent_name, pos, exit_px, reason)

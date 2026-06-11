@@ -39,23 +39,35 @@ logger = logging.getLogger("tickles.intelligence.trade_intel")
 # Detection patterns
 # ---------------------------------------------------------------------------
 # SL to breakeven: "sl to be", "moving stop to breakeven", "stops at be now"
+# The bare "sl to be" form (2nd alt) excludes English continuations like
+# "SL to be determined/confirmed/decided/safe/announced" via negative
+# lookahead, so chatter doesn't trigger a false breakeven move.
+_BE_NOT_TRADING = r"(?!\s*(?:determined|confirmed|decided|set\b|safe|announced|adjusted|updated|posted|shared|revealed|honest|fair|clear))"
 _SL_BE_RE = re.compile(
     r"\b(?:mov(?:e|ed|ing)?|set|put|trail(?:ed|ing)?)\s+(?:my\s+|the\s+)?"
     r"(?:sl|stop(?:\s*loss)?|stops)\s+(?:to|at|->)?\s*"
     r"(?:be|b/e|break\s*even|breakeven|entry)\b"
-    r"|\b(?:sl|stop(?:\s*loss)?)\s*(?:->|to|at)\s*(?:be|b/e|break\s*even|breakeven)\b",
+    r"|\b(?:sl|stop(?:\s*loss)?)\s*(?:->|to|at)\s*(?:b/e|break\s*even|breakeven)\b"
+    r"|\b(?:sl|stop(?:\s*loss)?)\s*(?:->|to|at)\s*be\b" + _BE_NOT_TRADING,
     re.IGNORECASE,
 )
 
-# SL to explicit price: "moving sl to 97.5", "stop now at 71200"
+# SL to explicit price: "moving sl to 97.5", "raise sl to 71200".
+# REQUIRES an explicit movement verb (mov/set/put/raise/lower/trail) — the
+# verb-less "sl at 70800" form was removed because it matched NEW trade
+# setups ("BTC long entry 71500 sl at 70800"), hijacking the existing
+# position and suppressing the new signal.
 _SL_PRICE_RE = re.compile(
-    r"\b(?:mov(?:e|ed|ing)?|set|put|rais(?:e|ed|ing)|lower(?:ed|ing)?|trail(?:ed|ing)?)\s+"
-    r"(?:my\s+|the\s+)?(?:sl|stop(?:\s*loss)?)\s+(?:to|at|->)\s*\$?([\d]+(?:\.[\d]+)?)\b"
-    r"|\b(?:sl|stop(?:\s*loss)?)\s+(?:now\s+)?(?:to|at|->)\s*\$?([\d]+(?:\.[\d]+)?)\b",
+    r"\b(?:mov(?:e|ed|ing)?|set|put|rais(?:e|ed|ing)|lower(?:ed|ing)?|trail(?:ed|ing)?|push(?:ed|ing)?|bump(?:ed|ing)?)\s+"
+    r"(?:my\s+|the\s+)?(?:sl|stop(?:\s*loss)?)\s+(?:now\s+)?(?:to|at|->)\s*\$?([\d]+(?:\.[\d]+)?)\b",
     re.IGNORECASE,
 )
 
-# Close: "closed my sol short", "closing btc here", "out of eth", "fully closed"
+# Close: "closed my sol short", "closing btc here", "out of eth", "fully closed".
+# Excludes partial-close phrasing ("close half", "closing partially", "cut in
+# half") — those are routed to _PARTIAL_RE. The negative lookahead after the
+# verb prevents "cut my position in half" / "closing partially" from matching
+# as a FULL close.
 _CLOSE_RE = re.compile(
     r"\b(?:clos(?:e|ed|ing)|exit(?:ed|ing)?|out\s+of|killed|cut)\s+"
     r"(?:my\s+|the\s+|this\s+)?(?:[a-z0-9/]{2,12}\s+)?"
@@ -64,10 +76,15 @@ _CLOSE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Partial: "taking partials", "took 50% off", "trimming here", "taking some off the table"
+# Partial: "taking partials", "took 50% off", "trimming here", "closing half",
+# "cut in half", "closing partially", "scaling out", "off the table".
+# Checked BEFORE close in detect_trade_intel, and "half"/"partial(ly)" phrasing
+# is captured here so it is not mistaken for a full close.
 _PARTIAL_RE = re.compile(
     r"\b(?:tak(?:e|en|ing)|took)\s+(?:some\s+|partial?s?|(\d{1,3})\s*%)\s*(?:off|profit)?\b"
-    r"|\bpartials?\b|\btrim(?:med|ming)?\b|\bscal(?:e|ed|ing)\s+out\b"
+    r"|\bpartials?\b|\bpartially\b|\btrim(?:med|ming)?\b|\bscal(?:e|ed|ing)\s+out\b"
+    r"|\b(?:clos(?:e|ed|ing)|cut|took|take|taking|sold|selling|trim(?:med|ming)?)\b[^.!?\n]{0,30}?\bin\s+half\b"
+    r"|\b(?:clos(?:e|ed|ing)|cut|took|take|taking|sold|selling)\s+(?:[a-z0-9/]{0,12}\s+)?half\b"
     r"|\boff\s+the\s+table\b",
     re.IGNORECASE,
 )
@@ -92,8 +109,8 @@ def detect_trade_intel(text: str) -> Optional[Dict[str, Any]]:
          "symbol": "SOL" | None}         # bare base if one was mentioned
 
     Order matters: SL-to-BE is checked before generic SL-move (BE messages
-    also contain 'sl to'), and close before partial ('closing half' is a
-    partial -- the % capture disambiguates).
+    also contain 'sl to'), and PARTIAL is preferred over CLOSE when both match
+    ('closing half' / 'cut in half' / 'closing partially' are partials).
     """
     if not text or len(text) > 1500:
         return None
@@ -105,7 +122,7 @@ def detect_trade_intel(text: str) -> Optional[Dict[str, Any]]:
     else:
         m = _SL_PRICE_RE.search(text)
         if m:
-            price_str = m.group(1) or m.group(2)
+            price_str = m.group(1)  # single capture group (verb-required form)
             try:
                 intel = {"kind": "move_sl", "price": float(price_str), "pct": None}
             except (TypeError, ValueError):
@@ -113,7 +130,10 @@ def detect_trade_intel(text: str) -> Optional[Dict[str, Any]]:
     if intel is None:
         pm = _PARTIAL_RE.search(text)
         cm = _CLOSE_RE.search(text)
-        if pm and not cm:
+        # PARTIAL wins over CLOSE: "closing half my SOL" matches both, but it
+        # is a partial exit, not a full close. Only treat as a full close when
+        # partial phrasing is absent.
+        if pm:
             pct = None
             if pm.group(1):
                 try:
@@ -122,11 +142,7 @@ def detect_trade_intel(text: str) -> Optional[Dict[str, Any]]:
                     pct = None
             intel = {"kind": "partial", "price": None, "pct": pct}
         elif cm:
-            # "closing half" / "closed 50%" is a partial, not a full close
-            if pm and pm.group(1):
-                intel = {"kind": "partial", "price": None, "pct": int(pm.group(1))}
-            else:
-                intel = {"kind": "close", "price": None, "pct": None}
+            intel = {"kind": "close", "price": None, "pct": None}
 
     if intel is None:
         return None
@@ -212,7 +228,7 @@ async def apply_trade_intel(
                            SET stop_loss = entry_price,
                                exit_reason_trader = COALESCE(exit_reason_trader,'') ||
                                    '[' || $2 || '] SL->BE: ' || $3 || E'\n'
-                           WHERE id = $1""",
+                           WHERE id = $1 AND status IN ('open','partial_exit')""",
                         pid, now.isoformat(), note,
                     )
                 elif kind == "move_sl" and intel.get("price"):
@@ -221,7 +237,7 @@ async def apply_trade_intel(
                            SET stop_loss = $2,
                                exit_reason_trader = COALESCE(exit_reason_trader,'') ||
                                    '[' || $3 || '] SL moved: ' || $4 || E'\n'
-                           WHERE id = $1""",
+                           WHERE id = $1 AND status IN ('open','partial_exit')""",
                         pid, float(intel["price"]), now.isoformat(), note,
                     )
                 elif kind == "close":
@@ -234,6 +250,8 @@ async def apply_trade_intel(
                            SET status = 'closed',
                                exit_price = $2,
                                exit_timestamp = NOW(),
+                               closed_at = COALESCE(closed_at, NOW()),
+                               outcome = 'manual_close',
                                exit_reason = 'trader_exit',
                                exit_reason_trader = COALESCE(exit_reason_trader,'') ||
                                    '[' || $3 || '] trader closed: ' || $4 || E'\n',

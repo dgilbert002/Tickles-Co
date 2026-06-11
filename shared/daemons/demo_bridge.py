@@ -75,7 +75,7 @@ DEMO_NOTIONAL_SAFETY_PCT = float(os.environ.get("DEMO_NOTIONAL_SAFETY_PCT", "0.9
 AGENT_MODE: Dict[str, str] = {
     "copy_spot_seq":        "spot_seq",     # full wallet, 1x, sequential
     "copy_opt_spot_seq":    "spot_seq",
-    "copy_charthacker":     "spot_seq",     # mirrors chart_hacker — full wallet, 1x, sequential
+    "copy_charthacker":     "spot_seq_ch",  # mirrors chart_hacker paper agent: 3% risk, dynamic leverage from SL (NOT full wallet 1x)
     "copy_rose_a":          "spot_seq",
     "copy_spot_lev_3x":     "spot_lev_3x",  # full wallet, 3x, sequential
     "copy_lev_3pct":        "lev_3pct",     # 3% risk, lev from SL, parallel
@@ -89,7 +89,7 @@ AGENT_MODE: Dict[str, str] = {
 # Max concurrent OPEN demo positions per account, by mode — mirrors the paper
 # agent's concurrency rule so the demo never over-places and exhausts margin.
 MODE_MAX_CONCURRENT: Dict[str, int] = {
-    "spot_seq": 5, "spot_lev_3x": 3, "lev_3pct": 33, "lev_5pct": 20,
+    "spot_seq": 5, "spot_seq_ch": 33, "spot_lev_3x": 3, "lev_3pct": 33, "lev_5pct": 20,
 }
 # Risk % / leverage knobs (env-tunable; defaults match copy_trade_monitor).
 DEMO_RISK_PCT_5  = float(os.environ.get("DEMO_RISK_PCT_5",  "5.0"))
@@ -206,6 +206,10 @@ class DemoBridge:
 
         if mode == "spot_seq":
             allocated, leverage = bal, 1.0
+        elif mode == "spot_seq_ch":
+            # chart_hacker copier: 3% risk, dynamic leverage from SL distance —
+            # identical to copy_trade_monitor's spot_seq_ch branch.
+            allocated, leverage = bal * (DEMO_RISK_PCT_3 / 100.0), lev_from_sl
         elif mode == "spot_lev_3x":
             allocated, leverage = bal, DEMO_SPOT_LEV_3X
         elif mode == "lev_3pct":
