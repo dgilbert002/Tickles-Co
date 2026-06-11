@@ -1,0 +1,282 @@
+/* BIBLE-P6 v6 — unread counters, linkify, role colors, scroll anchoring, all users. */
+(function () {
+  "use strict";
+  var API = (location.pathname.startsWith("/dashboard") ? "/dashboard" : "") + "/api/discord";
+  var state = { source:"discord", channel:null, tree:[], timer:null, filter:"",
+    unread:{}, lastSeen:{}, scrolledToBottom:true, lastChannel:null };
+
+  var el = function(t,a,b){var e=document.createElement(t);if(a)e.className=a;if(b!=null)e.textContent=b;return e;};
+  var esc = function(s){return s==null?"":String(s);};
+
+  // Load saved last channel from localStorage
+  try { state.lastChannel = localStorage.getItem("dsc_lastChannel") || null; } catch(e){}
+
+  /* ---- linkify: turn URLs into clickable links ---- */
+  function linkify(text) {
+    if (!text) return "";
+    text = esc(text);
+    return text.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  }
+
+  /* ---- CATEGORIES ---- */
+  var CATEGORIES = [
+    {name:"GETTING STARTED", chans:["\u26d3\ufe0f\u200d\ud83d\udca5\u30fb links-and-referrals","\ud83d\uddd3\ufe0f\u30fb calendar-events"]},
+    {name:"COMMUNITY HUB", chans:["\ud83d\udce3\u30fb announcements","\ud83e\udda7\u30fb trading-zone"]},
+    {name:"THE LORD OF ENTRY", chans:["\ud83d\udcc6\u30fb daily-market-updates","\ud83d\udcb8\u30fb altcoin-trading-setups","\ud83d\udcb9\u30fb stonks-indices-setups","\ud83e\ude99\u30fb metals-commodities","\ud83d\udcc8\u30fb crypto-long-term","\ud83c\udf34\u30fb wen-n-tree\ud83c\udf34"]},
+    {name:"CHAOSS", chans:["\ud83d\udcc9\u30fb charts-and-setups","\ud83d\uddde\ufe0f\u30fb daily-update","\u2753\u30fb ask-chaoss"]},
+    {name:"DEGEN DAVID", chans:["\ud83d\udcc8\u30fb charts-and-setups","\u2753\u30fb ask-david"]},
+    {name:"SKILLED TRADERS", chans:["\ud83d\udc3c\u30fb panda-trades","\ud83d\udc41\ufe0f\u30fb trader-j-trades","\ud83e\udd6f\u30fb nagel-trades"]},
+    {name:"CHART PRIME", chans:["\ud83d\udcca\u30fb charts-and-setups","\u2753\u30fb ask-chartprime"]},
+    {name:"HACKER OPS", chans:["\ud83d\udcb2\u30fb 20-club-action","\ud83d\udcb2\u30fb 20-gen-chat"]},
+    {name:"MORE CHANNELS", chans:["\u2716\ufe0f\u30fb trading-xcelerator","\ud83d\udcdd\u30fb back-2-basics","\ud83d\udcbb\u30fb alpha-zone","\ud83d\udcb0\u30fb live-show-charts","\ud83c\udfa5\u30fb recordings","\ud83d\udcb0\u30fb zoom-charts","\ud83c\udfa7\u30fb Hacker Beats \ud83d\udd0a","\ud83c\udfa4\u30fb Hacker Stage \ud83d\udd0a"]}
+  ];
+  function findCat(name) {
+    for (var i=0;i<CATEGORIES.length;i++){if(CATEGORIES[i].chans.indexOf(name)!==-1)return CATEGORIES[i];}
+    return null;
+  }
+
+  /* ---- unread tracking ---- */
+  function getUnread(ch) { var u=state.unread[ch]; if(!u){u={count:0,last:0}; state.unread[ch]=u;} return u; }
+
+  /* ---------- TREE ---------- */
+  async function loadTree() {
+    try {
+      var r=await fetch(API+"/tree?source="+state.source); var j=await r.json();
+      state.tree=j.tree||[]; renderTree();
+    }catch(e){console.error("tree:",e);}
+  }
+
+  function renderTree() {
+    var side=document.getElementById("dscSidebar"); if(!side)return;
+    side.innerHTML="";
+    var catMap={}, uncat=[];
+    state.tree.forEach(function(n){
+      if(n.entity_type!=="channel")return;
+      var c=findCat(n.name); if(c){if(!catMap[c.name])catMap[c.name]={cat:c,chans:[]}; catMap[c.name].chans.push(n);}
+      else { uncat.push(n); }
+    });
+    CATEGORIES.forEach(function(cat){
+      var e=catMap[cat.name]; if(!e)return;
+      side.appendChild(el("div","dsc-cat",cat.name));
+      e.chans.forEach(function(n){
+        if(state.filter&&(n.name||"").toLowerCase().indexOf(state.filter)===-1)return;
+        var dis=(n.name||"").replace(/^[^a-z0-9]+/i,"");
+        var u=getUnread(n.name), hasNew=u.count>0;
+        var row=el("div","dsc-chan"+(state.channel===n.name?" dsc-selected":"")+(hasNew?" dsc-unread":""));
+        row.appendChild(el("span","dsc-hash","#"));
+        row.appendChild(el("span","",dis));
+        if(hasNew){
+          var badge=el("span","dsc-count"+(u.mention?" dsc-mention":""));
+          badge.textContent=u.count>99?"99+":String(u.count);
+          row.appendChild(badge);
+        }
+        row.addEventListener("click",function(){selectChannel(n.name,dis);});
+        side.appendChild(row);
+      });
+    }
+    if(uncat.length){
+      side.appendChild(el("div","dsc-cat","OTHER"));
+      uncat.forEach(function(n){
+        if(state.filter&&(n.name||"").toLowerCase().indexOf(state.filter)===-1)return;
+        var dis=(n.name||"").replace(/^[^a-z0-9]+/i,"");
+        var row=el("div","dsc-chan"+(state.channel===n.name?" dsc-selected":""));
+        row.appendChild(el("span","dsc-hash","#"));
+        row.appendChild(el("span","",dis));
+        row.addEventListener("click",function(){selectChannel(n.name,dis);});
+        side.appendChild(row);
+      });
+    });
+  }
+
+  /* ---------- FEED ---------- */
+  function selectChannel(name,disName){
+    state.channel=name; state.scrolledToBottom=true;
+    // clear unread for this channel
+    if(state.unread[name]){ state.unread[name].count=0; state.unread[name].mention=false; }
+    try{localStorage.setItem("dsc_lastChannel",name);}catch(e){}
+    renderTree();
+    document.getElementById("dscTitle").textContent="# "+(disName||name);
+    loadFeed();
+  }
+
+  var _busy=false;
+  function loadFeed(){
+    if(!state.channel||_busy)return; _busy=true;
+    fetch(API+"/feed?source="+state.source+"&channel="+encodeURIComponent(state.channel)+"&limit=100")
+      .then(function(r){return r.json();}).then(function(j){
+        var items=(j.items||[]).slice().reverse();
+        var river=document.getElementById("dscRiver"); if(!river){_busy=false;return;}
+        var wasScrolled=river.scrollHeight-river.scrollTop-river.clientHeight<60;
+        // only clear if this is a fresh channel load (scrolledToBottom=true after selectChannel)
+        if(state.scrolledToBottom){ river.innerHTML=""; state.scrolledToBottom=false; }
+        var oldChildren=river.children.length;
+        var prev=null, added=0;
+        items.forEach(function(it){
+          if(!it.id)return;
+          // skip if already rendered
+          if(river.querySelector('[data-id="'+it.id+'"]'))return;
+          var gs=it.author!==prev;
+          var wrap=renderMsg(it,gs); wrap.setAttribute("data-id",it.id);
+          river.appendChild(wrap);
+          prev=it.author; added++;
+        });
+        if(wasScrolled||state.scrolledToBottom) river.scrollTop=river.scrollHeight;
+        _busy=false;
+      }).catch(function(e){console.error("feed:",e);_busy=false;});
+  }
+
+  function renderMsg(it,groupStart){
+    var wrap=el("div","dsc-msg"+(groupStart?" dsc-groupstart":""));
+    // reply-on-top
+    if(it.reply_to_msg_id){
+      var rep=el("div","dsc-reply");
+      rep.appendChild(el("span","dsc-reply-author",esc(it.reply_to_author||"?")));
+      rep.appendChild(el("span","dsc-reply-text",esc(it.reply_to_content||"")));
+      wrap.appendChild(rep);
+    }
+    if(groupStart){
+      var av=el("div","dsc-avatar");
+      av.style.background="#"+(hashColor(it.author||"?"));
+      av.textContent=(it.author||"?")[0].toUpperCase();
+      wrap.appendChild(av);
+      var hl=el("div","dsc-header-line");
+      var un=el("span","dsc-username",esc(it.author||"?"));
+      if(it.author_role_color)un.style.color=it.author_role_color;
+      hl.appendChild(un);
+      hl.appendChild(el("span","dsc-timestamp",fmtTime(it.collected_at)));
+      wrap.appendChild(hl);
+    }
+    if(it.content){
+      var ct=el("div","dsc-content");
+      ct.innerHTML=linkify(it.content);
+      wrap.appendChild(ct);
+    }
+
+    // images from metadata.media_urls
+    var meta=it.metadata||{};
+    var urls=meta.media_urls||[];
+    if(typeof urls==="string"){try{urls=JSON.parse(urls);}catch(e){urls=[];}}
+    if(!Array.isArray(urls))urls=[];
+    var lp=it.local_media_paths||[];
+    if(typeof lp==="string"){try{lp=JSON.parse(lp);}catch(e){lp=[];}}
+    if(!Array.isArray(lp))lp=[];
+    urls.concat(lp).forEach(function(src){
+      var box=el("div","dsc-attach");
+      var img=el("img");
+      if(src.indexOf("http")===0||src.indexOf("/api/discord/media/")===0)img.src=src;
+      else if(src.indexOf("/")===0)img.src=src;
+      else img.src=API+"/media/"+encodeURI(src);
+      img.loading="lazy";
+      img.addEventListener("click",function(e){e.stopPropagation();openLightbox(img.src);});
+      box.appendChild(img);wrap.appendChild(box);
+    });
+
+    // AI analysis
+    var ai=el("div","dsc-ai");
+    var enr=it.enrichment||{};
+    var parts=[];
+    if(it.enrichment_status)parts.push("<b>"+esc(it.enrichment_status)+"</b>");
+    if(enr.summary)parts.push("<div>"+esc(enr.summary)+"</div>");
+    if(enr.reason)parts.push("<div>"+esc(enr.reason)+"</div>");
+    if(it.instruments&&it.instruments!=="[]")parts.push("<div><b>Symbols:</b> "+esc(String(it.instruments))+"</div>");
+    ai.innerHTML=parts.join("")||"<i>analysis pending</i>";
+    wrap.appendChild(ai);
+    wrap.addEventListener("click",function(){wrap.classList.toggle("dsc-expanded");});
+    return wrap;
+  }
+
+  function hashColor(s){
+    var h=0,i;for(i=0;i<s.length;i++)h=s.charCodeAt(i)+((h<<5)-h);
+    h=((h%360)+360)%360;
+    return hsl2hex(h,55,45);
+  }
+  function hsl2hex(h,s,l){
+    s/=100;l/=100;var a=s*Math.min(l,1-l);var f=function(n){var k=(n+h/30)%12;var c=l-a*Math.max(-1,Math.min(k-3,9-k,1));return Math.round(c*255).toString(16).padStart(2,"0");};
+    return f(0)+f(8)+f(4);
+  }
+  function fmtTime(iso){try{var d=new Date(iso);return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}catch(e){return"";}}
+
+  function openLightbox(src){
+    var lb=document.getElementById("dscLightbox");
+    if(!lb){lb=el("div","dsc-lightbox");lb.id="dscLightbox";var i=el("img");lb.appendChild(i);lb.addEventListener("click",function(){lb.classList.remove("dsc-open");});document.body.appendChild(lb);}
+    lb.querySelector("img").src=src;lb.classList.add("dsc-open");
+  }
+
+  /* ---------- REFRESH + UNREAD TRACKING ---------- */
+  var _poll=null;
+  function startPoll(){stopPoll();_poll=setInterval(pollUnread,3000);}
+  function stopPoll(){if(_poll)clearInterval(_poll);_poll=null;}
+
+  function pollUnread(){
+    if(!state.channel)return; // only track unread for selected channel's tree
+    // Check for new messages across all channels by fetching recent feed
+    fetch(API+"/feed?source="+state.source+"&limit=500").then(function(r){return r.json();}).then(function(j){
+      var items=j.items||[];
+      var counts={};
+      items.forEach(function(it){
+        var ch=it.channel_name; if(!ch)return;
+        if(!counts[ch])counts[ch]={count:0,last:0,mention:false};
+        counts[ch].count++;
+        if(it.id>(counts[ch].last||0))counts[ch].last=it.id;
+        if(it.content&&it.content.toLowerCase().indexOf("@everyone")!==-1)counts[ch].mention=true;
+      });
+      // Update unread state
+      Object.keys(counts).forEach(function(ch){
+        var u=getUnread(ch);
+        if(state.channel===ch){u.count=0;u.mention=false;return;}
+        var c=counts[ch];
+        if(c.last>u.last){u.count+=c.count;u.last=c.last;if(c.mention)u.mention=true;}
+      });
+      renderTree();
+    }).catch(function(e){});
+  }
+
+  /* ---------- CONFIG ---------- */
+  var MEDIA_OPTS=[["none","None"],["text","Text only"],["text_images","Text+images"],["everything","Everything"]];
+  function renderConfig(){
+    var host=document.getElementById("dscConfig");if(!host)return;host.innerHTML="";
+    state.tree.filter(function(n){return n.entity_type==="channel";}).forEach(function(n){
+      var r=el("div","dsc-cfg-row");
+      var cb=el("input");cb.type="checkbox";cb.checked=!!n.enabled;
+      cb.addEventListener("change",function(){saveCfg(n.id,{enabled:cb.checked},r);});
+      r.appendChild(cb);
+      r.appendChild(el("span","dsc-cfg-name","#"+(n.name||"").replace(/^[^a-z0-9]+/i,"")));
+      var sel=el("select","dsc-cfg-media");
+      MEDIA_OPTS.forEach(function(vl){var o=el("option","",vl[1]);o.value=vl[0];if((n.media_policy||"text_images")===vl[0])o.selected=true;sel.appendChild(o);});
+      sel.addEventListener("change",function(){saveCfg(n.id,{media_policy:sel.value},r);});
+      r.appendChild(sel);
+      var echo=el("span","dsc-cfg-echo");echo.textContent=(n.enabled?"on":"off")+" \u00b7 "+(n.media_policy||"text_images");r.appendChild(echo);
+      host.appendChild(r);
+    });
+  }
+  function saveCfg(sid,patch,rowEl){
+    if(rowEl)rowEl.style.opacity="0.5";
+    fetch(API+"/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({source_id:sid},patch))})
+      .then(function(r){return r.json();}).then(function(j){
+        var node=state.tree.find(function(n){return n.id===sid;});
+        if(node)Object.assign(node,patch);renderConfig();if(rowEl)rowEl.style.opacity="";
+      });
+  }
+  function setMode(mode){
+    document.getElementById("dscFeedView").style.display=(mode==="feed")?"":"none";
+    document.getElementById("dscConfigView").style.display=(mode==="config")?"":"none";
+    if(mode==="config")renderConfig();
+  }
+
+  /* ---------- BOOT ---------- */
+  function boot(){
+    var search=document.getElementById("dscSearch");
+    if(search)search.addEventListener("input",function(){state.filter=search.value.trim().toLowerCase();renderTree();});
+    var mf=document.getElementById("dscModeFeed"),mc=document.getElementById("dscModeConfig");
+    if(mf)mf.addEventListener("click",function(){mf.classList.add("dsc-modebtn-active");mc.classList.remove("dsc-modebtn-active");setMode("feed");});
+    if(mc)mc.addEventListener("click",function(){mc.classList.add("dsc-modebtn-active");mf.classList.remove("dsc-modebtn-active");setMode("config");});
+    loadTree().then(function(){
+      if(state.lastChannel){
+        var dis=(state.lastChannel||"").replace(/^[^a-z0-9]+/i,"");
+        selectChannel(state.lastChannel,dis);
+      }
+    });
+    startPoll();
+  }
+  window.DiscordFeed={boot:boot,loadTree:loadTree,selectChannel:selectChannel,stop:stopPoll,setMode:setMode,renderConfig:renderConfig};
+})();

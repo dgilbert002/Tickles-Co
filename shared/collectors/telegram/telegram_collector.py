@@ -228,6 +228,18 @@ def _group_messages(
             except Exception:
                 pass
 
+            # BIBLE-P3: Telegram reply-chain capture (parity with Discord).
+            # Uses msg.reply_to inline (sync) to avoid an async refactor.
+            reply_to_msg_id = None
+            reply_to_author = None
+            reply_to_content = None
+            try:
+                reply = getattr(msg, "reply_to", None)
+                if reply and getattr(reply, "reply_to_msg_id", None):
+                    reply_to_msg_id = str(reply.reply_to_msg_id)
+            except Exception:
+                pass
+
             media_type = None
             if msg.photo:
                 media_type = "photo"
@@ -242,6 +254,9 @@ def _group_messages(
                 "sender_id": sender_id,
                 "sender_name": sender_name,
                 "sender_username": sender_username,
+                "reply_to_msg_id": reply_to_msg_id,      # BIBLE-P3
+                "reply_to_author": reply_to_author,      # BIBLE-P3
+                "reply_to_content": reply_to_content,    # BIBLE-P3
                 "first_date": msg_date or datetime.now(timezone.utc),
                 "last_date": msg_date or datetime.now(timezone.utc),
                 "messages": [msg],
@@ -322,6 +337,10 @@ def _finalize_group(group: Dict[str, Any]) -> Dict[str, Any]:
         "media_path": group.get("media_path"),
         "media_urls": group.get("media_urls", []),
         "metadata": metadata,
+        # BIBLE-P3: reply-chain passthrough
+        "reply_to_msg_id": group.get("reply_to_msg_id"),
+        "reply_to_author": group.get("reply_to_author"),
+        "reply_to_content": group.get("reply_to_content"),
     }
 
 
@@ -632,7 +651,8 @@ class TelegramCollector(BaseCollector):
             True if item should proceed to DB write (not dropped by rate limit).
             False if item was dropped (should not be written).
         """
-        cid = f"telegram_{channel_id}_{item.hash_key[:16]}"
+        # BIBLE-P1: keep correlation_id <=36 chars. 't_' + hash[:16] = <=18 chars.
+        cid = f"t_{item.hash_key[:16]}"
 
         # --- Phase 9 [BB] rate limiter ---
         default_rate = float(os.environ.get("TELEGRAM_RATE_LIMIT_MSGS_PER_SEC", "30"))
@@ -837,6 +857,10 @@ class TelegramCollector(BaseCollector):
                             media_path=finalized.get("media_path"),
                             media_urls=finalized.get("media_urls", []),
                             metadata=finalized.get("metadata", {}),
+                            # BIBLE-P3: persist reply-chains
+                            reply_to_msg_id=finalized.get("reply_to_msg_id"),
+                            reply_to_author=(finalized.get("reply_to_author") or "")[:255],
+                            reply_to_content=(finalized.get("reply_to_content") or "")[:2000] or None,
                         )
                         item.hash_key = finalized["hash_key"]
 

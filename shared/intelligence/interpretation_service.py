@@ -1493,16 +1493,47 @@ async def run_llm_track(
 # ---------------------------------------------------------------------------
 # Quant Track
 # ---------------------------------------------------------------------------
+def _resolve_quant_timeframe(chart_timeframe: Optional[str]) -> str:
+    """Map an LLM-detected chart timeframe to a candle-table canonical form.
+
+    Higher-timeframe charts deserve quant analysis at the MATCHING resolution.
+    Returns canonical forms: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w. Defaults to 1m.
+    """
+    if not chart_timeframe:
+        return "1m"
+    raw = str(chart_timeframe).strip().lower()
+    if raw in ("1h", "4h", "1d", "1w", "1m", "5m", "15m", "30m"):
+        return raw
+    mm = re.match(r"^(\d+)([mh])$", raw)
+    if mm:
+        val, unit = int(mm.group(1)), mm.group(2)
+        if unit == "h":
+            if val <= 1: return "1h"
+            elif val <= 4: return "4h"
+            else: return "1d"
+        if unit == "m":
+            return "1m" if val <= 1 else ("5m" if val <= 5 else ("15m" if val <= 15 else ("30m" if val <= 30 else "1h")))
+    if raw in ("daily", "day"): return "1d"
+    if raw in ("weekly", "week"): return "1w"
+    return "1m"
+
+
 async def run_quant_track(
     shared_pool: DatabasePool,
     company_pool: DatabasePool,
     instrument_symbol: str,
     exchange: str,
     freshness_threshold: float,
+    timeframe_hint: Optional[str] = None,
 ) -> QuantResult:
     """Run the quant indicator track: read recent candles, compute lightweight signals.
 
-    Reads the last 100 1m candles for the instrument, computes RSI(14), EMA(20/50),
+    Reads the last 100 candles for the instrument. When ``timeframe_hint`` is
+    provided (LLM-detected chart timeframe), candles of the matching resolution
+    are used. Falls back to 1m when no hint or unavailable.
+
+    Reads the last 100 candles for the instrument, computes RSI(14), EMA(20/50),
+    ATR(14), and Bollinger(20,2). Derives a directional score from the ensemble.
     ATR(14), and Bollinger(20,2). Derives a directional score from the ensemble.
 
     If the instrument is not registered in ``public.instruments`` under the given
@@ -1557,14 +1588,19 @@ async def run_quant_track(
         )
         return await _quant_degraded_from_ccxt(instrument_symbol, exch)
 
-    # Fetch last 100 1m candles (shared DB)
+    # Resolve the timeframe to query (LLM hint or 1m fallback).
+    _tf = _resolve_quant_timeframe(timeframe_hint)
+    logger.debug("Quant track: %s@%s timeframe=%s (hint=%s)",
+                 instrument_symbol, exchange, _tf, timeframe_hint)
+
+    # Fetch last 100 candles at the resolved timeframe (shared DB)
     try:
         candles = await shared_pool.fetch_all(
             "SELECT timestamp, open, high, low, close, volume "
             "FROM public.candles "
-            "WHERE instrument_id = $1 AND source = $2 AND timeframe = '1m' "
+            "WHERE instrument_id = $1 AND source = $2 AND timeframe = $3 "
             "ORDER BY timestamp DESC LIMIT 100",
-            (instrument_id, exch),
+            (instrument_id, exch, _tf),
         )
     except Exception as exc:
         logger.warning(
@@ -4634,6 +4670,7 @@ class InterpretationService:
             instrument_symbol=symbol,
             exchange=exchange,
             freshness_threshold=self.cfg.freshness_threshold_s,
+            timeframe_hint=llm_result.timeframe if llm_result and llm_result.timeframe else None,
         )
 
         # --- Stamp interpretation-time price into quant_indicators (Slice 2) ---

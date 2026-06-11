@@ -521,6 +521,19 @@ async def _handle_reinterpret(p: Dict[str, Any]) -> Dict[str, Any]:
         if llm.timeframe:
             pass  # surfaced in response
 
+        # Re-run quant at the LLM-detected chart timeframe when available.
+        # Higher-timeframe charts (4h, 1d) get matching candles instead of
+        # irrelevant 1m noise — a long-entry at daily support with bearish 1m
+        # momentum is a correct trade, not a disagreement.
+        if include_quant and quant is not None and llm.timeframe:
+            try:
+                quant = await run_quant_track(
+                    pool, pool, symbol, exchange, cfg.freshness_threshold_s,
+                    timeframe_hint=llm.timeframe,
+                )
+            except Exception:
+                pass  # keep original quant result on failure
+
         parsed = _parse_llm_json(llm.raw_response)
         if include_quant and quant is not None:
             consensus = run_consensus(llm, quant)

@@ -1,0 +1,10 @@
+{
+  "starting_balance": 10000.0,
+  "balance": 10000.0,
+  "realized_pnl": 0.0,
+  "total_fees": 0.0,
+  "cumulative_turnover": 0.0,
+  "trade_counter": 0,
+  "positions": [],
+  "closed": []
+}

@@ -27,14 +27,10 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-import httpx
-
 from shared.utils.db import DatabasePool
 
 logger = logging.getLogger("tickles.intelligence.symbol_learner")
 
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-RESOLVER_MODEL = os.getenv("SYMBOL_RESOLVER_MODEL", "google/gemini-2.0-flash-001")
 PRIORITY_EXCHANGES = ("bybit", "blofin", "bitget", "capital.com")
 
 
@@ -91,17 +87,11 @@ def _build_instruments_text(instruments: List[InstrumentSummary]) -> str:
 
 
 async def _llm_resolve_symbols(
-    unknowns: List[Tuple[str, str]],  # (raw_symbol, cleaned_base)
+    unknowns: List[Tuple[str, str]],
     instruments_text: str,
 ) -> Dict[str, Optional[dict]]:
-    """Ask the LLM to map unknown symbols to known instruments.
-
-    Returns: {raw_symbol: {exchange, symbol, base, asset_type} or None}
-    """
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        logger.error("symbol_learner: OPENROUTER_API_KEY not set")
-        return {s: None for s, _ in unknowns}
+    """Ask the LLM to map unknown symbols via the gateway (text_extract slot)."""
+    from shared.intelligence.gateway_config import chat_completion, resolve_slot_gateway
 
     unknown_list = "\n".join(
         f"  {i+1}. raw='{raw}' cleaned='{base}'"
@@ -132,53 +122,42 @@ RULES:
    Do NOT invent instruments. Output ONLY the JSON array, no explanation."""
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{OPENROUTER_BASE}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": RESOLVER_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 2000,
-                    "temperature": 0.0,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            
-            # Parse JSON — may be wrapped in ```json blocks
-            content = re.sub(r"```(?:json)?\s*", "", content).strip()
-            content = re.sub(r"```\s*$", "", content).strip()
-            
-            result = json.loads(content)
-            items = result if isinstance(result, list) else result.get("matches", [])
-            
-            # Build lookup dict
-            resolved: Dict[str, Optional[dict]] = {s: None for s, _ in unknowns}
-            for item in items:
-                raw = item.get("raw", "")
-                if raw in resolved:
-                    resolved[raw] = {
-                        "exchange": item.get("exchange", ""),
-                        "symbol": item.get("symbol", ""),
-                        "base": item.get("base", ""),
-                        "asset_type": item.get("asset_type", "unknown"),
-                        "llm_response": content[:2000],
-                    }
-            
-            logger.info(
-                "symbol_learner: resolved %d/%d unknowns",
-                sum(1 for v in resolved.values() if v), len(unknowns),
-            )
-            return resolved
-
+        cfg, model = await resolve_slot_gateway("text_extract")
+        response = await chat_completion(
+            cfg=cfg,
+            model=model,
+            system_prompt="You resolve trading symbols to exchange instruments. Output JSON only. If there are many instruments, just provide the most likely matches.",
+            user_text=prompt,
+            max_tokens=8192,
+            operation="symbol_resolver",
+            agent_id="symbol_learner",
+        )
+        content = response.get("content", "")
+        content = re.sub(r"```(?:json)?\s*", "", content).strip()
+        content = re.sub(r"```\s*$", "", content).strip()
+        result = json.loads(content)
+        items = result if isinstance(result, list) else result.get("matches", [])
+        resolved: Dict[str, Optional[dict]] = {s: None for s, _ in unknowns}
+        for item in items:
+            raw = item.get("raw", "")
+            if raw in resolved:
+                resolved[raw] = {
+                    "exchange": item.get("exchange", ""),
+                    "symbol": item.get("symbol", ""),
+                    "base": item.get("base", ""),
+                    "asset_type": item.get("asset_type", "unknown"),
+                    "llm_response": content[:2000],
+                    "llm_model": model,
+                }
+        logger.info(
+            "symbol_learner: resolved %d/%d unknowns via %s",
+            sum(1 for v in resolved.values() if v),
+            len(unknowns),
+            model,
+        )
+        return resolved
     except Exception as exc:
-        logger.error("symbol_learner: LLM call failed: %s", exc)
+        logger.error("symbol_learner: gateway LLM call failed: %s", exc)
         return {s: None for s, _ in unknowns}
 
 
@@ -241,7 +220,7 @@ async def resolve_pending(pool: DatabasePool) -> int:
                     mapping["exchange"],
                     mapping["symbol"],
                     mapping["asset_type"],
-                    RESOLVER_MODEL,
+                    mapping.get("llm_model", "text_extract"),
                     mapping.get("llm_response", "")[:2000],
                 ),
             )

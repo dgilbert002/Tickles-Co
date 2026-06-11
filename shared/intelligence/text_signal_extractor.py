@@ -95,60 +95,48 @@ _TRADING_EMOJIS = [
     "\u274c",      # cross
 ]
 
-# Keywords that strongly indicate a trade signal
-_SIGNAL_KEYWORDS = [
-    "entry", "stop loss", "take profit", "target", "sl", "tp",
-    "long", "short", "buy", "sell", "setup", "position",
-    "leverage", "margin", "call", "signal", "trade",
-    "breakout", "support", "resistance", "trend",
-]
+# Word-bounded signal keywords. Dropped "trade", "call", "trend" (too
+# ambiguous even word-bounded: "nice call", "tradingview", "trending").
+_SIGNAL_KW_RE = re.compile(
+    r"(?:entry|entries|stop[\s-]?loss|take[\s-]?profit|target|targets|"
+    r"sl|tp\d?|long|short|buy|sell|setup|position|leverage|margin|signal|"
+    r"breakout|support|resistance)",
+    re.IGNORECASE,
+)
 
-# Keywords that indicate commentary / non-signal
-_COMMENTARY_KEYWORDS = [
-    "good morning", "gm", "hello", "hi ", "how are", "thanks", "thank you",
-    "lol", "lmao", "haha", "meme", "joke", "funny", "nice", "great",
-    "congrats", "congratulations", "well done", "awesome",
-]
+_COMMENTARY_KW_RE = re.compile(
+    r"(?:good\s+morning|gm|hello|hi|hey|how\s+are|thanks|thank\s+you|"
+    r"nice|great|congrats|congratulations|well\s+done|awesome)",
+    re.IGNORECASE,
+)
+
+_MEME_KW_RE = re.compile(
+    r"(?:lol|lmao|haha+|meme|joke|funny|lambo|moon|wagmi|ngmi)",
+    re.IGNORECASE,
+)
+_MEME_EMOJIS = ("😂", "🤣", "💀", "🚀")
+
+# Price: 4-6 digit ints (BTC) OR decimals (ONDO 0.85, SOL 150.5) OR k-suffix (71.5k)
+_PRICE_ANY_RE = re.compile(
+    r"(?:\d{4,6}|\d+\.\d+|\d+(?:\.\d+)?\s?k)",
+    re.IGNORECASE,
+)
 
 
-# ---------------------------------------------------------------------------
-# Pre-filter (inspired by Jarvais V1 _passes_signal_prefilter)
-# ---------------------------------------------------------------------------
+def _signal_score(text: str) -> int:
+    """Count UNIQUE word-bounded signal keywords ('sl sl sl' scores 1)."""
+    return len({m.lower() for m in _SIGNAL_KW_RE.findall(text)})
 
-def _passes_prefilter(text: str, author: str = "") -> bool:
-    """Fast pre-filter: skip messages unlikely to contain trade signals.
 
-    Returns True if the message SHOULD be processed, False to skip.
-    """
-    if not text or len(text.strip()) < 10:
-        return False
+def _commentary_score(text: str) -> int:
+    return len({m.lower() for m in _COMMENTARY_KW_RE.findall(text)})
 
-    text_lower = text.lower()
 
-    # Skip pure commentary
-    commentary_score = sum(1 for kw in _COMMENTARY_KEYWORDS if kw in text_lower)
-    if commentary_score >= 2:
-        return False
-
-    # Check for signal keywords
-    signal_score = sum(1 for kw in _SIGNAL_KEYWORDS if kw in text_lower)
-    if signal_score >= 2:
-        return True
-
-    # Check for trading emojis
-    emoji_score = sum(1 for e in _TRADING_EMOJIS if e in text)
-    if emoji_score >= 2:
-        return True
-
-    # Check for price levels (numbers that look like prices)
-    price_matches = re.findall(r"\b\d{4,6}\b", text)
-    if len(price_matches) >= 2 and signal_score >= 1:
-        return True
-
-    # Very short messages with emojis only — might be updates
-    if emoji_score >= 1 and len(text.strip()) < 100:
-        return True
-
+def _has_symbol(text: str) -> bool:
+    """True if _SYMBOL_RE matches something not in the blacklist."""
+    for m in _SYMBOL_RE.finditer(text):
+        if m.group(1).upper() not in _BLACKLIST_WORDS:
+            return True
     return False
 
 
@@ -165,9 +153,6 @@ def _extract_with_regex(text: str) -> Optional[Dict[str, Any]]:
     Returns:
         Signal dict or None if no signal detected.
     """
-    if not _passes_prefilter(text):
-        return None
-
     # Extract symbol
     symbol_match = _SYMBOL_RE.search(text)
     symbol = symbol_match.group(1).upper() if symbol_match else None
@@ -300,9 +285,6 @@ async def _extract_with_llm(text: str, author: str = "") -> Optional[Dict[str, A
         Signal dict or None.
     """
     # Skip if pre-filter says no
-    if not _passes_prefilter(text, author):
-        return None
-
     # Round 14: provider + model from the "text_extract" slot (dashboard picker).
     from shared.intelligence.gateway_config import resolve_slot_gateway
     gateway, model = await resolve_slot_gateway("text_extract")
@@ -462,42 +444,127 @@ async def extract_signal_from_text(
 def classify_message_type(text: str) -> str:
     """Classify a message as trade_setup, commentary, meme, or unknown.
 
-    Args:
-        text: Message content.
-
-    Returns:
-        One of: 'trade_setup', 'commentary', 'meme', 'unknown'.
+    THE single gating classifier. Uses word-bounded regex (not substring
+    matching) for keyword scores, and requires substance alongside emojis.
+    _passes_prefilter is removed; callers trust this gate.
     """
     clean_text = strip_reply_prefix(text)
     if not clean_text:
         return "unknown"
 
-    text_lower = clean_text.lower()
+    stripped = clean_text.strip()
+    sig = _signal_score(clean_text)
+    comm = _commentary_score(clean_text)
+    has_price = bool(_PRICE_ANY_RE.search(clean_text))
+    has_direction = bool(_DIRECTION_RE.search(clean_text))
 
-    # Meme detection
-    meme_indicators = ["lol", "lmao", "haha", "meme", "joke", "funny", "😂", "🤣", "💀", "🚀", "lambo", "moon", "diamond hands"]
-    meme_score = sum(1 for m in meme_indicators if m in text_lower)
-    if meme_score >= 2 or (meme_score >= 1 and len(text.strip()) < 30):
+    # Meme: word-bounded keywords + meme emojis. Signal keywords veto.
+    meme_score = len({m.lower() for m in _MEME_KW_RE.findall(clean_text)})
+    meme_score += sum(1 for e in _MEME_EMOJIS if e in clean_text)
+    if "diamond hands" in clean_text.lower():
+        meme_score += 1
+    if sig == 0 and (meme_score >= 2 or (meme_score >= 1 and len(stripped) < 30)):
         return "meme"
 
-    # Commentary detection
-    commentary_score = sum(1 for kw in _COMMENTARY_KEYWORDS if kw in text_lower)
-    signal_score = sum(1 for kw in _SIGNAL_KEYWORDS if kw in text_lower)
-
-    if commentary_score >= 2 and signal_score < 2:
+    if comm >= 2 and sig < 2:
         return "commentary"
 
-    # Trade setup detection
-    if signal_score >= 2:
-        has_price = bool(re.search(r"\b\d{4,6}\b", text))
-        has_direction = bool(_DIRECTION_RE.search(text))
-        if has_price and has_direction:
+    if sig >= 2 and has_price and has_direction:
+        return "trade_setup"
+
+    # Emoji shorthand: only when there's SUBSTANCE alongside the emojis.
+    # Old branch sent "✅🎯" to Gemini -- pure rate-limit burn.
+    # Now requires a price plus a direction word or non-blacklisted symbol.
+    if len(stripped) < 80:
+        emoji_count = sum(1 for e in _TRADING_EMOJIS if e in clean_text)
+        if emoji_count >= 2 and has_price and (has_direction or _has_symbol(clean_text)):
             return "trade_setup"
 
-    # Emoji-only short messages
-    if len(text.strip()) < 50:
-        emoji_count = sum(1 for e in _TRADING_EMOJIS if e in text)
-        if emoji_count >= 2:
-            return "trade_setup"  # Likely a chart repost with emojis
-
     return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Embedding gate — semantic second opinion for 'unknown' messages
+# Env-gated off by default.  Enables bge-small-en-v1.5 (~80MB model, ~10-30ms
+# per message on CPU).  Calibrate with tools/calibrate_embed_gate.py.
+# ---------------------------------------------------------------------------
+_EMBED_GATE_ENABLED = os.environ.get("TEXT_EMBED_GATE_ENABLED", "0") == "1"
+_EMBED_GATE_MARGIN = float(os.environ.get("TEXT_EMBED_GATE_MARGIN", "0.05"))
+_embed_state: Dict[str, Any] = {}
+
+_SIGNAL_ANCHORS = [
+    "entering a long on BTC here, target 72k",
+    "shorting ETH at 3450, stop above 3500",
+    "loading SOL spot here, looking for 180",
+    "BTC to 72k from here, stop under 69",
+    "moved my stop to break even on the TAO long",
+    "taking partials at TP1, runner to 0.95",
+    "ONDO looking ready, entry zone 0.84-0.86",
+    "adding to my position at this support",
+]
+_CHATTER_ANCHORS = [
+    "gm everyone, how are we doing today",
+    "lol that was crazy yesterday",
+    "nice one bro congrats on the win",
+    "anyone watching the game tonight",
+    "market is wild today haha",
+    "thanks man appreciate it",
+    "what do you guys think in general",
+    "good morning, coffee first then charts",
+]
+
+
+def _embed_gate_init() -> Dict[str, Any]:
+    """Lazy-load model + centroids. ~80MB model, CPU-fine on Contabo.
+    Uses raw AutoModel (not sentence-transformers — its wrapper hangs on this
+    VPS). Mean-pooling + L2-normalize matches BGE's recommended usage."""
+    if "model" in _embed_state:
+        return _embed_state
+    import torch
+    import numpy as np
+    from transformers import AutoTokenizer, AutoModel
+
+    torch.set_num_threads(1)  # prevent thread contention on single-vCPU VPS
+    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+    model = AutoModel.from_pretrained("BAAI/bge-small-en-v1.5")
+
+    def _encode(texts):
+        inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = model(**inputs)
+            # Mean pooling over token dimension (BGE recommendation)
+            v = outputs.last_hidden_state.mean(dim=1)
+            # L2 normalize
+            v = torch.nn.functional.normalize(v, p=2, dim=1)
+        return v.numpy()
+
+    sig = _encode(_SIGNAL_ANCHORS).mean(axis=0)
+    cht = _encode(_CHATTER_ANCHORS).mean(axis=0)
+    _embed_state["model"] = model
+    _embed_state["tokenizer"] = tokenizer
+    _embed_state["_encode"] = _encode
+    _embed_state["sig"] = sig / np.linalg.norm(sig)
+    _embed_state["cht"] = cht / np.linalg.norm(cht)
+    logger.info("embed gate: loaded bge-small-en-v1.5 (margin=%.2f)", _EMBED_GATE_MARGIN)
+    return _embed_state
+
+
+def _looks_signal_like_sync(text: str) -> bool:
+    st = _embed_gate_init()
+    v = st["_encode"]([text[:512]])[0]
+    return (float(v @ st["sig"]) - float(v @ st["cht"])) > _EMBED_GATE_MARGIN
+
+
+async def looks_signal_like(text: str) -> bool:
+    """Local semantic check for borderline ('unknown') messages.
+
+    True => escalate to LLM extraction. Errors/disabled => False (no
+    escalation; classify's trade_setup branch is unaffected either way).
+    """
+    if not _EMBED_GATE_ENABLED or not text:
+        return False
+    try:
+        return await asyncio.to_thread(_looks_signal_like_sync, strip_reply_prefix(text))
+    except Exception as exc:
+        logger.warning("embed gate unavailable, skipping escalation: %s", exc)
+        return False

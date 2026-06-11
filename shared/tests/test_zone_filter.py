@@ -20,23 +20,32 @@ def anyio_backend():
 @pytest.mark.anyio
 async def test_classify_returns_valid_dict() -> None:
     """classify() returns expected keys when LLM responds."""
-    class _Result:
-        content = '{"is_trading_signal": true, "confidence": 0.85, "reason": "Long BTC call"}'
-        provider = "openrouter"
-        model = "google/gemini-2.5-flash"
-        model_resolved = "google/gemini-2.5-flash"
-        input_tokens = 120
-        tokens_in = 120
-        tokens_out = 40
-        output_tokens = 40
-        cost_usd = 0.0001
-        latency_ms = 250
+    mock_response = {
+        "content": '{"is_trading_signal": true, "confidence": 0.85, "reason": "Long BTC call"}',
+        "model": "google/gemini-2.5-flash",
+        "usage": {"prompt_tokens": 120, "completion_tokens": 40},
+    }
+    mock_cfg = type("Cfg", (), {"gateway": "requesty"})()
 
-    mock_result = _Result()
-
-    with patch("shared.intelligence.zone_filter.chat_completion", new=AsyncMock(return_value=mock_result)):
-        with patch("shared.intelligence.zone_filter.log_api_call", new=AsyncMock()):
-            result = await classify("Long BTC here", source_id=1, correlation_id="test-1")
+    with patch(
+        "shared.intelligence.zone_filter._load_zone_filter_prompt",
+        new=AsyncMock(return_value="classify trading signals"),
+    ):
+        with patch(
+            "shared.intelligence.zone_filter.resolve_slot_gateway",
+            new=AsyncMock(return_value=(mock_cfg, "google/gemini-2.5-flash")),
+        ):
+            with patch(
+                "shared.intelligence.zone_filter.chat_completion",
+                new=AsyncMock(return_value=mock_response),
+            ):
+                with patch(
+                    "shared.intelligence.zone_filter.log_api_call",
+                    new=AsyncMock(),
+                ):
+                    result = await classify(
+                        "Long BTC here", source_id=1, correlation_id="test-1"
+                    )
 
     assert result["is_trading_signal"] is True
     assert result["confidence"] == 0.85
@@ -46,8 +55,19 @@ async def test_classify_returns_valid_dict() -> None:
 @pytest.mark.anyio
 async def test_classify_fail_open_on_timeout() -> None:
     """Timeout returns fail-open dict with is_trading_signal=True."""
-    with patch("shared.intelligence.zone_filter.chat_completion", new=AsyncMock(side_effect=asyncio.TimeoutError)):
-        result = await classify("meme", source_id=1, correlation_id="test-2")
+    with patch(
+        "shared.intelligence.zone_filter._load_zone_filter_prompt",
+        new=AsyncMock(return_value="prompt"),
+    ):
+        with patch(
+            "shared.intelligence.zone_filter.resolve_slot_gateway",
+            new=AsyncMock(return_value=(type("C", (), {"gateway": "requesty"})(), "m")),
+        ):
+            with patch(
+                "shared.intelligence.zone_filter.chat_completion",
+                new=AsyncMock(side_effect=asyncio.TimeoutError),
+            ):
+                result = await classify("meme", source_id=1, correlation_id="test-2")
 
     assert result["is_trading_signal"] is True
     assert result["confidence"] == 0.0
@@ -57,8 +77,19 @@ async def test_classify_fail_open_on_timeout() -> None:
 @pytest.mark.anyio
 async def test_classify_fail_open_on_exception() -> None:
     """Generic exception returns fail-open dict."""
-    with patch("shared.intelligence.zone_filter.chat_completion", new=AsyncMock(side_effect=RuntimeError("boom"))):
-        result = await classify("meme", source_id=1, correlation_id="test-3")
+    with patch(
+        "shared.intelligence.zone_filter._load_zone_filter_prompt",
+        new=AsyncMock(return_value="prompt"),
+    ):
+        with patch(
+            "shared.intelligence.zone_filter.resolve_slot_gateway",
+            new=AsyncMock(return_value=(type("C", (), {"gateway": "requesty"})(), "m")),
+        ):
+            with patch(
+                "shared.intelligence.zone_filter.chat_completion",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ):
+                result = await classify("meme", source_id=1, correlation_id="test-3")
 
     assert result["is_trading_signal"] is True
     assert result["confidence"] == 0.0
@@ -85,13 +116,16 @@ def test_passes_non_signal() -> None:
 
 def test_passes_fail_open_unavailable() -> None:
     """Fail-open result (unavailable) always passes."""
-    zone = {"is_trading_signal": True, "confidence": 0.0, "reason": "zone_filter_unavailable: TimeoutError"}
+    zone = {
+        "is_trading_signal": True,
+        "confidence": 0.0,
+        "reason": "zone_filter_unavailable: TimeoutError",
+    }
     assert passes(zone, per_source_threshold=None) is True
 
 
 def test_passes_per_source_override() -> None:
     """Per-source threshold overrides global default."""
     zone = {"is_trading_signal": True, "confidence": 0.5, "reason": "Mid signal"}
-    # Global default is 0.6, so this would fail globally
     assert passes(zone, per_source_threshold=0.4) is True
     assert passes(zone, per_source_threshold=0.6) is False

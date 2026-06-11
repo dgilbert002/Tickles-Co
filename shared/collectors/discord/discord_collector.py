@@ -209,6 +209,9 @@ def _group_messages(
                 current_group["media_type"] = msg["media_type"]
             if msg.get("media_path") and not current_group.get("media_path"):
                 current_group["media_path"] = msg["media_path"]
+            # BIBLE-P3: merge local_media_paths from each message
+            if msg.get("local_media_paths"):
+                current_group.setdefault("local_media_paths", []).extend(msg["local_media_paths"])
         else:
             if current_group:
                 groups.append(_finalize_group(current_group, channel_info))
@@ -229,6 +232,8 @@ def _group_messages(
                 "channel_id": msg.get("channel_id", ""),
                 "media_type": msg.get("media_type"),
                 "media_path": msg.get("media_path"),
+                "author_role_color": msg.get("author_role_color"),    # BIBLE-P3
+                "local_media_paths": list(msg.get("local_media_paths") or []),  # BIBLE-P3
             }
 
     if current_group:
@@ -336,6 +341,7 @@ def _finalize_group(group: Dict[str, Any], channel_info: Dict[str, Any]) -> Dict
         "media_path": group.get("media_path"),
         "media_urls": media_urls,
         "metadata": metadata,
+        "local_media_paths": group.get("local_media_paths") or [],
     }
 
 
@@ -393,36 +399,54 @@ async def _download_media_for_messages(
     channel_id = channel_info.get("id", "")
 
     for msg in messages:
-        if not msg.get("attachments"):
+        urls_to_download = []
+
+        # 1. Check Attachments
+        if msg.get("attachments"):
+            for att in msg["attachments"]:
+                url = att.get("url", "")
+                content_type = (att.get("content_type", "") or "").lower()
+                filename = (att.get("filename", "") or "").lower()
+
+                is_image = content_type.startswith("image/") or filename.endswith(
+                    (".png", ".jpg", ".jpeg", ".gif", ".webp")
+                )
+                is_video = content_type.startswith("video/") or filename.endswith(
+                    (".mp4", ".webm", ".mov")
+                )
+                is_audio = content_type.startswith("audio/") or filename.endswith(
+                    (".mp3", ".ogg", ".wav")
+                )
+
+                # Skip non-image media — vision LLMs cannot process video/audio.
+                if not is_image:
+                    if is_video or is_audio:
+                        logger.debug(
+                            "Skipping %s attachment %s (vision LLM cannot process)",
+                            "video" if is_video else "audio",
+                            filename,
+                        )
+                    continue
+
+                urls_to_download.append((url, filename))
+
+        # 2. Check Embeds (for TradingView chart links, Twitter images, Tenor GIFs, etc.)
+        if msg.get("embeds"):
+            for embed in msg["embeds"]:
+                image_url = embed.get("image_url")
+                if image_url:
+                    import urllib.parse as _up
+                    path = _up.urlparse(image_url).path
+                    filename = os.path.basename(path) or "image.png"
+                    if not filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                        filename += ".png"
+                    urls_to_download.append((image_url, filename))
+
+        if not urls_to_download:
             continue
 
-        for att in msg["attachments"]:
-            url = att.get("url", "")
-            content_type = (att.get("content_type", "") or "").lower()
-            filename = (att.get("filename", "") or "").lower()
-
-            is_image = content_type.startswith("image/") or filename.endswith(
-                (".png", ".jpg", ".jpeg", ".gif", ".webp")
-            )
-            is_video = content_type.startswith("video/") or filename.endswith(
-                (".mp4", ".webm", ".mov")
-            )
-            is_audio = content_type.startswith("audio/") or filename.endswith(
-                (".mp3", ".ogg", ".wav")
-            )
-
-            # Skip non-image media — vision LLMs cannot process video/audio.
-            if not is_image:
-                if is_video or is_audio:
-                    logger.debug(
-                        "Skipping %s attachment %s (vision LLM cannot process)",
-                        "video" if is_video else "audio",
-                        filename,
-                    )
-                continue
-
+        for url, filename in urls_to_download:
             media_type = "image"
-
             ext = os.path.splitext(filename)[1] or ".bin"
             timestamp = msg.get("date", datetime.now(timezone.utc))
             if isinstance(timestamp, datetime):
@@ -436,12 +460,22 @@ async def _download_media_for_messages(
             if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
                 msg["media_path"] = save_path
                 msg["media_type"] = media_type
+                # BIBLE-P3: accumulate relative paths for the feed's click-to-load
+                msg.setdefault("local_media_paths", [])
+                rel_path = os.path.relpath(save_path, MEDIA_BASE_DIR)
+                if rel_path not in msg["local_media_paths"]:
+                    msg["local_media_paths"].append(rel_path)
                 continue
 
             success = await _download_attachment(url, save_path)
             if success:
                 msg["media_path"] = save_path
                 msg["media_type"] = media_type
+                # BIBLE-P3: accumulate relative paths for the feed's click-to-load
+                msg.setdefault("local_media_paths", [])
+                rel_path = os.path.relpath(save_path, MEDIA_BASE_DIR)
+                if rel_path not in msg["local_media_paths"]:
+                    msg["local_media_paths"].append(rel_path)
 
 
 # ---------------------------------------------------------------------------
@@ -557,11 +591,42 @@ class DiscordCollector(BaseCollector):
         try:
             pool = await self._ensure_db_pool()
             await _save_high_water_mark(pool, channel_id, last_msg_id)
+            # BIBLE-P3: mirror HWM to collector_sources for control-room freshness
+            try:
+                await pool.execute(
+                    "UPDATE collector_sources SET platform_config = "
+                    "COALESCE(platform_config,'{}'::jsonb) || jsonb_build_object('last_hwm', $2::text), "
+                    "last_collected_at = now() "
+                    "WHERE source_type='discord' AND platform_id = $1",
+                    str(channel_id), str(last_msg_id),
+                )
+            except Exception as exc:
+                logger.debug("Discord: last_hwm mirror failed for %s: %s", channel_id, exc)
         except Exception as e:
             # Bumped from DEBUG to WARNING — see _save_high_water_mark note.
             logger.warning(
                 "HWM save wrapper failed for %s: %s", channel_id, e, exc_info=True,
             )
+
+    async def _record_channel_status(self, channel_id: str, *, ok: bool, error: str = "") -> None:
+        """BIBLE-P1: persist per-channel health to collector_sources for observability."""
+        try:
+            pool = await self._ensure_db_pool()
+            if ok:
+                await pool.execute(
+                    "UPDATE collector_sources SET last_collected_at = now(), last_error = NULL, "
+                    "error_count = 0 WHERE source_type='discord' AND platform_id = $1",
+                    str(channel_id),
+                )
+            else:
+                await pool.execute(
+                    "UPDATE collector_sources SET last_error = $2, "
+                    "error_count = COALESCE(error_count,0) + 1 "
+                    "WHERE source_type='discord' AND platform_id = $1",
+                    str(channel_id), error[:500],
+                )
+        except Exception as exc:
+            logger.debug("Discord: could not record channel status for %s: %s", channel_id, exc)
 
     async def _load_source_id_map(self) -> None:
         """Populate channel_info['source_id'] by looking up each Discord
@@ -628,42 +693,64 @@ class DiscordCollector(BaseCollector):
     async def _fetch_channel_messages(
         self, channel: Any, after_id: Optional[str] = None, limit: int = 200
     ) -> List[Dict[str, Any]]:
-        """Fetch messages from a Discord channel.
+        """Fetch messages from a Discord channel, OLDEST-FIRST, draining the full gap.
 
-        Args:
-            channel: Discord channel object.
-            after_id: Only fetch messages after this snowflake ID.
-            limit: Max messages to fetch.
-
-        Returns:
-            List of message dicts in chronological order.
+        BIBLE-P1: Previously this fetched newest-first with a hard 200 cap and no
+        oldest_first, so a backlog larger than ``limit`` (after an outage) silently
+        dropped the oldest unseen messages while the HWM still advanced. We now walk
+        forward from ``after_id`` in oldest_first order and KEEP PAGING until the channel
+        returns nothing, so every message in the gap is captured. A per-cycle hard cap
+        prevents an unbounded first-run scan from blocking forever.
         """
         import discord
 
         messages: List[Dict[str, Any]] = []
         seen_ids: set = set()
+        # Per-page size: use the larger JarvAIs window. Per-cycle hard cap stops a
+        # cold-start (no HWM) from scanning an entire channel history in one go.
+        page_size = 500
+        hard_cap = 5000 if after_id else 1000  # generous when catching up; bounded cold-start
+        cursor = discord.Object(id=int(after_id)) if after_id else None
 
         try:
-            kwargs: Dict[str, Any] = {"limit": limit}
-            if after_id:
-                kwargs["after"] = discord.Object(id=int(after_id))
-
-            async for msg in channel.history(**kwargs):
-                if msg.id in seen_ids:
-                    continue
-                seen_ids.add(msg.id)
-
-                msg_data = self._build_msg_data(msg, str(channel.id))
-                messages.append(msg_data)
-
+            while len(messages) < hard_cap:
+                batch: List[Dict[str, Any]] = []
+                kwargs: Dict[str, Any] = {"limit": page_size, "oldest_first": True}
+                if cursor is not None:
+                    kwargs["after"] = cursor
+                async for msg in channel.history(**kwargs):
+                    if msg.id in seen_ids:
+                        continue
+                    seen_ids.add(msg.id)
+                    batch.append(self._build_msg_data(msg, str(channel.id)))
+                if not batch:
+                    break  # fully drained
+                messages.extend(batch)
+                # advance cursor to the newest id we just read; keep paging
+                newest_id = max(int(m["id"]) for m in batch)
+                cursor = discord.Object(id=newest_id)
+                if len(batch) < page_size:
+                    break  # last partial page — nothing more to fetch
         except Exception as e:
             err_str = str(e)
             if "403" in err_str or "Forbidden" in err_str or "Missing Access" in err_str:
                 logger.warning("Discord: channel %s returned 403, skipping", channel.id)
+                # BIBLE-P1: record inaccessible channel for the control room/health tool
+                try:
+                    import asyncio as _aio
+                    _aio.create_task(self._record_channel_status(str(channel.id), ok=False, error=err_str[:200]))
+                except Exception:
+                    pass
             else:
                 logger.error("Discord: error fetching from channel %s: %s", channel.id, e)
 
         messages.sort(key=lambda m: m.get("date", datetime.min.replace(tzinfo=timezone.utc)))
+        if len(messages) >= hard_cap:
+            logger.warning(
+                "Discord: channel %s hit per-cycle hard cap %d; remaining backlog will "
+                "drain next cycle (HWM advances only to what we processed).",
+                channel.id, hard_cap,
+            )
         return messages
 
     def _build_msg_data(self, msg: Any, channel_id: str) -> Dict[str, Any]:
@@ -679,6 +766,16 @@ class DiscordCollector(BaseCollector):
         author_name = msg.author.display_name or msg.author.name
         author_username = msg.author.name
 
+        # BIBLE-P3: Discord role color → hex for role-colored usernames in the feed.
+        # msg.author.color is a discord.Colour; .value==0 means "no role color".
+        author_role_color = None
+        try:
+            col = getattr(msg.author, "color", None)
+            if col is not None and getattr(col, "value", 0):
+                author_role_color = f"#{col.value:06x}"
+        except Exception:
+            author_role_color = None
+
         text = msg.content or ""
         text = self._resolve_mentions(text, msg)
 
@@ -690,6 +787,7 @@ class DiscordCollector(BaseCollector):
             "sender_id": str(msg.author.id),
             "sender_name": author_name,
             "sender_username": author_username,
+            "author_role_color": author_role_color,  # BIBLE-P3
             "reply_to_msg_id": None,
             "reply_to_content": None,
             "reply_to_author": None,
@@ -706,7 +804,7 @@ class DiscordCollector(BaseCollector):
                 ref_msg = msg.reference.resolved
                 if hasattr(ref_msg, "content"):
                     msg_data["reply_to_content"] = ref_msg.content[:500] if ref_msg.content else ""
-                    msg_data["reply_to_author"] = ref_msg.author.name if ref_msg.author else ""
+                    msg_data["reply_to_author"] = ref_msg.author.display_name or ref_msg.author.name if ref_msg.author else ""
 
         # Attachments
         if msg.attachments:
@@ -856,11 +954,10 @@ class DiscordCollector(BaseCollector):
             return False
 
         # --- Trading-zone: only known traders ---
-        if channel_id == "1305518197725728788":
-            known = getattr(self, "_known_traders", set())
-            if known and sender_username not in known:
-                return False
-
+        # BIBLE-P11-FIX: Do not filter out non-followed users in #trading-zone.
+        # This ensures all messages from all users are collected, making
+        # the dashboard's "Following Only" filter work dynamically rather
+        # than ignoring them permanently at ingestion time.
         return True
 
     # ------------------------------------------------------------------
@@ -924,7 +1021,9 @@ class DiscordCollector(BaseCollector):
             True if item should proceed to DB write (not dropped by rate limit).
             False if item was dropped (should not be written).
         """
-        cid = f"discord_{channel_id}_{item.hash_key[:16]}"
+        # BIBLE-P1: keep correlation_id <=36 chars (DB column limit). hash[:16] alone
+        # is already unique per message; prefix 'd_' to mark source. Total <=18 chars.
+        cid = f"d_{item.hash_key[:16]}"
 
         # --- Phase 9 [BB] rate limiter ---
         default_rate = float(os.environ.get("DISCORD_RATE_LIMIT_MSGS_PER_SEC", "50"))
@@ -937,10 +1036,11 @@ class DiscordCollector(BaseCollector):
         catalog: Optional[Dict[str, Any]] = None
         if source_id is not None:
             try:
-                row = await pool.fetchrow(
-                    "SELECT zone_filter_enabled, zone_filter_threshold, rate_limit_msgs_per_sec "
-                    "FROM collector_sources WHERE id = $1", source_id,
-                )
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT zone_filter_enabled, zone_filter_threshold, rate_limit_msgs_per_sec "
+                        "FROM collector_sources WHERE id = $1", source_id,
+                    )
                 if row:
                     catalog = dict(row)
             except Exception as exc:
@@ -1158,6 +1258,12 @@ class DiscordCollector(BaseCollector):
                     media_path=group.get("media_path"),
                     media_urls=group.get("media_urls", []),
                     metadata=meta,
+                    # BIBLE-P3: persist reply-chains + local media + role color
+                    reply_to_msg_id=group.get("reply_to_msg_id"),
+                    reply_to_author=(group.get("reply_to_author") or "")[:255],
+                    reply_to_content=(group.get("reply_to_content") or "")[:2000] or None,
+                    local_media_paths=group.get("local_media_paths") or [],
+                    author_role_color=group.get("author_role_color"),
                 )
                 item.hash_key = group["hash_key"]
 
@@ -1189,6 +1295,13 @@ class DiscordCollector(BaseCollector):
                 sum(1 for i in items if i.enrichment_status == "non_signal"),
                 sum(1 for i in items if i.enrichment_status == "duplicate_zone"),
             )
+
+            # BIBLE-P1: record successful collection for health/control-room
+            try:
+                import asyncio as _aio
+                _aio.create_task(self._record_channel_status(str(channel_id), ok=True))
+            except Exception:
+                pass
 
             return items
 
@@ -1225,6 +1338,7 @@ class DiscordCollector(BaseCollector):
 
         # Reload config each cycle (allows hot-reloading channels)
         self._load_config()
+        await self._load_source_id_map()
 
         all_items: List[NewsItem] = []
 

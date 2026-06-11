@@ -180,6 +180,19 @@ def _seed_known_services() -> None:
     )
     SERVICE_REGISTRY.register(
         ServiceDescriptor(
+            name="pipeline-watchdog",
+            kind="worker",
+            module="shared.intelligence.pipeline_watchdog",
+            description="Data-freshness watchdog: auto-recovers a stalled "
+                        "interpreter/collector and alerts. Heartbeat status "
+                        "'partial' = pipeline problem detected.",
+            systemd_unit="tickles-pipeline-watchdog.service",
+            enabled_on_vps=True,
+            tags={"phase": "2026-05-29-prevention"},
+        )
+    )
+    SERVICE_REGISTRY.register(
+        ServiceDescriptor(
             name="tradingview-monitor",
             kind="collector",
             module="shared.collectors.telegram.tradingview_monitor",

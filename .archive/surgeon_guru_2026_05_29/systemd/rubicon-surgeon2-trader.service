@@ -1,0 +1,23 @@
+[Unit]
+Description=Rubicon Surgeon2 Paper Trader (PostgreSQL-backed, Tickles adaptation)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONPATH=/opt/tickles
+Environment=PGHOST=127.0.0.1
+Environment=PGPORT=5432
+Environment=PGUSER=admin
+Environment=PGPASSWORD=Tickles21!
+ExecStart=/usr/bin/python3 /opt/tickles/shared/daemons/surgeon2_trader.py --interval 300
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

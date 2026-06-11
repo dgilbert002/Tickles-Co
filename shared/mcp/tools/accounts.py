@@ -94,7 +94,7 @@ def _handle_list_accounts(p: Dict[str, Any]) -> Dict[str, Any]:
         
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY exchange, priority, account_name"
+        query += " ORDER BY exchange, account_name"
         
         rows = db_helper.query(query, tuple(params) if params else None)
         accounts = []

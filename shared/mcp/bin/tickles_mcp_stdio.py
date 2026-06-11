@@ -19,6 +19,7 @@ from ..tools import (
     ToolContext,
     accounts,
     backtest,
+    collector,
     competitions,
     contest,
     data,
@@ -64,6 +65,7 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     symbols.register(reg, ctx)
     accounts.register(reg, ctx)
     competitions.register(reg, ctx)
+    collector.register(reg, ctx)
     register_builtin_providers(reg, LOG)
     return reg
 

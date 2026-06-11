@@ -14,8 +14,10 @@ Environment=OPINION_GLOBAL_BUDGET_PER_HOUR=120
 Environment=OPINION_GLOBAL_BUDGET_USD_PER_DAY=10.0
 Environment=OPINION_PER_POSITION_PER_HOUR=2
 Environment=OPINION_MIN_CONFIDENCE=0.45
-Environment=OPINION_HOURLY_TRIGGER_SECONDS=3600
-Environment=OPINION_PRICE_MOVE_THRESHOLD_PCT=1.0
+# Gemini 3 Flash reasoning models burn ~8K tokens on internal thought before any
+# visible output. 8192 was too low — finish_reason=length + truncated JSON + retry storm.
+# 32768 leaves ~24K visible after reasoning overhead.
+Environment=OPINION_MAX_TOKENS=32768
 ExecStart=/usr/bin/python3 -m shared.scripts.run_chart_hacker_opinion
 Restart=on-failure
 RestartSec=10

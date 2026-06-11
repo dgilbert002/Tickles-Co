@@ -1,0 +1,19 @@
+[Unit]
+Description=Tickles trader rubicon_surgeon2 (Twilly LLM Surgeon)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=-/opt/tickles/.env
+Environment=PYTHONPATH=/opt/tickles
+ExecStart=/usr/bin/python3 /opt/tickles/shared/templates/trading_agent/surgeon_llm_runner.py --config /root/.openclaw/workspace/rubicon_surgeon2/config.json
+Restart=always
+RestartSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

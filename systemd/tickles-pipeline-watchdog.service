@@ -1,0 +1,18 @@
+[Unit]
+Description=Tickles Pipeline Watchdog (data-freshness; auto-recovers stalled collectors/interpreter)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tickles
+EnvironmentFile=/opt/tickles/.env
+# User=root is REQUIRED so the watchdog can `systemctl restart` stalled units.
+ExecStart=/usr/bin/python3 -m shared.intelligence.pipeline_watchdog
+StandardOutput=append:/var/log/tickles/pipeline_watchdog.log
+StandardError=append:/var/log/tickles/pipeline_watchdog.log
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

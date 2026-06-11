@@ -46,6 +46,11 @@ from shared.dashboard.snapshot import (
     SnapshotProviders,
     snapshot_to_dict,
 )
+from shared.dashboard.discord_feed_routes import (
+    handle_discord_tree, handle_discord_feed,
+    handle_discord_media, handle_discord_config, handle_discord_followed,
+    handle_discord_user_config,
+)
 from shared.utils.db import DatabasePool, get_company_pool, get_shared_pool
 
 LOG = logging.getLogger("tickles.dashboard.server")
@@ -794,7 +799,7 @@ async def handle_services(request: web.Request) -> web.Response:
     try:
         pool = await DatabasePool.get_instance()
         heartbeats = await pool.fetch_all(
-            "SELECT agent_id, last_run_at, last_status, "
+            "SELECT agent_id, last_run_at, last_status, last_message, "
             "expected_interval_seconds FROM public.cron_heartbeats"
         )
         hb_map = {hb["agent_id"]: hb for hb in heartbeats}
@@ -822,6 +827,7 @@ async def handle_services(request: web.Request) -> web.Response:
                 s_dict["heartbeat"] = {
                     "last_seen_seconds": int(seconds_since),
                     "status": hb.get("last_status"),
+                    "message": hb.get("last_message"),
                     "is_stale": is_stale,
                 }
             else:
@@ -859,6 +865,42 @@ async def _prewarm_pools(app: web.Application) -> None:
             LOG.warning("prewarm: %s pool failed (non-fatal)", company)
 
 
+async def _model_catalogue_sync_ctx(app: web.Application):
+    """Round 14: keep public.model_catalogue fresh.
+
+    Syncs OpenRouter + Requesty model/policy lists once on startup, then every
+    MODEL_CATALOGUE_SYNC_INTERVAL_S (default 24h). A manual refresh is also
+    available via POST /api/settings/catalogue/refresh. All best-effort: a
+    failed sync logs + retries next interval; the dashboard never blocks on it.
+    """
+    import asyncio as _asyncio
+    import os as _os
+
+    interval = int(_os.environ.get("MODEL_CATALOGUE_SYNC_INTERVAL_S", str(24 * 3600)))
+
+    async def _loop():
+        from shared.intelligence.model_catalogue_sync import sync_all
+        # Small initial delay so startup (pool prewarm) finishes first.
+        await _asyncio.sleep(5)
+        while True:
+            try:
+                summary = await sync_all()
+                LOG.info("model_catalogue sync: %s", summary)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOG.warning("model_catalogue sync failed (non-fatal): %s", exc)
+            await _asyncio.sleep(interval)
+
+    task = _asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (_asyncio.CancelledError, Exception):
+            pass
+
+
 def build_app(
     auth: DashboardAuth,
     providers: SnapshotProviders,
@@ -868,6 +910,8 @@ def build_app(
     """Build the dashboard application, supporting both root and /dashboard/ prefix."""
     app = web.Application(middlewares=[auth_middleware])
     app.on_startup.append(_prewarm_pools)
+    # Round 14 — model catalogue sync (startup + daily).
+    app.cleanup_ctx.append(_model_catalogue_sync_ctx)
     app["_auth"] = auth
     app["_providers"] = providers
     app["_snapshot_builder"] = SnapshotBuilder(providers=providers)
@@ -917,6 +961,16 @@ def build_app(
 
         # Static assets
         app.router.add_static(prefix + "/static/", Path(__file__).parent / "static")
+
+        # BIBLE-P4: Discord/Telegram feed, tree, media, config
+        app.router.add_get(prefix + "/api/discord/tree", handle_discord_tree)
+        app.router.add_get(prefix + "/api/discord/feed", handle_discord_feed)
+        app.router.add_get(prefix + "/api/discord/media/{path:.*}", handle_discord_media)
+        app.router.add_get(prefix + "/api/discord/config", handle_discord_config)
+        app.router.add_post(prefix + "/api/discord/config", handle_discord_config)
+        app.router.add_get(prefix + "/api/discord/followed_traders", handle_discord_followed)
+        app.router.add_get(prefix + "/api/discord/user_config", handle_discord_user_config)
+        app.router.add_post(prefix + "/api/discord/user_config", handle_discord_user_config)
 
         # Phase Y — mount learning-dashboard endpoints under both prefixes.
         from shared.dashboard.learning_routes import (

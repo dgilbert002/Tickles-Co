@@ -28,6 +28,7 @@ from shared.intelligence.recall_log import (
     _evaluate_matches,
     _normalise_outcome,
     _truncate,
+    link_recall_by_correlation,
     link_recall_to_position,
     match_recall_to_outcome,
     record_recall,
@@ -307,7 +308,7 @@ async def test_record_recall_inserts_and_returns_id() -> None:
     assert len(conn.fetchvals) == 1
     _, args = conn.fetchvals[0]
     # Args order: actor_id, company_id, correlation_id, summary, dim,
-    # symbol, returned_count, ids_json, md_json, position_id.
+    # symbol, returned_count, ids_json, md_json, position_id, signal_source.
     assert args[0] == "charthacker"
     assert args[1] == "rubicon"
     assert args[2] == "corr-1"
@@ -318,6 +319,7 @@ async def test_record_recall_inserts_and_returns_id() -> None:
     assert json.loads(args[7]) == [1, 2, 3]
     assert json.loads(args[8]) == [{"outcome": "win"}, {"outcome": "loss"}]
     assert args[9] == 999
+    assert args[10] is None
 
 
 async def test_record_recall_truncates_long_summary() -> None:
@@ -542,6 +544,100 @@ async def test_link_recall_to_position_handles_unparseable_status() -> None:
     conn = FakeConn(execute_returns=["WEIRD STATUS"])
     ok = await link_recall_to_position(conn, recall_id=10, position_id=20)
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# link_recall_by_correlation (Phase B)
+# ---------------------------------------------------------------------------
+
+
+async def test_record_recall_with_signal_source() -> None:
+    conn = FakeConn(fetchval_returns=[99])
+    row_id = await record_recall(
+        conn,
+        actor_id="jarvais_chart_hacker",
+        company_id="jarvais",
+        query_summary="q",
+        correlation_id="cid-1",
+        signal_source="chart_hacker",
+    )
+    assert row_id == 99
+    assert conn.fetchvals[0][1][10] == "chart_hacker"
+
+
+async def test_link_by_correlation_with_signal_source() -> None:
+    conn = FakeConn(execute_returns=["UPDATE 1"])
+    n = await link_recall_by_correlation(
+        conn,
+        correlation_id="sig-abc",
+        position_id=42,
+        actor_id="jarvais_chart_hacker",
+        signal_source="chart_hacker",
+    )
+    assert n == 1
+    _, args = conn.executed[0]
+    assert args == (42, "sig-abc", "jarvais_chart_hacker", "chart_hacker")
+
+
+async def test_link_by_correlation_success() -> None:
+    conn = FakeConn(execute_returns=["UPDATE 1"])
+    n = await link_recall_by_correlation(
+        conn, correlation_id="sig-abc", position_id=42
+    )
+    assert n == 1
+    _, args = conn.executed[0]
+    # UPDATE … SET position_id=$1 WHERE correlation_id=$2 AND actor_id=$3
+    assert args == (42, "sig-abc", "chart_hacker")
+
+
+async def test_link_by_correlation_no_pending_returns_zero() -> None:
+    conn = FakeConn(execute_returns=["UPDATE 0"])
+    n = await link_recall_by_correlation(
+        conn, correlation_id="sig-abc", position_id=42
+    )
+    assert n == 0
+
+
+async def test_link_by_correlation_custom_actor() -> None:
+    conn = FakeConn(execute_returns=["UPDATE 1"])
+    await link_recall_by_correlation(
+        conn, correlation_id="sig-x", position_id=7, actor_id="copy_chai_vision"
+    )
+    _, args = conn.executed[0]
+    assert args[2] == "copy_chai_vision"
+
+
+async def test_link_by_correlation_blank_cid_is_noop() -> None:
+    conn = FakeConn()
+    assert await link_recall_by_correlation(
+        conn, correlation_id="", position_id=42
+    ) == 0
+    assert conn.executed == []
+
+
+async def test_link_by_correlation_invalid_position_id() -> None:
+    conn = FakeConn()
+    assert await link_recall_by_correlation(
+        conn, correlation_id="sig-abc", position_id=0
+    ) == 0
+    assert await link_recall_by_correlation(
+        conn, correlation_id="sig-abc", position_id=True  # bool rejected
+    ) == 0
+    assert conn.executed == []
+
+
+async def test_link_by_correlation_handles_unique_conflict() -> None:
+    conn = FakeConn(execute_raises=asyncpg.UniqueViolationError("dup"))
+    assert await link_recall_by_correlation(
+        conn, correlation_id="sig-abc", position_id=42
+    ) == 0
+
+
+async def test_link_by_correlation_handles_postgres_error() -> None:
+    conn = FakeConn(execute_raises=asyncpg.PostgresError("boom"))
+    assert await link_recall_by_correlation(
+        conn, correlation_id="sig-abc", position_id=42
+    ) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -100,6 +100,13 @@ class NewsItem:
     image_phash: Optional[str] = None
     duplicate_of_id: Optional[int] = None
 
+    # BIBLE-P3 — reply-chains + local media paths + role colors for Discord feed
+    reply_to_msg_id: Optional[str] = None
+    reply_to_author: Optional[str] = None
+    reply_to_content: Optional[str] = None
+    local_media_paths: List[str] = field(default_factory=list)
+    author_role_color: Optional[str] = None
+
     def compute_hash(self) -> None:
         """Compute SHA-256 content hash for deduplication.
 
@@ -215,7 +222,9 @@ class BaseCollector(ABC):
                 metadata, has_media, media_count,
                 enrichment_status, context_window,
                 zone_filter_confidence, zone_filter_reason,
-                image_phash, duplicate_of_id
+                image_phash, duplicate_of_id,
+                reply_to_msg_id, reply_to_author, reply_to_content,
+                local_media_paths, author_role_color
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::jsonb,
                 $7, $8,
@@ -223,10 +232,27 @@ class BaseCollector(ABC):
                 $14::jsonb, $15, $16,
                 $17, $18::jsonb,
                 $19, $20,
-                $21, $22
+                $21, $22,
+                $23, $24, $25,
+                $26::jsonb, $27
             )
-            ON CONFLICT (hash_key) DO NOTHING
-            RETURNING id
+            ON CONFLICT (hash_key) DO UPDATE SET
+                local_media_paths = CASE 
+                    WHEN news_items.local_media_paths IS NULL OR news_items.local_media_paths = '[]'::jsonb 
+                    THEN EXCLUDED.local_media_paths 
+                    ELSE news_items.local_media_paths 
+                END,
+                has_media = CASE 
+                    WHEN news_items.local_media_paths IS NULL OR news_items.local_media_paths = '[]'::jsonb 
+                    THEN EXCLUDED.has_media 
+                    ELSE news_items.has_media 
+                END,
+                media_count = CASE 
+                    WHEN news_items.local_media_paths IS NULL OR news_items.local_media_paths = '[]'::jsonb 
+                    THEN EXCLUDED.media_count 
+                    ELSE news_items.media_count 
+                END
+            RETURNING id, (xmax = 0) AS inserted
         """
 
         media_insert_sql = """
@@ -277,7 +303,7 @@ class BaseCollector(ABC):
                         # published_at may be int / float / date — asyncpg needs tz-aware datetime
                         # (we rely on collectors producing proper datetimes — if not, keep None).
 
-                        new_id = await conn.fetchval(
+                        res = await conn.fetchrow(
                             news_insert_sql,
                             item.hash_key,
                             item.source.value,
@@ -301,10 +327,29 @@ class BaseCollector(ABC):
                             item.zone_filter_reason,
                             item.image_phash,
                             item.duplicate_of_id,
+                            item.reply_to_msg_id,           # BIBLE-P3
+                            item.reply_to_author,           # BIBLE-P3
+                            item.reply_to_content,          # BIBLE-P3
+                            json.dumps(item.local_media_paths),  # BIBLE-P3
+                            item.author_role_color,         # BIBLE-P3
                         )
+
+                        new_id = res["id"] if res else None
+                        is_inserted = res["inserted"] if res else False
 
                         if new_id is None:
                             # Conflict — hash already existed, skip media writes.
+                            continue
+
+                        if not is_inserted:
+                            # If it was updated (meaning we backfilled media), update the corresponding media_items local_path
+                            for idx, path in enumerate(item.local_media_paths or []):
+                                await conn.execute(
+                                    "UPDATE public.media_items SET local_path = $1, processing_status = 'downloaded' "
+                                    "WHERE news_item_id = $2 AND local_path IS NULL",
+                                    path, new_id
+                                )
+                            # Skip standard media writes as they are already handled/exist
                             continue
 
                         inserted_count += 1

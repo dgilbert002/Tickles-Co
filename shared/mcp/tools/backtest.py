@@ -236,6 +236,8 @@ def _load_candles_df(
         "volume": "lastTradedVolume",
         "timestamp": "snapshotTime",
     }, inplace=True)
+    for col in ("openPrice", "highPrice", "lowPrice", "closePrice", "lastTradedVolume"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df["date"] = pd.to_datetime(df["snapshotTime"], utc=True).dt.date
     # Add openBid/closeAsk approximations (engine expects them)
     df["openBid"] = df["openPrice"] * 0.9999

@@ -17,12 +17,14 @@ sys.path.insert(0, "/opt/tickles")
 
 from shared.intelligence.postmortem_service import (
     PostMortemService,
+    _build_postmortem_broadcast,
     _coerce_optional_bool,
     _coerce_regime,
     _hash16,
     _parse_llm_json,
     _truncate,
     _ALLOWED_REGIMES,
+    _MEMU_POSTMORTEM_KIND,
     _POSTMORTEM_VERSION,
 )
 
@@ -137,6 +139,15 @@ def _sample_position() -> Dict[str, Any]:
         "closed_at": closed,
         "realized_pnl_usd_final": Decimal("180.00"),
         "status_reason": "expired_auto_close",
+        # Phase J columns (pulled by _fetch_pending; used by _push_lessons_to_mem0)
+        "signal_source": "trader",
+        "actor_id": "rose",
+        "actor_type": "trader",
+        "trader_profile_id": 7,
+        "timeframe": "1h",
+        "company_id": "jarvais",
+        "trader_handle": "rose",
+        "trader_platform": "telegram",
     }
 
 
@@ -381,7 +392,12 @@ async def test_process_one_writes_postmortem_and_marks_done(
         return_value=11,
     ), patch.object(
         service, "_call_llm", new_callable=AsyncMock
-    ) as mock_llm:
+    ) as mock_llm, patch(
+        # Isolate the learning-loop side-effect (mem0 + MemU outbox) — that path
+        # is covered separately by test_build_postmortem_broadcast_*.
+        "shared.intelligence.postmortem_service._push_lessons_to_mem0",
+        new_callable=AsyncMock,
+    ):
         mock_llm.return_value = (parsed, 1234, "openrouter/openai/gpt-4o-mini")
         await service._process_one(conn, position)
 
@@ -452,3 +468,75 @@ def test_load_prompts_returns_empty_when_file_missing() -> None:
     with patch("os.path.exists", return_value=False):
         prompts = svc._load_prompts()
     assert prompts == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase A — _build_postmortem_broadcast (pure; MemU lesson promotion)
+# ---------------------------------------------------------------------------
+def test_build_postmortem_broadcast_skips_when_no_institutional_content() -> None:
+    """No company lesson and no edge → None (nothing worth promoting)."""
+    payload = _build_postmortem_broadcast(
+        company="jarvais",
+        position_id=1,
+        symbol="BTC/USDT",
+        exchange="bybit",
+        direction="long",
+        outcome="sl_hit",
+        signal_source="trader",
+        trader_handle="rose",
+        parsed={"lessons_for_actor": "only an actor note", "lessons_for_company": ""},
+    )
+    assert payload is None
+
+
+def test_build_postmortem_broadcast_trader_payload() -> None:
+    """A human-trader postmortem promotes as actor_type='trader'."""
+    payload = _build_postmortem_broadcast(
+        company="jarvais",
+        position_id=99,
+        symbol="ETH/USDT",
+        exchange="bybit",
+        direction="short",
+        outcome="tp1_hit",
+        signal_source="trader",
+        trader_handle="Rose",
+        parsed={
+            "lessons_for_company": "Shorts into resistance after RSI divergence work.",
+            "edge_detected": "RSI divergence at HTF resistance",
+            "why_it_worked": "Price rejected the level cleanly.",
+        },
+    )
+    assert payload is not None
+    assert payload["insight_kind"] == _MEMU_POSTMORTEM_KIND
+    assert payload["actor_type"] == "trader"
+    assert payload["actor_id"] == "rose"  # normalised lower
+    assert payload["company"] == "jarvais"
+    assert payload["position_id"] == 99
+    assert payload["instrument_symbol_normalised"] == "ETH/USDT"
+    assert payload["instrument_exchange"] == "bybit"
+    assert payload["correlation_id"] == "pm-99"  # default when none supplied
+    assert payload["schema_version"] == 1
+    assert "RSI divergence" in payload["body_md"]
+    assert payload["summary"] == "ETH/USDT short → tp1_hit"
+
+
+def test_build_postmortem_broadcast_chart_hacker_is_agent() -> None:
+    """chart_hacker's own postmortem promotes as actor_type='agent'."""
+    payload = _build_postmortem_broadcast(
+        company="jarvais",
+        position_id=7,
+        symbol="SOL/USDT",
+        exchange=None,
+        direction="long",
+        outcome="sl_hit",
+        signal_source="chart_hacker",
+        trader_handle="",
+        parsed={"lessons_for_company": "Avoid chasing SOL longs in chop."},
+        correlation_id="cid-abc",
+    )
+    assert payload is not None
+    assert payload["actor_type"] == "agent"
+    assert payload["actor_id"] == "chart_hacker"
+    assert payload["correlation_id"] == "cid-abc"
+    # exchange omitted when None (NotRequired field)
+    assert "instrument_exchange" not in payload

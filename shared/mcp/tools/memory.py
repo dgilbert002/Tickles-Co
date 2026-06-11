@@ -9,13 +9,10 @@ The three-tier memory architecture (see ``.cursor/rules/tickles-co-architecture.
 Wiring status (2026-04-20 post-M4):
   * Tier 1/2: ``memory.add`` / ``memory.search`` / ``learnings.read_last_3``
     now call ``shared.utils.mem0_config.ScopedMemory`` directly (local
-    sentence-transformers embeddings + OpenRouter LLM with fallback chain
-    + per-company Qdrant collection ``tickles_{company}``).  All mem0
-    work runs inside ``asyncio.to_thread``.  If mem0 can't initialise
-    (OpenRouter key missing, Qdrant unreachable, etc.) the tools fall
-    back to the legacy ``forward_to: user-mem0::...`` envelope so an
-    external MCP host (Cursor, stand-alone user-mem0) can still pick up
-    the call — the envelope shape is preserved.
+    sentence-transformers embeddings + Qdrant collection ``tickles_{company}``,
+    lean mode — no cloud LLM on search/store). All mem0 work runs inside
+    ``asyncio.to_thread``. If mem0 can't initialise (Qdrant unreachable, etc.)
+    the tools fall back to the legacy ``forward_to: user-mem0::...`` envelope
   * Tier 3 (M3): ``memu.broadcast`` / ``memu.search`` call the real
     :class:`shared.memu.client.MemU` synchronous client, also wrapped
     in ``asyncio.to_thread``.
@@ -230,10 +227,10 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
         description=(
             "Write to mem0 Tier-1 (agent-private) or Tier-2 (company-shared). "
             "Persists via ScopedMemory — local sentence-transformers embeddings, "
-            "per-company Qdrant collection tickles_<company>, OpenRouter LLM for "
-            "fact extraction (with automatic fallback chain). Returns the mem0 "
-            "write result. If mem0 is not available, returns a forward_to "
-            "envelope so an external user-mem0 MCP host can pick up the call."
+            "per-company Qdrant collection tickles_<company> (lean mode: infer=False, "
+            "no cloud LLM on store). Returns the mem0 write result. If mem0 is not "
+            "available, returns a forward_to envelope so an external user-mem0 MCP "
+            "host can pick up the call."
         ),
         version="2",
         input_schema={

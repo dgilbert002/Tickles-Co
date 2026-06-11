@@ -1,0 +1,15 @@
+[Unit]
+Description=Rubicon Surgeon Multi-Exchange Scanner (writes MARKET_STATE.json/MARKET_INDICATORS.json)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/tickles/shared/daemons/surgeon_scanner.py --output /root/.openclaw/workspace/rubicon_surgeon --interval 60
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

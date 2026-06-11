@@ -551,6 +551,278 @@ async def handle_get_sources(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/settings/source-groups — group→channel→trader tree
+# ---------------------------------------------------------------------------
+async def handle_get_source_groups(request: web.Request) -> web.Response:
+    """Return collector_sources hierarchy with traders per channel.
+
+    Shape::
+
+        {
+          "ok": true,
+          "groups": [
+            {
+              "id": 2, "name": "Chart Hackers", "source": "discord",
+              "channels": [
+                {
+                  "id": 6, "name": "🦧·trading-zone",
+                  "trader_count": 5, "tracked_count": 3,
+                  "traders": [
+                    {"id": 1, "handle": "emutrading",
+                     "display_name": "emutrading", "is_tracked": true, ...}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+    """
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+
+    # 1. Fetch groups (servers or top-level collector_sources)
+    groups_rows = await pool.fetch_all("""
+        SELECT id, name, source_type, enabled
+        FROM collector_sources
+        WHERE entity_type = 'server' OR parent_id IS NULL
+        ORDER BY source_type, name
+    """)
+
+    # 2. Fetch channels and their parents
+    channel_rows = await pool.fetch_all("""
+        SELECT id, parent_id, name, enabled
+        FROM collector_sources
+        WHERE entity_type = 'channel'
+        ORDER BY parent_id, name
+    """)
+
+    # 3. Find traders per channel — Discord: via news_items.author
+    #    Telegram: via trader_profiles.channel_id
+    trader_channel_rows = await pool.fetch_all("""
+        SELECT DISTINCT ON (ni.channel_name, ni.author)
+               ni.channel_name, ni.author, ni.source,
+               tp.id AS trader_id, tp.handle_raw, tp.display_name,
+               tp.trader_type, tp.is_tracked, tp.tracked_media_types,
+               tp.prompt_id, tp.accuracy_score, tp.accuracy_samples
+        FROM news_items ni
+        JOIN trader_profiles tp ON tp.handle_raw = ni.author
+        WHERE ni.channel_name IS NOT NULL
+          AND ni.author IS NOT NULL
+          AND ni.source IN ('discord', 'telegram')
+        ORDER BY ni.channel_name, ni.author, ni.collected_at DESC
+    """)
+
+    # Also get Telegram traders linked via trader_profiles.channel_id
+    telegram_traders = await pool.fetch_all("""
+        SELECT tp.id AS trader_id, tp.handle_raw, tp.display_name,
+               tp.trader_type, tp.is_tracked, tp.tracked_media_types,
+               tp.prompt_id, tp.accuracy_score, tp.accuracy_samples,
+               tp.channel_id
+        FROM trader_profiles tp
+        WHERE tp.platform = 'telegram'
+          AND tp.channel_id IS NOT NULL
+          AND tp.channel_id != ''
+    """)
+
+    # 4. Build channel_name → traders map from news_items
+    ch_traders: dict = {}
+    for r in trader_channel_rows:
+        ch_name = r["channel_name"]
+        if ch_name not in ch_traders:
+            ch_traders[ch_name] = {}
+        handle = r["author"]
+        if handle not in ch_traders[ch_name]:
+            ch_traders[ch_name][handle] = {
+                "id": r["trader_id"],
+                "handle": r["handle_raw"],
+                "display_name": r["display_name"] or r["handle_raw"],
+                "trader_type": r["trader_type"],
+                "is_tracked": bool(r["is_tracked"]) if r["is_tracked"] is not None else True,
+                "tracked_media_types": r["tracked_media_types"] or "all",
+                "prompt_id": r["prompt_id"],
+                "accuracy_score": float(r["accuracy_score"]) if r["accuracy_score"] else None,
+                "accuracy_samples": r["accuracy_samples"],
+            }
+
+    # 5. Add Telegram channel_id-linked traders
+    for r in telegram_traders:
+        ch_id = r["channel_id"]
+        # Find collector_sources channel name for this Telegram channel_id
+        cs_row = await pool.fetch_one(
+            "SELECT name FROM collector_sources WHERE platform_id = $1 AND source_type = 'telegram' LIMIT 1",
+            (ch_id,),
+        )
+        ch_name = cs_row["name"] if cs_row else ch_id
+        if ch_name not in ch_traders:
+            ch_traders[ch_name] = {}
+        handle = r["handle_raw"]
+        if handle not in ch_traders[ch_name]:
+            ch_traders[ch_name][handle] = {
+                "id": r["trader_id"],
+                "handle": r["handle_raw"],
+                "display_name": r["display_name"] or r["handle_raw"],
+                "trader_type": r["trader_type"],
+                "is_tracked": bool(r["is_tracked"]) if r["is_tracked"] is not None else True,
+                "tracked_media_types": r["tracked_media_types"] or "all",
+                "prompt_id": r["prompt_id"],
+                "accuracy_score": float(r["accuracy_score"]) if r["accuracy_score"] else None,
+                "accuracy_samples": r["accuracy_samples"],
+            }
+
+    # 6. Build channel_name → collector_source id lookup
+    ch_name_to_id: dict = {}
+    for r in channel_rows:
+        ch_name_to_id[r["name"]] = r["id"]
+
+    # 7. Assemble tree: groups → channels → traders
+    groups_out: list = []
+    for gr in groups_rows:
+        ch_list: list = []
+        gr_id = gr["id"]
+        for ch in channel_rows:
+            if ch["parent_id"] != gr_id:
+                continue
+            ch_name = ch["name"]
+            traders_dict = ch_traders.get(ch_name, {})
+            traders_list = list(traders_dict.values())
+            tracked_count = sum(1 for t in traders_list if t["is_tracked"])
+
+            # Also match by channel_name substring for fuzzy matching
+            if not traders_list:
+                # Try matching by collector source name against ch_traders keys
+                for tcn, tdict in ch_traders.items():
+                    # Normalize for comparison
+                    norm_ch = ch_name.strip().lower()
+                    norm_tcn = tcn.strip().lower()
+                    if norm_ch == norm_tcn:
+                        traders_list = list(tdict.values())
+                        tracked_count = sum(1 for t in traders_list if t["is_tracked"])
+                        break
+
+            ch_list.append({
+                "id": ch["id"],
+                "name": ch_name,
+                "enabled": ch["enabled"],
+                "trader_count": len(traders_list),
+                "tracked_count": tracked_count,
+                "traders": traders_list,
+            })
+
+        # Sort channels by trader_count desc
+        ch_list.sort(key=lambda c: (-c["trader_count"], c["name"]))
+
+        groups_out.append({
+            "id": gr_id,
+            "name": gr["name"],
+            "source": gr["source_type"],
+            "enabled": gr["enabled"],
+            "channels": ch_list,
+        })
+
+    return _json_response({"ok": True, "groups": groups_out})
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/settings/source-groups — batch tracking at group/channel/trader level
+# ---------------------------------------------------------------------------
+async def handle_put_source_groups(request: web.Request) -> web.Response:
+    """Save tracking selections for group, channel, or trader.
+
+    Body::
+        {
+          "action": "track_group" | "track_channel" | "track_trader",
+          "id": <int>,
+          "tracked": true | false
+        }
+
+    track_group: updates is_tracked for ALL traders in ALL channels under the group.
+    track_channel: updates is_tracked for ALL traders in the channel.
+    track_trader: updates is_tracked for one trader (same as /api/settings/track).
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+    if not isinstance(body, dict):
+        return _err("body must be a JSON object")
+
+    action = (body.get("action") or "").strip()
+    target_id = body.get("id")
+    tracked = body.get("tracked")
+
+    if action not in ("track_group", "track_channel", "track_trader"):
+        return _err("action must be track_group, track_channel, or track_trader")
+    if target_id is None:
+        return _err("id is required")
+    if tracked is None or not isinstance(tracked, bool):
+        return _err("tracked must be true or false")
+
+    from shared.utils.db import get_shared_pool
+    pool = await get_shared_pool()
+
+    trader_ids: list = []
+
+    if action == "track_trader":
+        trader_ids = [int(target_id)]
+
+    elif action == "track_channel":
+        # Find all traders in this channel via news_items
+        ch_row = await pool.fetch_one(
+            "SELECT name FROM collector_sources WHERE id = $1 AND entity_type = 'channel'",
+            (int(target_id),),
+        )
+        if not ch_row:
+            return _err(f"channel {target_id} not found", status=404)
+        ch_name = ch_row["name"]
+
+        rows = await pool.fetch_all("""
+            SELECT DISTINCT tp.id
+            FROM news_items ni
+            JOIN trader_profiles tp ON tp.handle_raw = ni.author
+            WHERE ni.channel_name = $1 AND ni.author IS NOT NULL
+        """, (ch_name,))
+        trader_ids = [r["id"] for r in rows]
+
+        # Also check Telegram channel_id-linked traders
+        tg_rows = await pool.fetch_all("""
+            SELECT tp.id FROM trader_profiles tp
+            JOIN collector_sources cs ON cs.platform_id = tp.channel_id
+            WHERE cs.id = $1
+        """, (int(target_id),))
+        trader_ids.extend(r["id"] for r in tg_rows)
+
+    elif action == "track_group":
+        # Find all channels under this group, then all traders in those channels
+        ch_rows = await pool.fetch_all(
+            "SELECT name FROM collector_sources WHERE parent_id = $1 AND entity_type = 'channel'",
+            (int(target_id),),
+        )
+        ch_names = [r["name"] for r in ch_rows]
+
+        if ch_names:
+            rows = await pool.fetch_all("""
+                SELECT DISTINCT tp.id
+                FROM news_items ni
+                JOIN trader_profiles tp ON tp.handle_raw = ni.author
+                WHERE ni.channel_name = ANY($1) AND ni.author IS NOT NULL
+            """, (ch_names,))
+            trader_ids = [r["id"] for r in rows]
+
+    if not trader_ids:
+        return _json_response({"ok": True, "action": action, "id": target_id,
+                               "tracked": tracked, "updated_count": 0})
+
+    # Batch update
+    await pool.execute(
+        "UPDATE trader_profiles SET is_tracked = $1 WHERE id = ANY($2)",
+        (tracked, trader_ids),
+    )
+
+    return _json_response({"ok": True, "action": action, "id": target_id,
+                           "tracked": tracked, "updated_count": len(trader_ids)})
+
+
+# ---------------------------------------------------------------------------
 # PUT /api/settings/track — update trader tracking/prompt
 # ---------------------------------------------------------------------------
 async def handle_put_track(request: web.Request) -> web.Response:
@@ -863,6 +1135,134 @@ async def handle_rename_prompt_version(request: web.Request) -> web.Response:
     return _json_response({"ok": True, "from": old_ver, "to": new_ver})
 
 
+# ===========================================================================
+# Round 14 (2026-05-29) — Provider-aware model picker (all slots).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/slots — every configurable slot + its resolved provider/model
+# ---------------------------------------------------------------------------
+async def handle_list_slots(request: web.Request) -> web.Response:
+    """Return all slots with static meta + resolved {provider, model, sources}.
+
+    Shape::
+        {"ok": true, "slots": [
+            {"slot","label","kind","service","vision","def_provider","def_model",
+             "provider","model","provider_source","model_source"}, ...]}
+    """
+    try:
+        from shared.intelligence.model_config import list_slots, get_all_slots_v2
+        meta = {s["slot"]: s for s in list_slots()}
+        resolved = await get_all_slots_v2()
+    except Exception as exc:
+        logger.exception("settings: list_slots failed")
+        return _err(f"failed to read slots: {exc}", status=500)
+
+    out: List[Dict[str, Any]] = []
+    for slot, m in meta.items():
+        r = resolved.get(slot, {})
+        out.append({
+            **m,
+            "provider": r.get("provider"),
+            "model": r.get("model"),
+            "provider_source": r.get("provider_source"),
+            "model_source": r.get("model_source"),
+        })
+    return _json_response({"ok": True, "slots": out})
+
+
+# ---------------------------------------------------------------------------
+# GET /api/settings/catalogue?slot=<slot>&provider=<openrouter|requesty>
+# ---------------------------------------------------------------------------
+async def handle_catalogue(request: web.Request) -> web.Response:
+    """Return catalogue rows grouped {policies, models}, filtered for a slot.
+
+    Query params:
+      * slot     — if given, vision filtering follows the slot's kind.
+      * provider — optional 'openrouter'|'requesty' filter.
+      * kind     — optional explicit 'vision'|'text' override of slot kind.
+    """
+    slot = (request.query.get("slot") or "").strip()
+    provider = (request.query.get("provider") or "").strip().lower() or None
+    kind = (request.query.get("kind") or "").strip().lower() or None
+    if provider and provider not in ("openrouter", "requesty"):
+        return _err("provider must be openrouter|requesty")
+
+    try:
+        from shared.intelligence.model_config import slot_is_vision
+        from shared.intelligence.model_catalogue_sync import list_for_picker, catalogue_count
+
+        if kind in ("vision", "text"):
+            vision_only = kind == "vision"
+        elif slot:
+            vision_only = slot_is_vision(slot)
+        else:
+            vision_only = False
+
+        grouped = await list_for_picker(provider=provider, vision_only=vision_only)
+        total = await catalogue_count()
+    except ValueError as exc:
+        return _err(str(exc), status=400)
+    except Exception as exc:
+        logger.exception("settings: catalogue read failed")
+        return _err(f"failed to read catalogue: {exc}", status=500)
+
+    return _json_response({
+        "ok": True,
+        "slot": slot or None,
+        "provider": provider,
+        "vision_only": vision_only,
+        "catalogue_total": total,
+        "policies": grouped["policies"],
+        "models": grouped["models"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# POST /api/settings/slot  body: {"slot","provider","model"}
+# ---------------------------------------------------------------------------
+async def handle_set_slot(request: web.Request) -> web.Response:
+    """Persist {provider, model} for a slot."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return _err("body must be JSON")
+    if not isinstance(body, dict):
+        return _err("body must be a JSON object")
+
+    slot = (body.get("slot") or "").strip()
+    provider = (body.get("provider") or "").strip().lower()
+    model = (body.get("model") or "").strip()
+    if not slot or not provider or not model:
+        return _err("slot, provider, and model are all required")
+
+    try:
+        from shared.intelligence.model_config import set_slot, get_all_slots_v2
+        result = await set_slot(slot, provider, model, actor_label=_actor_label(request))
+        slots = await get_all_slots_v2()
+    except ValueError as exc:
+        return _err(str(exc), status=400)
+    except Exception as exc:
+        logger.exception("settings: set_slot failed")
+        return _err(f"failed to persist: {exc}", status=500)
+
+    return _json_response({"ok": True, "changed": result, "slots": slots})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/settings/catalogue/refresh — re-sync both providers now
+# ---------------------------------------------------------------------------
+async def handle_refresh_catalogue(request: web.Request) -> web.Response:
+    """Trigger an immediate OpenRouter + Requesty catalogue sync."""
+    try:
+        from shared.intelligence.model_catalogue_sync import sync_all
+        summary = await sync_all()
+    except Exception as exc:
+        logger.exception("settings: catalogue refresh failed")
+        return _err(f"refresh failed: {exc}", status=502)
+    return _json_response({"ok": True, "summary": summary})
+
+
 # ---------------------------------------------------------------------------
 # Mount
 # ---------------------------------------------------------------------------
@@ -872,6 +1272,11 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_post(f"{prefix}/api/settings/vision-model", handle_set_vision_model)
     app.router.add_post(f"{prefix}/api/settings/test-vision-model", handle_test_vision_model)
     app.router.add_get(f"{prefix}/api/settings/vision-model-history", handle_history)
+    # Round 14 — provider-aware all-slots model picker.
+    app.router.add_get(f"{prefix}/api/settings/slots", handle_list_slots)
+    app.router.add_get(f"{prefix}/api/settings/catalogue", handle_catalogue)
+    app.router.add_post(f"{prefix}/api/settings/slot", handle_set_slot)
+    app.router.add_post(f"{prefix}/api/settings/catalogue/refresh", handle_refresh_catalogue)
     # Round 13.5 — dedup knobs
     app.router.add_get(f"{prefix}/api/settings/dedup", handle_get_dedup)
     app.router.add_post(f"{prefix}/api/settings/dedup", handle_set_dedup)
@@ -880,6 +1285,8 @@ def attach_routes(app: web.Application, *, prefix: str = "") -> None:
     app.router.add_post(f"{prefix}/api/settings/copy-sizing", handle_set_copy_sizing)
     # Prompt library + source tracking
     app.router.add_get(f"{prefix}/api/settings/sources", handle_get_sources)
+    app.router.add_get(f"{prefix}/api/settings/source-groups", handle_get_source_groups)
+    app.router.add_put(f"{prefix}/api/settings/source-groups", handle_put_source_groups)
     app.router.add_put(f"{prefix}/api/settings/track", handle_put_track)
     app.router.add_get(f"{prefix}/api/settings/prompts/versions", handle_get_prompt_versions)
     app.router.add_get(f"{prefix}/api/settings/prompts/versions/{{version}}", handle_get_prompt_version)

@@ -31,9 +31,17 @@ from shared.mcp.tools.intelligence import (
     _estimate_cost_usd,
     _extract_json_block,
     _fmt_ts,
+    _handle_reinterpret,
     _image_to_base64,
     _now_iso,
     register,
+)
+from shared.intelligence.reinterpret_legs import build_legs_from_trades
+from shared.intelligence.interpretation_service import (
+    LlmResult,
+    QuantResult,
+    ConsensusResult,
+    build_reinterpret_response,
 )
 
 
@@ -579,6 +587,7 @@ class TestRegister:
 
         # Phase 3B tools
         assert "intelligence.chart_analyze" in names
+        assert "intelligence.reinterpret" in names
         assert "intelligence.interpret" in names
         assert "intelligence.trader_profile" in names
         assert "intelligence.trader_score" in names
@@ -588,9 +597,113 @@ class TestRegister:
         assert "intelligence.positions.open" in names
         assert "intelligence.positions.history" in names
         assert "intelligence.traders.leaderboard" in names
-        assert "intelligence.guru.report" in names
         assert "intelligence.epic.resolve" in names
-        assert len(names) == 11
+        assert len(names) == 12
+
+
+class TestBuildReinterpretResponse:
+    """Full-schema serializer matches Lens prompt contract."""
+
+    def test_includes_dual_tracks_and_parsed_superset(self) -> None:
+        llm = LlmResult(
+            direction="short",
+            confidence=0.82,
+            reasoning="legacy slice",
+            levels={"entry": 75185.0, "stop_loss": 76801.0, "take_profit": 65471.0},
+            instrument="BTC/USDT",
+            timeframe="6h",
+            trader_trades=[
+                {
+                    "direction": "short",
+                    "entry": 75185.0,
+                    "stop_loss": 76801.0,
+                    "tp1": 65471.0,
+                    "evidence": "position_box",
+                    "confidence": 0.85,
+                },
+                {
+                    "direction": "short",
+                    "entry": 73500.0,
+                    "stop_loss": 74200.0,
+                    "tp1": 71000.0,
+                    "evidence": "position_box",
+                    "confidence": 0.8,
+                },
+            ],
+            chart_hacker_trades=[
+                {
+                    "direction": "short",
+                    "entry": 75185.0,
+                    "evidence": "inferred",
+                    "confidence": 0.7,
+                },
+            ],
+            chart_analysis={"market_structure": "range"},
+            prompt_version="db:2026.05.30-discord-semantic-v8",
+            prompt_hash="abc123",
+            raw_response='{"reasoning":"full reasoning"}',
+        )
+        parsed = {
+            "instrument": "BTCUSD",
+            "timeframe": "6h",
+            "setup_state": "actionable",
+            "trader_sentiment": 0.2,
+            "chart_hacker_sentiment": -0.1,
+            "ai_agreement_with_trader": 0.75,
+            "ai_comment_on_trader": "agrees on first short",
+            "reasoning": "full reasoning",
+            "extra_future_field": "preserved",
+        }
+        quant = QuantResult(direction="short", confidence=0.6, indicators={"rsi": 55})
+        consensus = ConsensusResult(
+            direction="short", confidence=0.78, method="agreement",
+            llm_result=llm, quant_result=quant,
+        )
+        out = build_reinterpret_response(
+            llm, parsed=parsed, consensus=consensus, quant=quant,
+            meta={"media_id": 6442},
+        )
+        assert out["ok"] is True
+        assert len(out["trader_trades"]) == 2
+        assert len(out["chart_hacker_trades"]) == 1
+        assert out["setup_state"] == "actionable"
+        assert out["parsed"]["extra_future_field"] == "preserved"
+        assert out["consensus"]["method"] == "agreement"
+        assert out["quant"]["indicators"]["rsi"] == 55
+        assert out["meta"]["media_id"] == 6442
+
+
+class TestReinterpretPersistFlags:
+    """MCP persist/rearm guard rails."""
+
+    @pytest.mark.asyncio
+    async def test_persist_requires_interpretation_id(self) -> None:
+        out = await _handle_reinterpret({"mediaId": 1, "persist": True})
+        assert out["ok"] is False
+        assert "interpretationId" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_rearm_requires_interpretation_id(self) -> None:
+        out = await _handle_reinterpret({"imagePath": "/tmp/x.png", "rearm": True})
+        assert out["ok"] is False
+        assert "interpretationId" in out["error"]
+
+
+class TestReinterpretLegs:
+    """Per-leg symbol and timeframe normalization."""
+
+    def test_btcusd_maps_to_usdt_for_candles(self) -> None:
+        legs = build_legs_from_trades(
+            trader_trades=[{"direction": "short", "entry": 75000, "symbol": "BTCUSD", "timeframe": "6H"}],
+            chart_hacker_trades=[],
+            default_symbol="BTC/USDT",
+            default_exchange="bybit",
+            default_timeframe="6h",
+        )
+        assert len(legs) == 1
+        assert legs[0]["symbol"] == "BTC/USDT"
+        assert legs[0]["timeframe"] == "6h"
+        assert legs[0]["timeframe_source"] == "6H"
 
     def test_tools_have_correct_tags(self) -> None:
         reg = ToolRegistry()
@@ -598,7 +711,7 @@ class TestRegister:
         register(reg, ctx)
 
         for tool in reg.list_tools():
-            assert tool.tags.get("phase") in ("3b", "3c")
+            assert tool.tags.get("phase") in ("3b", "3c", "8")
             assert tool.tags.get("group") == "intelligence"
 
 

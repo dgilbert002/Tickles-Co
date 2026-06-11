@@ -1,0 +1,7 @@
+        media_id = media_row["media_id"]
+        news_item_id = media_row["news_item_id"]
+        local_path = media_row["local_path"]
+        source_id = media_row.get("source_id")
+        source_url = media_row.get("source_url", "")
+        headline = media_row.get("headline", "")
+        content = media_row.get("content", "")

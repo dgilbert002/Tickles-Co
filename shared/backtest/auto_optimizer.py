@@ -53,7 +53,9 @@ async def optimize_symbol(pool, sym, trades):
     """Run full sweep, return best multipliers + stats."""
     start = min(r["signal_timestamp"] for r in trades)
     end = max(r["closed_at"] for r in trades)
-    candles = await load_candles_1m(pool, sym, start, end)
+    # Strip trailing :USDT (tracked_positions uses BTC/USDT:USDT, candles use BTC/USDT)
+    candle_sym = sym.replace(':USDT', '') if sym.endswith(':USDT') else sym
+    candles = await load_candles_1m(pool, candle_sym, start, end)
     if not candles or len(candles) < 10:
         return None
 

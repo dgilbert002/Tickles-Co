@@ -204,7 +204,7 @@ class TestRound7_MigrationShape(unittest.TestCase):
         for agent_id in (
             "copy_spot_seq", "copy_lev_parallel", "copy_lev_be_lock",
             "copy_opt_spot_seq", "copy_opt_lev_parallel",
-            "copy_opt_lev_be_lock", "copy_ch_ai_vision",
+            "copy_opt_lev_be_lock", "copy_charthacker",
         ):
             self.assertIn(f"'{agent_id}'", self.sql, f"missing seed: {agent_id}")
 
@@ -240,7 +240,7 @@ class TestRound7_BackfillScriptShape(unittest.TestCase):
         for agent_id in (
             "copy_spot_seq", "copy_lev_parallel", "copy_lev_be_lock",
             "copy_opt_spot_seq", "copy_opt_lev_parallel",
-            "copy_opt_lev_be_lock", "copy_ch_ai_vision",
+            "copy_opt_lev_be_lock", "copy_charthacker",
         ):
             self.assertIn(f'"{agent_id}"', self.src, f"missing agent: {agent_id}")
 

@@ -69,7 +69,7 @@ KNOWN_AGENTS = [
     "copy_opt_spot_seq",
     "copy_opt_lev_parallel",
     "copy_opt_lev_be_lock",
-    "copy_ch_ai_vision",
+    "copy_charthacker",
 ]
 
 

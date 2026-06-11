@@ -4,6 +4,7 @@ Purpose: Smoke tests for ChartHackerOpinionService.
 Location: /opt/tickles/shared/tests/test_chart_hacker_opinion_service.py
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +26,9 @@ class _FakeRecord:
     def __getitem__(self, key: str):
         return self._data[key]
 
+    def get(self, key: str, default=None):
+        return self._data.get(key, default)
+
 
 @pytest.mark.anyio
 async def test_should_fire_initial(service: ChartHackerOpinionService) -> None:
@@ -33,34 +37,42 @@ async def test_should_fire_initial(service: ChartHackerOpinionService) -> None:
 
 
 @pytest.mark.anyio
-async def test_should_fire_price_move(service: ChartHackerOpinionService) -> None:
-    from datetime import datetime, timezone
-
-    last_op = datetime.now(timezone.utc)
+async def test_should_fire_sl_tp_change(service: ChartHackerOpinionService) -> None:
+    last_op = datetime.now(timezone.utc) - timedelta(hours=2)
+    price_at = last_op + timedelta(minutes=30)
+    plan_at = last_op + timedelta(hours=1)
     row = _FakeRecord(
         {
             "last_opinion_at": last_op,
-            "entry_price": 100.0,
-            "current_price": 102.0,  # 2% move
-            "last_bucket": 100,
-            "last_update_ts": None,
+            "position_updated_at": plan_at,
+            "price_updated_at": price_at,
         }
     )
     assert service._should_fire(row) is True
 
 
 @pytest.mark.anyio
-async def test_should_fire_no_trigger(service: ChartHackerOpinionService) -> None:
-    from datetime import datetime, timezone
+async def test_should_fire_no_trigger_after_price_tick(service: ChartHackerOpinionService) -> None:
+    last_op = datetime.now(timezone.utc) - timedelta(hours=1)
+    tick_at = last_op + timedelta(minutes=5)
+    row = _FakeRecord(
+        {
+            "last_opinion_at": last_op,
+            "position_updated_at": tick_at,
+            "price_updated_at": tick_at,
+        }
+    )
+    assert service._should_fire(row) is False
 
+
+@pytest.mark.anyio
+async def test_should_fire_no_trigger_stable(service: ChartHackerOpinionService) -> None:
     last_op = datetime.now(timezone.utc)
     row = _FakeRecord(
         {
             "last_opinion_at": last_op,
-            "entry_price": 100.0,
-            "current_price": 100.5,  # 0.5% move — below 1% threshold
-            "last_bucket": 100,
-            "last_update_ts": None,
+            "position_updated_at": last_op,
+            "price_updated_at": last_op,
         }
     )
     assert service._should_fire(row) is False

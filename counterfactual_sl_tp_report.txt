@@ -1,0 +1,98 @@
+================================================================================
+COUNTERFACTUAL ANALYSIS: Missing SL/TP Positions
+================================================================================
+Date: 2026-06-07
+SL assumption: 5%% from entry. TP assumption: 10%% from entry.
+Positions analyzed: 34 (all open, both SL and TP NULL)
+All have candle data on bybit (1h) -- none blind.
+
+================================================================================
+SUMMARY
+================================================================================
+
+  Outcome     | Count |  %%    | Avg Current PnL | Min PnL  | Max PnL
+  ------------+-------+-------+-----------------+----------+----------
+  TP_HIT      |   7   | 20.6%% |       +16.45%%   |  +8.77%%  | +27.66%%
+  SL_HIT      |  21   | 61.8%% |        -8.07%%   | -22.49%%  | +17.79%%
+  STILL_OPEN  |   6   | 17.6%% |        +0.45%%   |  -3.49%%  |  +4.82%%
+
+================================================================================
+TP_HIT (7 positions -- would have taken +10%% profit)
+================================================================================
+All 7 currently green (avg +16.45%%). TP would have been mildly detrimental.
+
+  ID    Symbol      Dir   Entry      Current  PnL%%
+  10601 BTC/USDT    short 75500.00   62842.50 +16.76
+  13633 BTC/USDT    short 77219.00   62842.50 +18.62
+  13944 SUI/USDT    short    0.9192    0.7622 +17.08
+  13972 RENDER/USDT short    2.3720    1.7160 +27.66
+  14203 BTC/USDT    short 73756.50   62842.50 +14.80
+  14466 BTC/USDT    short 70987.00   62842.50 +11.47
+  14502 BTC/USDT    short 68882.60   62842.50  +8.77
+
+================================================================================
+SL_HIT (21 positions -- would have been stopped at -5%%)
+================================================================================
+  17/21 currently RED (avg -13.61%%) -- SL would have SAVED them.
+   4/21 currently GREEN (avg +15.44%%) -- premature stop.
+
+  --- Currently RED: SL would have helped ---
+  ID    Symbol      Dir   Entry      Current  PnL%%
+  13950 SUI/USDT    long    0.9500    0.7622 -19.77
+  14201 BRETT/USDT  long    0.0068    0.0056 -17.74
+  14202 BTC/USDT    long 73756.50   62842.50 -14.80
+  14207 AAVE/USDT   long   81.7600   63.8900 -21.86
+  14208 AAVE/USDT   long   82.4300   63.8900 -22.49
+  14214 ETH/USDT    long 2017.66    1641.59  -18.64
+  14227 ETH/USDT    long 2022.61    1641.59  -18.84
+  14355 RENDER/USDT long    2.0460    1.7160 -16.13
+  14428 PUMP/USDT   long    0.0017    0.0015 -11.12
+  14454 BTC/USDT    long 70000.00   62842.50 -10.23
+  14482 HYPE/USDT   long   71.2170   60.2200 -15.44
+  14512 BNB/USDT    long  658.09     596.70   -9.33
+  14513 BNB/USDT    long  667.00     596.70  -10.54
+  14514 EIGEN/USDT  long    0.1750    0.1741  -0.51
+  14518 ZEC/USDT    short 372.49     401.71   -7.84
+  14532 BRETT/USDT  short   0.0052    0.0056  -7.26
+  14536 FET/USDT    short   0.1935    0.2105  -8.79
+
+  --- Currently GREEN: premature stop (all shorts on volatile alts) ---
+  ID    Symbol      Dir   Entry      Current  PnL%%
+  14170 LINEA/USDT  short   0.0030    0.0025 +15.20
+  14205 OP/USDT     short   0.1186    0.0975 +17.79
+  14381 JUP/USDT    short   0.1895    0.1603 +15.41
+  14410 BNB/USDT    short 688.60     596.70  +13.35
+
+================================================================================
+STILL_OPEN (6 -- neither SL nor TP hit, range-bound)
+================================================================================
+  ID    Symbol      Dir   Entry      Current  PnL%%
+  14076 XAU/USDT    short 4554.00   4334.54  +4.82
+  14103 XAU/USDT    long  4400.20   4334.54   -1.49
+  14378 XAU/USDT    short 4538.92   4334.54  +4.50
+  14530 BTC/USDT    short 60720.50  62842.50  -3.49
+  14539 BTC/USDT    short 60976.30  62842.50  -3.06
+  14556 BTC/USDT    long  61950.00  62842.50  +1.44
+
+================================================================================
+REAL-WORLD IMPACT
+================================================================================
+
+NET OUTCOME of missing SL/TP:
+  17/34 (50%%) better off WITH SL (would have been saved from -13.6%% avg)
+   4/34 (12%%) worse off WITH SL (premature stop, now +15.4%% avg)
+   7/34 (21%%) slightly worse off WITH TP (TP caps at +10%% vs +16.5%% avg)
+   6/34 (18%%) unchanged
+
+The absence of SL has allowed -5%% losses to become -13.6%% on average.
+The 4 premature-stop cases are all short altcoin positions that spiked 
+above SL then reversed hard -- suggesting wider stops for volatile alts.
+
+================================================================================
+RECOMMENDATION
+================================================================================
+- Add SL to ALL positions. 50%% benefit rate strongly outweighs 12%% premature rate.
+- Consider 7-8%% SL for volatile altcoins instead of 5%%.
+- Use ATR-based stops rather than fixed %% for volatile instruments.
+- For TP: partial take-profit at +10%% with trailing stop on remainder.
+================================================================================
