@@ -485,12 +485,12 @@ class DemoBridge:
                         await pool.execute(
                             "INSERT INTO public.demo_orders "
                             "(tracked_position_id, exchange, account_name, exchange_order_id, "
-                            "agent_id, symbol, direction, paper_entry, paper_sl, paper_tp, "
+                            "agent_id, symbol, direction, paper_entry, demo_entry, paper_sl, paper_tp, "
                             "leverage, quantity, notional_usd, status, ordered_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
                             "ON CONFLICT DO NOTHING",
                             (tp_id, acct["exchange"], acct["account_name"], ext_id,
-                             agent_id, sym, direction, entry, sl, tp, leverage, qty, notional_eff)
+                             agent_id, sym, direction, entry, entry, sl, tp, leverage, qty, notional_eff)
                         )
                     except Exception as exc:
                         LOG.debug("demo_orders insert (accepted) failed: %s", exc)
@@ -616,6 +616,41 @@ class DemoBridge:
             pass
         return None
 
+    async def _cancel_stale_orders(self):
+        """Cancel DB-tracked pending demo orders that haven't filled in 24h.
+
+        Limit orders resting for >24h are almost certainly stale — price moved
+        past them or they'll never hit. They count against the agent's
+        concurrency cap, blocking new signals. Exchange-side cancellation is
+        best-effort (the order may already be filled/cancelled on exchange).
+        """
+        stale_hours = int(os.environ.get("DEMO_STALE_HOURS", "24"))
+        pool = await self._ensure_pool()
+        rows = await pool.fetch_all(
+            "SELECT id, exchange, account_name, exchange_order_id "
+            "FROM public.demo_orders "
+            "WHERE status = 'pending' AND ordered_at < NOW() - INTERVAL '%s hours'",
+            (stale_hours,),
+        )
+        if not rows:
+            return
+        LOG.info("Stale cleanup: cancelling %d pending orders older than %dh",
+                 len(rows), stale_hours)
+        for r in rows:
+            oid = r["exchange_order_id"]
+            if oid:
+                try:
+                    await self._cancel_demo_order(
+                        r["id"], r["account_name"], oid,
+                    )
+                except Exception:
+                    pass  # best-effort; order may already be gone
+            await pool.execute(
+                "UPDATE public.demo_orders SET status='cancelled', "
+                "error_message='stale cleanup: unfilled >%sh' WHERE id=%s",
+                (stale_hours, r["id"]),
+            )
+
     async def tick(self):
         mappings = await self._load_mappings()
         if not mappings:
@@ -635,6 +670,11 @@ class DemoBridge:
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
         await self._reconcile_fills()
+
+        # 1c. Cancel stale pending orders (>24h unfilled). Without this,
+        # accumulated limit orders clog the per-agent concurrency caps and
+        # block new signals permanently (126 stale orders from June 10).
+        await self._cancel_stale_orders()
 
         # 2. Cancel orders for cancelled/expired signals
         cancelled = await self._get_cancelled_signals()
