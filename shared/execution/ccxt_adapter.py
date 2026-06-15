@@ -78,6 +78,7 @@ class CcxtExecutionAdapter:
         self._known_orders: Dict[str, Dict[str, Any]] = {}
         self._leverage_cache: Dict[str, int] = {}
         self._position_mode_set: set = set()  # (exchange, account) pairs in one-way mode
+        self._margin_mode_set: set = set()     # (exchange, account, symbol) cross-margin done
 
     # ------------------------------------------------------------------
     # Client management
@@ -216,12 +217,12 @@ class CcxtExecutionAdapter:
         Best-effort: any failure is swallowed (already in cross, unsupported
         symbol, etc.) so order flow is never gated on margin mode.
         """
-        margin_key = f"{exchange}:{account_name}:cross_{symbol}"
-        if margin_key in self._position_mode_set:
+        margin_key = f"{exchange}:{account_name}:{symbol}"
+        if margin_key in self._margin_mode_set:
             return
         try:
             await asyncio.to_thread(client.set_margin_mode, "cross", symbol)
-            self._position_mode_set.add(margin_key)
+            self._margin_mode_set.add(margin_key)
         except Exception:
             try:
                 # Bybit fallback — private API
@@ -232,7 +233,7 @@ class CcxtExecutionAdapter:
                         "tradeMode": 0,  # 0 = cross margin
                     })
                 )
-                self._position_mode_set.add(margin_key)
+                self._margin_mode_set.add(margin_key)
             except Exception:
                 pass  # already cross, unsupported, or non-crypto symbol
 

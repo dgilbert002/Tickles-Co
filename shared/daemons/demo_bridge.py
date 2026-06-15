@@ -467,7 +467,10 @@ class DemoBridge:
                 
                 if acc:
                     ext_id = acc[0].external_order_id
-                    self._orders.setdefault(tp_id, {})[acct["account_name"]] = ext_id
+                    self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
+                        "order_id": ext_id,
+                        "exchange": acct["exchange"],
+                    }
                     LOG.info("Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
                              tp_id, agent_id or "?", acct["exchange"], acct["account_name"],
                              direction, sym, qty, entry, sl, tp, leverage,
@@ -651,7 +654,10 @@ class DemoBridge:
             oid = r["exchange_order_id"]
             if oid:
                 try:
-                    await self._cancel_demo_order(r["id"], r["account_name"], oid)
+                    await self._cancel_demo_order(
+                        r["id"], r["account_name"], oid,
+                        exchange=r["exchange"],
+                    )
                 except Exception:
                     pass
             await pool.execute(
@@ -692,9 +698,15 @@ class DemoBridge:
         for c in cancelled:
             tp_id = c["id"]
             orders = self._orders.pop(tp_id, {})
-            for acct_name, order_id in orders.items():
-                if order_id:
-                    await self._cancel_demo_order(tp_id, acct_name, order_id)
+            for acct_name, info in orders.items():
+                if isinstance(info, dict):
+                    oid = info.get("order_id")
+                    exch = info.get("exchange", "bybit")
+                else:
+                    oid = info  # backward compat with old string-format entries
+                    exch = "bybit"
+                if oid:
+                    await self._cancel_demo_order(tp_id, acct_name, oid, exchange=exch)
             if orders:
                 LOG.info("Signal #%d cancelled — removed %d demo orders", tp_id, len(orders))
 
