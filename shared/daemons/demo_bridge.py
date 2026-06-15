@@ -620,6 +620,46 @@ class DemoBridge:
             pass
         return None
 
+    async def _cancel_orphan_orders(self):
+        """Cancel pending demo orders whose paper tracked_position is done.
+
+        The paper side is authoritative. When paper status moves from 'pending'
+        to 'open' (filled), 'closed' (trade complete), or 'expired' (timed out),
+        the corresponding demo limit order missed its entry window and will
+        never fill. Cancel it so it doesn't count against the cap.
+
+        Different from the old _cancel_stale_orders (time-based, which was
+        wrong — orders should track toward entry indefinitely). This only
+        cancels orders whose paper lifecycle has moved past 'pending'.
+
+        Exchange-side cancellation is best-effort; the DB update is the
+        canonical cleanup.
+        """
+        pool = await self._ensure_pool()
+        rows = await pool.fetch_all(
+            "SELECT d.id, d.exchange, d.account_name, d.exchange_order_id "
+            "FROM public.demo_orders d "
+            "JOIN public.tracked_positions tp ON tp.id = d.tracked_position_id "
+            "WHERE d.status = 'pending' "
+            "AND tp.status IN ('open', 'closed', 'expired')",
+        )
+        if not rows:
+            return
+        LOG.info("Orphan cleanup: cancelling %d demo orders (paper already open/closed/expired)",
+                 len(rows))
+        for r in rows:
+            oid = r["exchange_order_id"]
+            if oid:
+                try:
+                    await self._cancel_demo_order(r["id"], r["account_name"], oid)
+                except Exception:
+                    pass
+            await pool.execute(
+                "UPDATE public.demo_orders SET status='cancelled', "
+                "error_message='orphan: paper position no longer pending' "
+                "WHERE id=%s", (r["id"],),
+            )
+
     async def tick(self):
         mappings = await self._load_mappings()
         if not mappings:
@@ -639,6 +679,13 @@ class DemoBridge:
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
         await self._reconcile_fills()
+
+        # 1c. Cancel demo orders where the paper tracked_position is already
+        # open/closed/expired. These demo limits missed their entry and will
+        # never fill — the paper side already moved on. (Not the same as the
+        # stale-by-time cleanup — these are orphaned by paper lifecycle, which
+        # is the authoritative signal.)
+        await self._cancel_orphan_orders()
 
         # 2. Cancel orders for cancelled/expired signals
         cancelled = await self._get_cancelled_signals()

@@ -204,6 +204,38 @@ class CcxtExecutionAdapter:
         # Other exchanges: nothing to do.
         self._position_mode_set.add(mode_key)
 
+    async def _ensure_cross_margin(self, client: Any, exchange: str, account_name: str, symbol: str):
+        """Ensure the account uses cross-margin for this symbol (one-time switch).
+
+        Isolated margin (default) gives each position its own margin bucket, so
+        a new order can fail with "ab not enough" even when the account has
+        unrealized PnL from other positions. Cross margin pools all positions
+        into one bucket — exactly matching how paper/competition works.
+
+        This is a one-time call per symbol — the exchange remembers it.
+        Best-effort: any failure is swallowed (already in cross, unsupported
+        symbol, etc.) so order flow is never gated on margin mode.
+        """
+        margin_key = f"{exchange}:{account_name}:cross_{symbol}"
+        if margin_key in self._position_mode_set:
+            return
+        try:
+            await asyncio.to_thread(client.set_margin_mode, "cross", symbol)
+            self._position_mode_set.add(margin_key)
+        except Exception:
+            try:
+                # Bybit fallback — private API
+                clean = symbol.replace("/", "").split(":")[0]
+                await asyncio.to_thread(
+                    lambda: client.private_post_v5_position_switch_margin_mode({
+                        "category": "linear", "symbol": clean,
+                        "tradeMode": 0,  # 0 = cross margin
+                    })
+                )
+                self._position_mode_set.add(margin_key)
+            except Exception:
+                pass  # already cross, unsupported, or non-crypto symbol
+
     # ------------------------------------------------------------------
     # Submit order
     # ------------------------------------------------------------------
@@ -251,24 +283,39 @@ class CcxtExecutionAdapter:
         # Ensure one-way mode for Bybit
         await self._ensure_one_way_mode(client, ex, account_name, sym)
 
+        # ── Cross margin (one-time per symbol) ──
+        # Must precede leverage setting; the exchange may reject leverage
+        # changes if margin mode hasn't been switched first.
+        await self._ensure_cross_margin(client, ex, account_name, sym)
+
         # ── Leverage (spot accounts always trade 1x — skip) ──
         if lev and 1 <= lev <= 125 and self._default_type != "spot":
+            # Clamp computed leverage to the exchange's actual max for this symbol.
+            # Low-liquidity coins often cap at 12-25x; placing an 85x computed
+            # leverage silently rejects the order. The market data carries the real limit.
+            effective_lev = int(lev)
+            try:
+                if not client.markets:
+                    await asyncio.to_thread(client.load_markets)
+                if client.markets and sym in client.markets:
+                    max_lev = client.markets[sym].get('limits', {}).get('leverage', {}).get('max')
+                    if max_lev is not None:
+                        effective_lev = min(effective_lev, int(max_lev))
+                        effective_lev = max(effective_lev, 1)
+            except Exception:
+                pass  # use unclamped lev on lookup failure
+
             cache_key = f"{ex}:{sym}"
-            if self._leverage_cache.get(cache_key) != lev:
+            if self._leverage_cache.get(cache_key) != effective_lev:
                 try:
                     def _set():
                         params = {"productType": "USDT-FUTURES"} if ex == "bitget" else {}
-                        client.set_leverage(int(lev), sym, params=params)
+                        client.set_leverage(effective_lev, sym, params=params)
                     await asyncio.to_thread(_set)
-                    self._leverage_cache[cache_key] = int(lev)
+                    self._leverage_cache[cache_key] = effective_lev
                 except Exception as exc:
-                    # Phase 1 (2026-05-29): bumped debug→warning. When this
-                    # silently fails the order falls back to the account's
-                    # current leverage (often 1x), which needs the FULL notional
-                    # as margin and gets rejected with "ab not enough". Surfacing
-                    # it makes that failure mode diagnosable instead of invisible.
-                    LOG.warning("ccxt: set_leverage(%sx %s) failed, order will use "
-                                "account default leverage: %s", lev, sym, exc)
+                    LOG.warning("ccxt: set_leverage(%sx %s) failed: %s",
+                                effective_lev, sym, exc)
 
         # ── SL/TP params ──
         params: Dict[str, Any] = {}
