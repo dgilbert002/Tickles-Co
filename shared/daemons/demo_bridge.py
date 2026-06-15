@@ -607,6 +607,71 @@ class DemoBridge:
                      symbol=r["symbol"], exchange_status=status,
                      order_id=r["exchange_order_id"])
 
+    async def _reconcile_exits(self):
+        """Capture exchange-side close data for filled positions.
+
+        When a demo position closes on the exchange (SL/TP hit, manual close,
+        etc.), we poll `fetch_order` to capture: exit_price, exit_fee, demo_pnl,
+        slippage_exit. The demo_orders table has all these columns — they were
+        simply never written. This makes the paper-vs-demo comparison
+        statistically valid: paper's theoretical exit vs the exchange's actual fill.
+        """
+        pool = await self._ensure_pool()
+        rows = await pool.fetch_all(
+            "SELECT id, exchange, account_name, exchange_order_id, symbol, "
+            "       paper_entry, paper_sl, paper_tp, direction, notional_usd "
+            "FROM public.demo_orders "
+            "WHERE status = 'filled' AND closed_at IS NULL "
+            "  AND exchange_order_id IS NOT NULL "
+            "ORDER BY filled_at ASC LIMIT 20"
+        )
+        for r in rows:
+            try:
+                client = self._adapter._get_client(r["exchange"], r["account_name"])
+                raw = await asyncio.to_thread(
+                    client.fetch_order, r["exchange_order_id"], r["symbol"])
+            except Exception as exc:
+                LOG.debug("exit_reconcile fetch_order %s failed: %s",
+                          r["exchange_order_id"], exc)
+                continue
+            status = (raw.get("status") or "").lower()
+            # Only process orders that are fully closed on the exchange
+            if status != "closed":
+                continue
+            avg = raw.get("average") or raw.get("price")
+            if not avg:
+                continue
+            avg = float(avg)
+            paper_entry = float(r["paper_entry"] or 0)
+            notional = float(r["notional_usd"] or 0)
+            direction = (r["direction"] or "long").lower()
+
+            # P&L: (exit - entry) / entry * notional for long, inverse for short
+            pnl = 0.0
+            if paper_entry > 0 and notional > 0:
+                if direction == "long":
+                    pnl = (avg - paper_entry) / paper_entry * notional
+                else:
+                    pnl = (paper_entry - avg) / paper_entry * notional
+
+            exit_fee = self._extract_fee(raw)
+            slip_exit = ((avg - float(r.get("paper_tp") or 0)) / float(r.get("paper_tp") or 1)
+                         if r.get("paper_tp") else None)
+
+            await pool.execute(
+                "UPDATE public.demo_orders SET "
+                "status='closed', closed_at=NOW(), exit_price=%s, demo_pnl=%s, "
+                "slippage_exit=%s, exit_fee=%s, fees_synced_at=NOW(), "
+                "updated_at=NOW() WHERE id=%s AND closed_at IS NULL",
+                (avg, round(pnl, 8), slip_exit, exit_fee, r["id"]))
+            LOG.info("Demo order %s CLOSED @ %.6f pnl=%.4f (order %s)",
+                     r["symbol"], avg, pnl, r["exchange_order_id"])
+            flog("exit_reconciled", demo_order_id=r["id"],
+                 exchange=r["exchange"], account=r["account_name"],
+                 symbol=r["symbol"], direction=direction,
+                 exit_price=avg, demo_pnl=round(pnl, 4),
+                 exit_fee=exit_fee, order_id=r["exchange_order_id"])
+
     @staticmethod
     def _extract_fee(raw: Dict) -> Optional[float]:
         """Best-effort total execution fee (USDT) from a CCXT order dict."""
@@ -685,6 +750,9 @@ class DemoBridge:
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
         await self._reconcile_fills()
+
+        # 1b2. Reconcile filled-but-open positions (capture exit data)
+        await self._reconcile_exits()
 
         # 1c. Cancel demo orders where the paper tracked_position is already
         # open/closed/expired. These demo limits missed their entry and will
