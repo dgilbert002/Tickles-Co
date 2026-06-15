@@ -2171,6 +2171,20 @@ class PositionMonitor:
         # Write position_update
         update_id = await write_position_update(pool, snapshot)
 
+        # Near-miss flag: price got within 2% of entry (mae close to 0)
+        # then reversed >10% away. Valuable staleness intelligence.
+        _mae = snapshot.mae_pct
+        _dist = snapshot.distance_to_entry_pct
+        if _mae is not None and _dist is not None:
+            if abs(_mae) <= 2.0 and abs(_dist) > 10.0:
+                cur_reason = (position.get("status_reason") or "")
+                if not cur_reason.startswith("near_miss"):
+                    await pool.execute(
+                        "UPDATE public.tracked_positions "
+                        "SET status_reason = 'near_miss' "
+                        "WHERE id = $1 AND (status_reason IS NULL OR status_reason = '')",
+                        (pos_id,))
+
         # Update extremes
         await update_position_extremes(
             pool,
