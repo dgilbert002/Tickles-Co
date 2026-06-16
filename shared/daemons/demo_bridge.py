@@ -15,7 +15,7 @@ Usage:
   python3 -m shared.daemons.demo_bridge
 """
 import asyncio, logging, os, re, signal, sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, "/opt/tickles")
@@ -611,10 +611,11 @@ class DemoBridge:
         """Capture exchange-side close data for filled positions.
 
         When a demo position closes on the exchange (SL/TP hit, manual close,
-        etc.), we poll `fetch_order` to capture: exit_price, exit_fee, demo_pnl,
-        slippage_exit. The demo_orders table has all these columns — they were
-        simply never written. This makes the paper-vs-demo comparison
-        statistically valid: paper's theoretical exit vs the exchange's actual fill.
+        etc.), we poll fetch_positions (for open) and fetch_closed_orders
+        (for closed) to capture: exit_price, exit_fee, demo_pnl, slippage_exit.
+        fetch_order only returns LIMIT-ORDER fill data (same price for entry
+        and exit), which always produces zero P&L. The position and closed-order
+        APIs carry the real entry-vs-exit prices and P&L.
         """
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
@@ -626,51 +627,88 @@ class DemoBridge:
             "ORDER BY filled_at ASC LIMIT 20"
         )
         for r in rows:
-            try:
-                client = self._adapter._get_client(r["exchange"], r["account_name"])
-                raw = await asyncio.to_thread(
-                    client.fetch_order, r["exchange_order_id"], r["symbol"])
-            except Exception as exc:
-                LOG.debug("exit_reconcile fetch_order %s failed: %s",
-                          r["exchange_order_id"], exc)
-                continue
-            status = (raw.get("status") or "").lower()
-            # Only process orders that are fully closed on the exchange
-            if status != "closed":
-                continue
-            avg = raw.get("average") or raw.get("price")
-            if not avg:
-                continue
-            avg = float(avg)
+            ex = r["exchange"]
+            acct = r["account_name"]
+            sym = r["symbol"]
+            oid = r["exchange_order_id"]
+            direction = (r["direction"] or "long").lower()
             paper_entry = float(r["paper_entry"] or 0)
             notional = float(r["notional_usd"] or 0)
-            direction = (r["direction"] or "long").lower()
 
-            # P&L: (exit - entry) / entry * notional for long, inverse for short
-            pnl = 0.0
-            if paper_entry > 0 and notional > 0:
+            try:
+                client = self._adapter._get_client(ex, acct)
+                if not client.markets:
+                    await asyncio.to_thread(client.load_markets)
+            except Exception as exc:
+                LOG.debug("exit_reconcile client error %s/%s: %s", ex, acct, exc)
+                continue
+
+            exit_price = None
+            pnl = None
+            exit_fee = None
+
+            # Try 1: fetch_closed_orders — returns closed positions with
+            # realised P&L as reported by the exchange.
+            try:
+                since_ms = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp() * 1000)
+                closed = await asyncio.to_thread(
+                    lambda: client.fetch_closed_orders(sym, since_ms, 50))
+                if isinstance(closed, list):
+                    for co in closed:
+                        if co.get("id") == oid:
+                            co_info = co.get("info", {}) if isinstance(co.get("info"), dict) else {}
+                            exit_price = float(co.get("average") or 0) or None
+                            # Realised P&L from exchange (Bybit: cum_realised_pnl)
+                            pnl = float(co.get("info", {}).get("cumRealisedPnl") or 0) or None
+                            if pnl is None:
+                                pnl = float(co.get("profit") or 0) or None
+                            exit_fee = self._extract_fee(co)
+                            break
+            except Exception as exc:
+                LOG.debug("exit_reconcile fetch_closed_orders %s failed: %s", oid, exc)
+
+            # Try 2: fetch_positions (for still-open positions that have P&L)
+            if exit_price is None:
+                try:
+                    positions = await asyncio.to_thread(
+                        lambda: client.fetch_positions([sym]) if hasattr(client, "fetch_positions")
+                        else [])
+                    for pos in (positions or []):
+                        if pos.get("info", {}).get("orderId") == oid or pos.get("symbol") == sym:
+                            # If the position is open, capture unrealized P&L
+                            if float(pos.get("contracts") or 0) > 0:
+                                exit_price = float(pos.get("markPrice") or 0) or None
+                                pnl = float(pos.get("unrealizedPnl") or 0) or None
+                            break
+                except Exception as exc:
+                    LOG.debug("exit_reconcile fetch_positions %s failed: %s", oid, exc)
+
+            if exit_price is None:
+                continue  # still open, no close data yet
+
+            if pnl is None and paper_entry > 0 and notional > 0:
                 if direction == "long":
-                    pnl = (avg - paper_entry) / paper_entry * notional
+                    pnl = (exit_price - paper_entry) / paper_entry * notional
                 else:
-                    pnl = (paper_entry - avg) / paper_entry * notional
+                    pnl = (paper_entry - exit_price) / paper_entry * notional
 
-            exit_fee = self._extract_fee(raw)
-            slip_exit = ((avg - float(r.get("paper_tp") or 0)) / float(r.get("paper_tp") or 1)
-                         if r.get("paper_tp") else None)
+            slip_exit = (
+                ((exit_price - float(r["paper_tp"] or 0)) / float(r["paper_tp"] or 1))
+                if r.get("paper_tp") else None
+            )
 
             await pool.execute(
                 "UPDATE public.demo_orders SET "
                 "status='closed', closed_at=NOW(), exit_price=%s, demo_pnl=%s, "
                 "slippage_exit=%s, exit_fee=%s, fees_synced_at=NOW(), "
                 "updated_at=NOW() WHERE id=%s AND closed_at IS NULL",
-                (avg, round(pnl, 8), slip_exit, exit_fee, r["id"]))
+                (round(exit_price, 8), round(float(pnl or 0), 8), slip_exit, exit_fee, r["id"]))
             LOG.info("Demo order %s CLOSED @ %.6f pnl=%.4f (order %s)",
-                     r["symbol"], avg, pnl, r["exchange_order_id"])
+                     sym, exit_price, float(pnl or 0), oid)
             flog("exit_reconciled", demo_order_id=r["id"],
-                 exchange=r["exchange"], account=r["account_name"],
-                 symbol=r["symbol"], direction=direction,
-                 exit_price=avg, demo_pnl=round(pnl, 4),
-                 exit_fee=exit_fee, order_id=r["exchange_order_id"])
+                 exchange=ex, account=acct, symbol=sym, direction=direction,
+                 exit_price=round(exit_price, 8), demo_pnl=round(float(pnl or 0), 4),
+                 exit_fee=exit_fee, order_id=oid)
 
     @staticmethod
     def _extract_fee(raw: Dict) -> Optional[float]:
