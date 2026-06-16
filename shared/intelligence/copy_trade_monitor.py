@@ -773,6 +773,17 @@ class LiveCopyTradeMonitor:
             allocated = agent["balance"] * (float(_sizing("risk_pct_5", 5.0)) / 100.0)
             leverage = lev_after_buffer(sl_dist)
 
+        # Clamp paper leverage to the minimum per-symbol max across all
+        # configured exchanges so the paper notional never exceeds what
+        # demo / live can actually execute.
+        if leverage > 1.0:
+            try:
+                from shared.market_data.exchange_limits import get_max_leverage
+                sym_max = await get_max_leverage(sym)
+                leverage = min(leverage, sym_max)
+            except Exception:
+                pass  # cache miss or module unavailable — keep unclamped
+
         free = agent["balance"] - _used_margin(agent)
         if allocated > free + 1e-9:
             if not from_queue:
@@ -873,9 +884,15 @@ class LiveCopyTradeMonitor:
                     (pos["trader_id"],),
                 )
                 if row:
-                    if not pos.get("be_locked") and row["stop_loss"] and float(row["stop_loss"] or 0) > 0:
+                    # Opt agents compute scaled SL/TP at entry time from the
+                    # OPTIMAL multipliers DB table.  The raw trader levels are
+                    # intentionally worse — overwriting with them would undo
+                    # the optimizer's work every tick.
+                    agent_mode = agent.get("mode", "")
+                    is_opt = "opt" in agent_mode
+                    if not pos.get("be_locked") and not is_opt and row["stop_loss"] and float(row["stop_loss"] or 0) > 0:
                         pos["sl"] = float(row["stop_loss"])
-                    if row["take_profit_1"] and float(row["take_profit_1"] or 0) > 0:
+                    if not is_opt and row["take_profit_1"] and float(row["take_profit_1"] or 0) > 0:
                         pos["tp"] = float(row["take_profit_1"])
 
     async def _check_agent_positions(self, agent_name: str):

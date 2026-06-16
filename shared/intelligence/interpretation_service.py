@@ -1552,7 +1552,6 @@ async def run_quant_track(
 
     Reads the last 100 candles for the instrument, computes RSI(14), EMA(20/50),
     ATR(14), and Bollinger(20,2). Derives a directional score from the ensemble.
-    ATR(14), and Bollinger(20,2). Derives a directional score from the ensemble.
 
     If the instrument is not registered in ``public.instruments`` under the given
     symbol form, alternate symbol forms are tried (slash/no-slash, ``.P`` perp

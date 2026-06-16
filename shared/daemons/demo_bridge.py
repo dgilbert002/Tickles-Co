@@ -71,6 +71,11 @@ DEMO_NOTIONAL_SAFETY_PCT = float(os.environ.get("DEMO_NOTIONAL_SAFETY_PCT", "0.9
 # Single source of truth for these rules: shared/intelligence/copy_trade_monitor.py
 # (AGENTS list + the "Position sizing by mode" block). Kept in sync here.
 #
+# 2026-06-16: sizing knobs (risk%, leverage_cap, spot_lev_3x) now read from
+# the same copy_sizing_config DB table as the paper engine.  Changes in the
+# Settings UI apply to both layers simultaneously.
+from shared.intelligence.copy_sizing_config import get_value as _sizing_get
+
 # agent_id → sizing mode
 AGENT_MODE: Dict[str, str] = {
     "copy_spot_seq":        "spot_seq",     # full wallet, 1x, sequential
@@ -89,13 +94,16 @@ AGENT_MODE: Dict[str, str] = {
 # Max concurrent OPEN demo positions per account, by mode — mirrors the paper
 # agent's concurrency rule so the demo never over-places and exhausts margin.
 MODE_MAX_CONCURRENT: Dict[str, int] = {
-    "spot_seq": 5, "spot_seq_ch": 33, "spot_lev_3x": 3, "lev_3pct": 33, "lev_5pct": 20,
+    "spot_seq": 1, "spot_seq_ch": 33, "spot_lev_3x": 1, "lev_3pct": 33, "lev_5pct": 20,
 }
-# Risk % / leverage knobs (env-tunable; defaults match copy_trade_monitor).
-DEMO_RISK_PCT_5  = float(os.environ.get("DEMO_RISK_PCT_5",  "5.0"))
-DEMO_RISK_PCT_3  = float(os.environ.get("DEMO_RISK_PCT_3",  "3.0"))
-DEMO_SPOT_LEV_3X = float(os.environ.get("DEMO_SPOT_LEV_3X", "3.0"))
-DEMO_LEVERAGE_CAP= float(os.environ.get("DEMO_LEVERAGE_CAP","100.0"))
+# Risk % / leverage knobs — read from copy_sizing_config (same DB table as
+# the paper engine) so Settings UI changes affect both layers.  The module-level
+# defaults here only apply during import before the first tick's DB refresh;
+# each tick() calls _refresh_sizing() which pulls the live values.
+_DEMO_SIZING_CACHE: Dict[str, Any] = {
+    "risk_pct_5": 5.0, "risk_pct_3": 3.0,
+    "leverage_cap": 100.0, "spot_lev_3x": 3.0,
+}
 # Fallback balance when the exchange balance can't be fetched (~paper wallet).
 DEMO_FALLBACK_BALANCE = float(os.environ.get("DEMO_FALLBACK_BALANCE", "1000.0"))
 
@@ -174,6 +182,11 @@ class DemoBridge:
                     LOG.debug("balance refresh %s failed: %s", key, exc)
                 self._acct_balance.setdefault(key, DEMO_FALLBACK_BALANCE)
 
+    @staticmethod
+    def _demo_sizing(key: str, default: float) -> float:
+        """Read a sizing knob from the DB-refreshed cache (same source as paper)."""
+        return float(_DEMO_SIZING_CACHE.get(key, default))
+
     def _compute_demo_size(self, agent_id: Optional[str], balance: float,
                            entry: float, sl: Optional[float]):
         """Reproduce the mapped paper agent's sizing rule against `balance`.
@@ -188,7 +201,7 @@ class DemoBridge:
         Returns (mode, allocated, leverage_int, notional).
         """
         mode = AGENT_MODE.get(agent_id or "", "lev_5pct")
-        bal = balance if balance and balance > 0 else DEMO_FALLBACK_BALANCE
+        bal = balance if balance is not None and balance > 0 else DEMO_FALLBACK_BALANCE
         # Leverage from SL distance — identical formula to the paper agents.
         if sl is not None and sl > 0 and entry > 0:
             sl_dist = abs(entry - sl) / entry
@@ -202,24 +215,29 @@ class DemoBridge:
         # BEFORE the stop for any stop tighter than ~5%).
         _liq_safety = float(os.environ.get("DEMO_LIQ_SAFETY", "1.15"))
         _liq_mmr = float(os.environ.get("DEMO_LIQ_MMR", "0.006"))
-        lev_from_sl = min(1.0 / (sl_dist * _liq_safety + _liq_mmr), DEMO_LEVERAGE_CAP)
+        _lev_cap = self._demo_sizing("leverage_cap", 100.0)
+        lev_from_sl = min(1.0 / (sl_dist * _liq_safety + _liq_mmr), _lev_cap)
+
+        _risk3 = self._demo_sizing("risk_pct_3", 3.0) / 100.0
+        _risk5 = self._demo_sizing("risk_pct_5", 5.0) / 100.0
+        _spot3x = self._demo_sizing("spot_lev_3x", 3.0)
 
         if mode == "spot_seq":
             allocated, leverage = bal, 1.0
         elif mode == "spot_seq_ch":
             # chart_hacker copier: 3% risk, dynamic leverage from SL distance —
             # identical to copy_trade_monitor's spot_seq_ch branch.
-            allocated, leverage = bal * (DEMO_RISK_PCT_3 / 100.0), lev_from_sl
+            allocated, leverage = bal * _risk3, lev_from_sl
         elif mode == "spot_lev_3x":
-            allocated, leverage = bal, DEMO_SPOT_LEV_3X
+            allocated, leverage = bal, _spot3x
         elif mode == "lev_3pct":
-            allocated, leverage = bal * (DEMO_RISK_PCT_3 / 100.0), lev_from_sl
+            allocated, leverage = bal * _risk3, lev_from_sl
         else:  # lev_5pct
-            allocated, leverage = bal * (DEMO_RISK_PCT_5 / 100.0), lev_from_sl
+            allocated, leverage = bal * _risk5, lev_from_sl
 
         allocated *= DEMO_NOTIONAL_SAFETY_PCT  # headroom for fees/slippage
         notional = allocated * leverage
-        lev_int = max(1, min(int(round(leverage)), int(DEMO_LEVERAGE_CAP)))
+        lev_int = max(1, min(leverage, _lev_cap))
         return mode, allocated, lev_int, notional
 
     async def _open_demo_count(self, exchange: str, account_name: str) -> int:
@@ -756,42 +774,158 @@ class DemoBridge:
                 mark = float(pos.get("markPrice") or 0)
                 upnl = float(pos.get("unrealizedPnl") or 0)
                 notional = float(pos.get("notional") or 0) or (entry * abs(contracts))
-                direction = "long" if contracts > 0 else "short"
+                # CCXT normalises side to "long"/"short"; contracts may be absolute
+                # on some demo exchanges.  Use side as the primary direction signal.
+                raw_side = str(pos.get("side", "")).lower()
+                direction = raw_side if raw_side in ("long", "short") else ("long" if contracts > 0 else "short")
                 pnl_pct = ((mark - entry) / entry * 100) if entry > 0 else 0
                 if direction == "short":
                     pnl_pct = -pnl_pct
 
-                # Check if we already have a demo_orders row for this position
+                # Check if we already have a demo_orders row for this position.
+                # Prefer filled rows (the real position) over pending ones
+                # which are newer limit orders from signal mirroring and may
+                # never fill.  This ensures the _sync_positions backfill always
+                # targets the row that represents actual exchange state.
                 existing = await pool.fetch_one(
                     "SELECT id FROM public.demo_orders "
                     "WHERE exchange=%s AND account_name=%s AND symbol=%s "
                     "AND status IN ('filled','closed','pending') "
                     "AND (closed_at IS NULL OR created_at > NOW() - INTERVAL '7 days') "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "ORDER BY CASE WHEN status='filled' THEN 0 ELSE 1 END, created_at DESC LIMIT 1",
                     (ex, acct_name, sym))
                 if existing:
-                    # Update unrealized P&L on the existing row
+                    # Update unrealized P&L on the existing row, and backfill
+                    # paper tracking columns if they're missing (first sync after
+                    # this fix won't have them for rows created before 2026-06-16).
+                    tp_id_backfill = None
+                    _pe_backfill = None
+                    _sl_backfill = None
+                    _tp_backfill = None
+                    _slip_backfill = None
+                    try:
+                        tp_row = await pool.fetch_one(
+                            "SELECT id, entry_price, stop_loss, take_profit_1 "
+                            "FROM public.tracked_positions "
+                            "WHERE company_id = 'jarvais' "
+                            "AND instrument_symbol ILIKE $1 "
+                            "AND direction = $2 "
+                            "AND status IN ('open','closed') "
+                            "AND entry_price BETWEEN $3 * 0.95 AND $3 * 1.05 "
+                            "ORDER BY signal_timestamp DESC LIMIT 1",
+                            (sym, direction, entry))
+                        if tp_row:
+                            tp_id_backfill = tp_row["id"]
+                            _pe_backfill = float(tp_row["entry_price"] or 0) or None
+                            _sl_backfill = float(tp_row["stop_loss"] or 0) or None
+                            _tp_backfill = float(tp_row["take_profit_1"] or 0) or None
+                            if _pe_backfill and _pe_backfill > 0 and entry > 0:
+                                _slip_backfill = round((entry - _pe_backfill) / _pe_backfill, 6)
+                    except Exception:
+                        pass
                     await pool.execute(
                         "UPDATE public.demo_orders SET "
                         "demo_pnl=%s, demo_entry=COALESCE(demo_entry,%s), "
-                        "notional_usd=%s, updated_at=NOW() WHERE id=%s",
-                        (round(upnl, 8), entry, round(notional, 2), existing["id"]))
+                        "notional_usd=%s, updated_at=NOW(), "
+                        "direction=%s, "
+                        "tracked_position_id=COALESCE(tracked_position_id,%s), "
+                        "paper_entry=%s, "
+                        "paper_sl=COALESCE(paper_sl,%s), "
+                        "paper_tp=COALESCE(paper_tp,%s), "
+                        "slippage_entry=%s "
+                        "WHERE id=%s",
+                        (round(upnl, 8), entry, round(notional, 2),
+                         direction,
+                         tp_id_backfill, _pe_backfill,
+                         _sl_backfill, _tp_backfill, _slip_backfill,
+                         existing["id"]))
                     continue
 
-                # New position — insert a synthetic row
+                # New position — try to link it to a tracked_position so the
+                # dashboard can do paper-vs-demo comparison (drift, slip, etc.).
+                tp_id = None
+                _paper_entry = None
+                _paper_sl = None
+                _paper_tp = None
+                try:
+                    # Match by symbol + direction, preferring the most recent
+                    # open position whose entry_price is within ±5% of the
+                    # exchange's entry (symbol-name collisions across exchanges
+                    # can produce very different prices — 5% tightens it).
+                    tp_row = await pool.fetch_one(
+                        "SELECT id, entry_price, stop_loss, take_profit_1 "
+                        "FROM public.tracked_positions "
+                        "WHERE company_id = 'jarvais' "
+                        "AND instrument_symbol ILIKE $1 "
+                        "AND direction = $2 "
+                        "AND status IN ('open','closed') "
+                        "AND entry_price BETWEEN $3 * 0.95 AND $3 * 1.05 "
+                        "ORDER BY signal_timestamp DESC "
+                        "LIMIT 1",
+                        (sym, direction, entry))
+                    if tp_row:
+                        tp_id = tp_row["id"]
+                        _paper_entry = float(tp_row["entry_price"] or 0) or None
+                        _paper_sl = float(tp_row["stop_loss"] or 0) or None
+                        _paper_tp = float(tp_row["take_profit_1"] or 0) or None
+                except Exception:
+                    pass  # best-effort linkage; row still useful without it
+
+                # Now compute slippage: (demo_fill − paper_target) / paper_target.
+                _slip = None
+                if _paper_entry and _paper_entry > 0 and entry > 0:
+                    _slip = round((entry - _paper_entry) / _paper_entry, 6)
+
                 try:
                     await pool.execute(
                         "INSERT INTO public.demo_orders "
                         "(exchange, account_name, agent_id, symbol, direction, "
-                        "paper_entry, demo_entry, notional_usd, demo_pnl, "
+                        "tracked_position_id, paper_entry, demo_entry, paper_sl, paper_tp, "
+                        "notional_usd, demo_pnl, slippage_entry, "
                         "status, ordered_at) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',NOW()) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',NOW()) "
                         "ON CONFLICT DO NOTHING",
                         (ex, acct_name, agent_id, sym, direction,
-                         round(entry, 8), round(entry, 8),
-                         round(notional, 2), round(upnl, 8)))
+                         tp_id, _paper_entry, round(entry, 8), _paper_sl, _paper_tp,
+                         round(notional, 2), round(upnl, 8), _slip))
                 except Exception as exc:
                     LOG.debug("_sync_positions insert failed: %s", exc)
+
+                # ── BE-lock check (piggybacks on sync since we have markPrice) ──
+                # Only for agents whose agent_id contains "be_lock" (copy_lev_be_lock,
+                # copy_opt_lev_be_lock).  Skip if already locked (metadata flag).
+                if "be_lock" in (agent_id or "") and entry > 0 and mark > 0:
+                    already_locked = False
+                    if existing:
+                        meta_row = await pool.fetch_one(
+                            "SELECT metadata FROM public.demo_orders WHERE id=%s",
+                            (existing["id"],))
+                        if meta_row and meta_row.get("metadata"):
+                            already_locked = bool((meta_row["metadata"] or {}).get("be_locked"))
+                    if not already_locked:
+                        pnl_pct = ((mark - entry) / entry) * 100.0
+                        if direction == "short":
+                            pnl_pct = -pnl_pct
+                        threshold = self._demo_sizing("demo_be_lock_threshold_pct", 5.0)
+                        offset   = self._demo_sizing("demo_be_lock_offset_pct", 0.002)
+                        if pnl_pct >= threshold:
+                            new_sl = entry * (1.0 + offset) if direction == "long" else entry * (1.0 - offset)
+                            ok = await self._adapter.modify_sl(
+                                exchange=ex, account_name=acct_name,
+                                symbol=sym, sl_price=new_sl, direction=direction)
+                            if ok:
+                                target_id = existing["id"] if existing else None
+                                if target_id:
+                                    await pool.execute(
+                                        "UPDATE public.demo_orders SET "
+                                        "paper_sl=%s, "
+                                        "metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                                        "  '{be_locked}', 'true'::jsonb), "
+                                        "updated_at=NOW() WHERE id=%s",
+                                        (round(new_sl, 8), target_id))
+                                LOG.info("BE-LOCK %s/%s %s %s @+%.1f%% → SL=%.6g (%s)",
+                                         ex, acct_name, sym, direction, pnl_pct,
+                                         new_sl, "ok" if ok else "failed")
 
             if sym_set:
                 LOG.info("_sync_positions %s/%s: %d positions synced",
@@ -856,10 +990,28 @@ class DemoBridge:
                 "WHERE id=%s", (r["id"],),
             )
 
+    async def _refresh_sizing(self) -> None:
+        """Pull live sizing knobs from copy_sizing_config (same DB table as paper).
+
+        Called at the start of every tick so changes made via the Settings UI
+        apply to both the paper engine and this demo bridge within one cycle.
+        """
+        try:
+            from shared.intelligence.copy_sizing_config import get_all
+            pool = await self._ensure_pool()
+            knobs = await get_all(pool=pool)
+            for k, meta in knobs.items():
+                _DEMO_SIZING_CACHE[k] = meta["value"]
+        except Exception as exc:
+            LOG.debug("_refresh_sizing failed (%s); using prior/defaults", exc)
+
     async def tick(self):
         mappings = await self._load_mappings()
         if not mappings:
             return
+
+        # 0. Refresh sizing knobs from the same DB table the paper engine uses.
+        await self._refresh_sizing()
 
         # 0. Refresh real demo-account balances (drives accurate per-agent sizing)
         await self._refresh_balances(mappings)

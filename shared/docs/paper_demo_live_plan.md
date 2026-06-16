@@ -11,7 +11,7 @@
 
 The pipeline has three independently polling daemons (copy_trade_monitor 30s, demo_bridge 15s, position_monitor 60s) that interact only through the database. Paper trading works. Demo bridge works but only mirrors 1 of 12 agents (`copy_charthacker`). The two layers have diverging sizing math, independent config sources, and no BE-lock on demo. 50 critical bugs/issues found, 19 of them HIGH severity.
 
-The core blocker to paper-demo parity: **limit orders placed BEFORE paper confirms candle-touch**. Paper checks backward-looking candles ("did price ever cross entry?"); demo places forward-looking limit orders ("will a counterparty take this?"). These are fundamentally different models. Fixing this requires switching demo orders to IOC (immediate-or-cancel) or market-on-touch.
+The core blocker to paper-demo parity: **limit orders placed BEFORE paper confirms candle-touch**. Paper checks backward-looking candles ("did price ever cross entry?"); demo places forward-looking limit orders ("will a counterparty take this?"). These are fundamentally different models. Fixing this requires switching demo orders to IOC (immediate-or-cancel) or market-on-touch. <- NO NEVER!! pending limit orders ONLY!!!>
 
 ---
 
@@ -206,4 +206,44 @@ copy_lev_parallel: realized -$319, unrealized +$636, equity $1,317 (best perform
 
 ---
 
-*Next step: senior engineer picks a phase and starts implementation. Phase A recommended as immediate first action.*
+*This document covered the initial audit.  Issues P1-P12 have been addressed
+in order.  Remaining from the audit: Capital.com CFD gaps, duplicate demo orders,
+MCP ccxt account config, and the smart margin queue (backlog).*
+
+
+## Post-Implementation Code Review (2026-06-17)
+
+After 12 fixes spanning 7 files, a full code review and bug-hunt pass is
+necessary before further work.  Areas to scrutinise:
+
+1. **`copy_trade_monitor.py`** — `_sync_sl_tp` opt-agent guard, leverage clamping
+   via `exchange_limits`, the `_entry_touched` / margin-queue interaction, and
+   the `asyncio.ensure_future` fire-and-forget in `_close_agent_position`.
+
+2. **`demo_bridge.py`** — sizing-knob sync via `copy_sizing_config`, BE-lock
+   piggybacking on `_sync_positions`, paper-trail backfill, direction detection
+   from CCXT `side` field, concurrency-cap parity, and the float-leverage flow
+   through `_compute_demo_size` → `ExecutionIntent` → `ccxt_adapter.submit()`.
+
+3. **`ccxt_adapter.py`** — `modify_sl()` Bybit/Bitget endpoints (tested only
+   via demo bridge logs, never independently), `round(lev)` change in submit,
+   and cross-margin `_ensure_cross_margin` silent-failure paths.
+
+4. **`copy_sizing_config.py`** — new `demo_be_lock_*` knobs (bounds, UI wiring).
+
+5. **`exchange_limits.py`** — new module.  Cache invalidation, multi-exchange
+   credential loading, symbol normalisation edge cases, and behaviour when
+   ALL exchanges are unreachable.
+
+6. **Dashboard / `market_routes.py`** — Paper-vs-Demo score formula (confirmed
+   correct — separates entry accuracy from fill rate), `paper_entry`/`demo_entry`
+   difference in JOINed rows, and orphan-demo-order surface path.
+
+7. **Cross-cutting** — toobit live-account routing (no `account_type` filter in
+   bridge), Capital.com integration stubs, and the 3 orphaned BTC/JTO rows that
+   needed manual SQL fixes (root cause: signal-handler pending rows shadowing
+   `_sync_positions` backfill target, already fixed via `ORDER BY CASE`).
+
+**Reviewers:** any senior engineer or Hermes agent with read-only access.
+**Goal:** find crash-paths, silent wrong-behaviour, and performance regressions
+BEFORE live-lane activation.

@@ -238,6 +238,68 @@ class CcxtExecutionAdapter:
                 pass  # already cross, unsupported, or non-crypto symbol
 
     # ------------------------------------------------------------------
+    # Modify stop-loss on an existing open position
+    # ------------------------------------------------------------------
+
+    async def modify_sl(
+        self, *,
+        exchange: str,
+        account_name: str,
+        symbol: str,
+        sl_price: float,
+        direction: str,
+    ) -> bool:
+        """Move the stop-loss on an open position (used by demo BE-lock).
+
+        Bybit and Bitget use exchange-specific private endpoints because CCXT
+        has no unified "edit SL" method for open positions.  Returns True on
+        success, False if the modification was rejected or the exchange is
+        unsupported.
+        """
+        client = self._get_client(exchange, account_name)
+        ex = exchange.lower()
+
+        if ex in ("bybit",):
+            clean = symbol.replace("/", "").split(":")[0]
+            try:
+                await asyncio.to_thread(
+                    lambda: client.private_post_v5_position_trading_stop({
+                        "category": "linear",
+                        "symbol": clean,
+                        "stopLoss": str(round(sl_price, 4)),
+                        "slTriggerBy": "MarkPrice",
+                        "positionIdx": 0,
+                    })
+                )
+                return True
+            except Exception as exc:
+                LOG.warning("modify_sl bybit %s/%s %s: %s",
+                            exchange, account_name, symbol, exc)
+                return False
+
+        if ex in ("bitget",):
+            try:
+                plan = "long" if direction == "long" else "short"
+                await asyncio.to_thread(
+                    lambda: client.private_mix_post_position_tpsl_order({
+                        "symbol": symbol.replace("/", "").split(":")[0],
+                        "marginCoin": "USDT",
+                        "planType": "loss_plan",
+                        "triggerPrice": str(round(sl_price, 4)),
+                        "triggerType": "mark_price",
+                        "holdSide": plan,
+                    })
+                )
+                return True
+            except Exception as exc:
+                LOG.warning("modify_sl bitget %s/%s %s: %s",
+                            exchange, account_name, symbol, exc)
+                return False
+
+        LOG.debug("modify_sl: exchange %s not supported for SL modification", exchange)
+        return False
+
+    # ------------------------------------------------------------------
     # Submit order
     # ------------------------------------------------------------------
 
@@ -294,7 +356,7 @@ class CcxtExecutionAdapter:
             # Clamp computed leverage to the exchange's actual max for this symbol.
             # Low-liquidity coins often cap at 12-25x; placing an 85x computed
             # leverage silently rejects the order. The market data carries the real limit.
-            effective_lev = int(lev)
+            effective_lev = int(round(lev))
             try:
                 if not client.markets:
                     await asyncio.to_thread(client.load_markets)

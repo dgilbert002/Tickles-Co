@@ -71,6 +71,18 @@ _KNOBS: Dict[str, Tuple[str, Any, type, str, str]] = {
         "Fixed leverage for the A×3: Spot Lev 3x agent (full wallet at this "
         "multiplier, one trade at a time). Default 3x.",
     ),
+    "demo_be_lock_threshold_pct": (
+        "DEMO_BE_LOCK_THRESHOLD_PCT", 5.0, float, "Demo BE-lock profit threshold (%)",
+        "When a demo position's unrealised PnL exceeds this percentage of entry, "
+        "the bridge moves its stop-loss to breakeven (entry ± offset below).  "
+        "Mirrors the paper agents' BE-lock behaviour.  Default 5.0 = 5%.",
+    ),
+    "demo_be_lock_offset_pct": (
+        "DEMO_BE_LOCK_OFFSET_PCT", 0.002, float, "Demo BE-lock stop offset (%)",
+        "When the SL is moved to breakeven, it is placed this far PAST entry "
+        "(e.g. long entry $100, offset=0.2% → SL=$100.20) so that fees and "
+        "slippage don't turn a BE exit into a small loss.  Default 0.2%.",
+    ),
 }
 
 _CACHE_TTL_S = 60.0
@@ -202,6 +214,8 @@ _BOUNDS: Dict[str, Tuple[float, float]] = {
     "max_concurrent_3": (1,   200),
     "leverage_cap":     (1.0, 125.0),
     "spot_lev_3x":      (1.0, 25.0),
+    "demo_be_lock_threshold_pct": (1.0, 50.0),
+    "demo_be_lock_offset_pct":    (0.001, 1.0),
 }
 
 
