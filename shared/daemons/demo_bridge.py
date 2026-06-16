@@ -710,6 +710,93 @@ class DemoBridge:
                  exit_price=round(exit_price, 8), demo_pnl=round(float(pnl or 0), 4),
                  exit_fee=exit_fee, order_id=oid)
 
+    async def _sync_positions(self, mappings: Dict[str, List[Dict]]):
+        """Sync live exchange positions into demo_orders.
+
+        The bridge places limit orders; once filled, positions live on the
+        exchange independently. If demo_orders rows were cleaned up (cancelled
+        during orphan processing), the position still exists with real P&L
+        that our dashboard can't see. This polls fetch_positions on every
+        mapped account and creates demo_orders rows for untracked positions,
+        or updates existing rows with current unrealized P&L.
+        """
+        pool = await self._ensure_pool()
+        # Flatten mapping dict: {agent: [{exchange, account_name}, ...]} → unique accounts
+        seen = set()
+        accounts = []
+        for accts in mappings.values():
+            for a in accts:
+                key = f"{a['exchange']}/{a['account_name']}"
+                if key not in seen:
+                    seen.add(key)
+                    accounts.append(a)
+        for acct in accounts:
+            ex = acct["exchange"]
+            acct_name = acct["account_name"]
+            agent_id = self._agent_for_account(ex, acct_name) or "?"
+            sym_set = set()
+            try:
+                client = self._adapter._get_client(ex, acct_name)
+                positions = await asyncio.to_thread(
+                    lambda: client.fetch_positions() if hasattr(client, "fetch_positions")
+                    else [])
+            except Exception as exc:
+                LOG.debug("_sync_positions fetch_positions %s/%s failed: %s",
+                          ex, acct_name, exc)
+                continue
+            for pos in (positions or []):
+                sym = pos.get("symbol", "")
+                if not sym:
+                    continue
+                sym_set.add(sym)
+                contracts = float(pos.get("contracts") or 0)
+                if contracts <= 0:
+                    continue
+                entry = float(pos.get("entryPrice") or 0)
+                mark = float(pos.get("markPrice") or 0)
+                upnl = float(pos.get("unrealizedPnl") or 0)
+                notional = float(pos.get("notional") or 0) or (entry * abs(contracts))
+                direction = "long" if contracts > 0 else "short"
+                pnl_pct = ((mark - entry) / entry * 100) if entry > 0 else 0
+                if direction == "short":
+                    pnl_pct = -pnl_pct
+
+                # Check if we already have a demo_orders row for this position
+                existing = await pool.fetch_one(
+                    "SELECT id FROM public.demo_orders "
+                    "WHERE exchange=%s AND account_name=%s AND symbol=%s "
+                    "AND status IN ('filled','closed','pending') "
+                    "AND (closed_at IS NULL OR created_at > NOW() - INTERVAL '7 days') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (ex, acct_name, sym))
+                if existing:
+                    # Update unrealized P&L on the existing row
+                    await pool.execute(
+                        "UPDATE public.demo_orders SET "
+                        "demo_pnl=%s, demo_entry=COALESCE(demo_entry,%s), "
+                        "notional_usd=%s, updated_at=NOW() WHERE id=%s",
+                        (round(upnl, 8), entry, round(notional, 2), existing["id"]))
+                    continue
+
+                # New position — insert a synthetic row
+                try:
+                    await pool.execute(
+                        "INSERT INTO public.demo_orders "
+                        "(exchange, account_name, agent_id, symbol, direction, "
+                        "paper_entry, demo_entry, notional_usd, demo_pnl, "
+                        "status, ordered_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',NOW()) "
+                        "ON CONFLICT DO NOTHING",
+                        (ex, acct_name, agent_id, sym, direction,
+                         round(entry, 8), round(entry, 8),
+                         round(notional, 2), round(upnl, 8)))
+                except Exception as exc:
+                    LOG.debug("_sync_positions insert failed: %s", exc)
+
+            if sym_set:
+                LOG.info("_sync_positions %s/%s: %d positions synced",
+                         ex, acct_name, len(sym_set))
+
     @staticmethod
     def _extract_fee(raw: Dict) -> Optional[float]:
         """Best-effort total execution fee (USDT) from a CCXT order dict."""
@@ -791,6 +878,15 @@ class DemoBridge:
 
         # 1b2. Reconcile filled-but-open positions (capture exit data)
         await self._reconcile_exits()
+
+        # 1b3. Sync exchange-side positions into demo_orders.
+        # The bridge places orders; once filled, the position lives on the
+        # exchange independently. If demo_orders rows were cleaned up (cancelled
+        # during orphan processing), the position still exists and has real P&L
+        # that our dashboard can't see. This step polls fetch_positions on
+        # every account and creates/updates demo_orders rows for any position
+        # not already tracked.
+        await self._sync_positions(mappings)
 
         # 1c. Cancel demo orders where the paper tracked_position is already
         # open/closed/expired. These demo limits missed their entry and will
