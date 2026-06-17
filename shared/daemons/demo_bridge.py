@@ -24,6 +24,10 @@ from shared.execution.ccxt_adapter import CcxtExecutionAdapter
 from shared.execution.protocol import (
     ExecutionIntent, DIRECTION_LONG, DIRECTION_SHORT, ORDER_TYPE_LIMIT,
 )
+from shared.intelligence.copy_trade_monitor import (
+    _symbol_lookup_candidates, _distance_to_entry as _dist_to_entry, _entry_touched,
+)
+from shared.intelligence.position_monitor import fetch_latest_price as _fetch_price
 # Phase 1 (2026-05-29): forensic transaction log — every mirror event is
 # appended to /opt/tickles/shared/logs/paper_demo.log for the dashboard's
 # "Paper vs Demo vs Live" live-log viewer and shell-side grep.
@@ -291,63 +295,28 @@ class DemoBridge:
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
 
-    # ═══════════════════════════════════════════════════════════════════
-    # Smart Queue — distance-to-entry helpers (reuse paper's proven math)
-    # ═══════════════════════════════════════════════════════════════════
+    # ── Smart Queue helpers (delegate to paper's implementations) ──
 
-    @staticmethod
-    def _distance_to_entry(cur: float, entry: float) -> float:
-        """Absolute distance from current price to entry, as a ratio (0.0–∞)."""
-        if entry <= 0:
-            return 999.0
-        return abs(cur - entry) / entry
-
-    @staticmethod
-    def _entry_touched(candles: List[Dict], entry: float) -> bool:
-        """True if any candle's [low, high] range contains the entry price."""
-        for c in (candles or []):
-            if float(c.get("low", 0) or 0) <= entry <= float(c.get("high", 0) or 0):
-                return True
-        return False
-
-    async def _get_latest_candles(self, symbol: str, n: int = 60) -> List[Dict]:
-        """Fetch the most recent N 1m candles for a symbol."""
+    async def _queue_price(self, symbol: str):
+        """Current price via paper's fetch_latest_price."""
         pool = await self._ensure_pool()
-        rows = await pool.fetch_all(
-            "SELECT c.timestamp, c.open, c.high, c.low, c.close "
-            "FROM public.candles c "
-            "JOIN public.instruments i ON i.id = c.instrument_id "
-            "WHERE i.symbol ILIKE $1 AND c.timeframe = '1m' "
-            "ORDER BY c.timestamp DESC LIMIT $2",
-            (symbol.replace(":USDT", "").replace("/", "") + "%", n),
-        )
-        return [dict(r) for r in reversed(rows or [])]
+        return await _fetch_price(pool, symbol, None, "1m")
 
-    async def _get_latest_price(self, symbol: str) -> Optional[float]:
-        """Fastest available current price: candle close → tracked_position current_price."""
+    async def _queue_candles(self, symbol: str, n: int = 60) -> list:
+        """Recent candles via paper's _symbol_lookup_candidates."""
         pool = await self._ensure_pool()
-        # Try candles first
-        row = await pool.fetch_one(
-            "SELECT c.close FROM public.candles c "
-            "JOIN public.instruments i ON i.id = c.instrument_id "
-            "WHERE i.symbol ILIKE $1 AND c.timeframe = '1m' "
-            "ORDER BY c.timestamp DESC LIMIT 1",
-            (symbol.replace(":USDT", "").replace("/", "") + "%",),
-        )
-        if row:
-            return float(row["close"])
-        # Fallback: tracked_positions.current_price for open positions
-        row = await pool.fetch_one(
-            "SELECT current_price FROM public.tracked_positions "
-            "WHERE instrument_symbol = $1 AND current_price IS NOT NULL "
-            "ORDER BY updated_at DESC LIMIT 1",
-            (symbol,),
-        )
-        if row:
-            return float(row["current_price"])
-        return None
-
-    # ═══════════════════════════════════════════════════════════════════
+        for cand_sym in _symbol_lookup_candidates(symbol):
+            rows = await pool.fetch_all(
+                "SELECT c.timestamp, c.open, c.high, c.low, c.close "
+                "FROM public.candles c "
+                "JOIN public.instruments i ON i.id = c.instrument_id "
+                "WHERE i.symbol = $1 AND c.timeframe = '1m' "
+                "ORDER BY c.timestamp DESC LIMIT $2",
+                (cand_sym, n),
+            )
+            if rows:
+                return [dict(r) for r in reversed(rows)]
+        return []
 
     async def _get_new_signals(self) -> List[Dict]:
         """Get tracked_positions with pending/open status that haven't been mirrored."""
@@ -426,9 +395,9 @@ class DemoBridge:
         # ── Smart Queue proximity gate ──
         # Don't place orders when price is far from entry.  Queued orders
         # wait until price approaches (promoted by _promote_queued).
-        current_price = await self._get_latest_price(sym)
+        current_price = await self._queue_price(sym)
         if current_price is not None and current_price > 0:
-            dist_pct = self._distance_to_entry(current_price, entry) * 100.0
+            dist_pct = _dist_to_entry(current_price, entry) * 100.0
             if dist_pct > SMART_QUEUE_PLACE_PCT:
                 # Beyond threshold — queue, don't place
                 pool = await self._ensure_pool()
@@ -443,9 +412,9 @@ class DemoBridge:
                           tp_id, sym, direction, entry, dist_pct)
                 return
             # Within threshold — verify wick touch before placing
-            candles = await self._get_latest_candles(
+            candles = await self._queue_candles(
                 sym, SMART_QUEUE_TOUCH_CANDLES)
-            if not self._entry_touched(candles, entry):
+            if not _entry_touched(candles, entry):
                 # Close but no wick yet — queue anyway
                 pool = await self._ensure_pool()
                 await pool.execute(
@@ -1147,20 +1116,20 @@ class DemoBridge:
             sym = r["symbol"]
 
             # Get current price + candles
-            price = await self._get_latest_price(sym)
+            price = await self._queue_price(sym)
             if price is None:
                 continue
 
-            dist = self._distance_to_entry(price, entry)
+            dist = _dist_to_entry(price, entry)
             dist_pct = dist * 100.0
 
             if dist_pct > SMART_QUEUE_PLACE_PCT:
                 continue  # still too far
 
             # Within threshold — verify wick touch
-            candles = await self._get_latest_candles(
+            candles = await self._queue_candles(
                 sym, SMART_QUEUE_TOUCH_CANDLES)
-            if not self._entry_touched(candles, entry):
+            if not _entry_touched(candles, entry):
                 continue  # within range but no wick kiss yet
 
             # Promote: status queued → pending so _mirror_signal picks it up
@@ -1199,11 +1168,11 @@ class DemoBridge:
             if entry <= 0:
                 continue
 
-            price = await self._get_latest_price(r["symbol"])
+            price = await self._queue_price(r["symbol"])
             if price is None:
                 continue
 
-            dist_pct = self._distance_to_entry(price, entry) * 100.0
+            dist_pct = _dist_to_entry(price, entry) * 100.0
             if dist_pct <= SMART_QUEUE_CLOSE_PCT:
                 continue  # still within holding zone
 
