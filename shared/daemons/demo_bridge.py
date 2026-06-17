@@ -480,6 +480,24 @@ class DemoBridge:
                      mode=mode, open_count=open_n, cap=cap)
                 continue
 
+            # ── Dedup: one order per signal per account ──
+            # Prevent 12 agents on one account from placing 12 identical
+            # orders for the same tracked_position_id.  First agent wins;
+            # subsequent agents skip — their allocation goes unplaced for
+            # this account (they may still place on other accounts).
+            dpool = await self._ensure_pool()
+            existing_row = await dpool.fetch_one(
+                "SELECT id FROM public.demo_orders "
+                "WHERE tracked_position_id = $1 "
+                "AND exchange = $2 AND account_name = $3 "
+                "AND status IN ('queued', 'pending', 'filled') "
+                "LIMIT 1",
+                (tp_id, acct["exchange"], acct["account_name"]))
+            if existing_row:
+                LOG.debug("Signal #%d: order already exists for %s/%s (row #%d) — skip",
+                          tp_id, acct["exchange"], acct["account_name"], existing_row["id"])
+                continue
+
             # Skip when sizing produces zero notional (free balance exhausted).
             if notional_eff <= 0 or allocated <= 0:
                 LOG.debug("Signal #%d → %s/%s: SKIP (notional=%.2f allocated=%.2f balance=%.2f)",
