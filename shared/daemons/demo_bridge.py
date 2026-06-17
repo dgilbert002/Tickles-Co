@@ -480,23 +480,52 @@ class DemoBridge:
                      mode=mode, open_count=open_n, cap=cap)
                 continue
 
-            # ── Dedup: one order per signal per account ──
-            # Prevent 12 agents on one account from placing 12 identical
-            # orders for the same tracked_position_id.  First agent wins;
-            # subsequent agents skip — their allocation goes unplaced for
-            # this account (they may still place on other accounts).
+            # ── Keep current: replace stale orders with updated trader data ──
+            # If a newer signal arrives for the same symbol+direction+account
+            # within 2% of an existing order's entry, cancel the old and place
+            # the new — the trader adjusted their entry/SL/TP.  Beyond 2% they're
+            # separate trades.  Older signals defer to the existing order.
             dpool = await self._ensure_pool()
-            existing_row = await dpool.fetch_one(
-                "SELECT id FROM public.demo_orders "
-                "WHERE tracked_position_id = $1 "
-                "AND exchange = $2 AND account_name = $3 "
-                "AND status IN ('queued', 'pending', 'filled') "
-                "LIMIT 1",
-                (tp_id, acct["exchange"], acct["account_name"]))
-            if existing_row:
-                LOG.debug("Signal #%d: order already exists for %s/%s (row #%d) — skip",
-                          tp_id, acct["exchange"], acct["account_name"], existing_row["id"])
-                continue
+            existing = await dpool.fetch_one(
+                "SELECT id, paper_entry, status, exchange_order_id, ordered_at "
+                "FROM public.demo_orders "
+                "WHERE symbol = $1 AND direction = $2 "
+                "AND exchange = $3 AND account_name = $4 "
+                "AND status IN ('queued', 'pending') "
+                "ORDER BY ordered_at DESC LIMIT 1",
+                (sym, direction, acct["exchange"], acct["account_name"]))
+            if existing:
+                old_entry = float(existing["paper_entry"] or 0)
+                entry_diff = abs(entry - old_entry) / old_entry if old_entry > 0 else 999
+                new_ts = signal.get("signal_timestamp")
+                old_ts = existing.get("ordered_at")
+
+                if entry_diff <= 0.02:  # within 2% — same trade, updated
+                    if new_ts and old_ts and new_ts > old_ts:
+                        # Newer — replace
+                        if existing["status"] == "pending" and existing.get("exchange_order_id"):
+                            await self._cancel_demo_order(
+                                tp_id, acct["account_name"],
+                                existing["exchange_order_id"],
+                                exchange=acct["exchange"])
+                        await dpool.execute(
+                            "UPDATE public.demo_orders SET status = 'cancelled', "
+                            "error_message = 'replaced by newer signal', "
+                            "updated_at = NOW() WHERE id = $1",
+                            (existing["id"],))
+                        LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
+                                 tp_id, existing["id"], acct["exchange"],
+                                 acct["account_name"], sym, old_entry, entry)
+                        # Fall through — place new order below
+                    else:
+                        # Older or same age — keep existing
+                        LOG.debug("Signal #%d: existing order #%d is current (same trade) — skip",
+                                  tp_id, existing["id"])
+                        continue
+                else:
+                    # Different trade — both valid
+                    LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f — both valid",
+                              tp_id, entry, old_entry)
 
             # Skip when sizing produces zero notional (free balance exhausted).
             if notional_eff <= 0 or allocated <= 0:
