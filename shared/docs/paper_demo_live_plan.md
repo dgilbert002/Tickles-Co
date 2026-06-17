@@ -207,8 +207,54 @@ copy_lev_parallel: realized -$319, unrealized +$636, equity $1,317 (best perform
 ---
 
 *This document covered the initial audit.  Issues P1-P12 have been addressed
-in order.  Remaining from the audit: Capital.com CFD gaps, duplicate demo orders,
-MCP ccxt account config, and the smart margin queue (backlog).*
+in order.  Remaining issues in priority order:
+
+1. **MCP ccxt server — full account coverage** (BLOCKER for smart queue)
+2. **Smart order queue + MCP exchange gateway** (design: P13 above)
+3. **Duplicate order dedup** (belt-and-suspenders, folded into smart queue)
+4. **Capital.com CFD gaps** (price feed, epic map, candle collection)
+5. **Post-implementation code review** (section below)
+6. **Margin queue / proximity gate** (backlog, superseded by smart queue)
+
+
+## P13 — Smart Order Queue + MCP Exchange Gateway (design, not yet implemented)
+
+**Problem:** The demo bridge places limit orders immediately for every signal × agent ×
+account.  12 agents sharing 4 accounts means 48+ orders per signal, margin evaporates,
+132 "ab not enough" rejections, and orders sit at entry prices far from market eating
+margin indefinitely.
+
+**Design — three layers:**
+
+1. **Off-exchange queue** — Signals land in ``demo_orders`` with status "queued", not
+   "pending".  No exchange call yet.  The queue is sorted by distance-to-entry each tick;
+   closest to entry gets priority.
+
+2. **Proximity gate** — An order only graduates from "queued" → "pending" (exchange-placed)
+   when price is within N% of entry (tunable, e.g. 3%).  Until then, it waits — no margin
+   consumed, no API call made.
+
+3. **Merge-on-exchange** — Before placing, check if another order for the same
+   symbol+direction+account already exists within N% of entry.  If yes: UPDATE the
+   existing order's quantity instead of ADDing a new one.  One exchange order, multiple
+   agent allocations tracked in DB metadata.
+
+**All exchange interaction MUST go through MCP tools** — no direct CCXT calls in the
+bridge.  The MCP daemon handles credentials, rate limits, and audit logging.  The bridge
+becomes pure dispatch logic: queue → sort → gate → MCP tool call.
+
+**Pre-flight balance check** — Before any MCP ``create_order`` call, check
+``fetch_balance`` via MCP.  If free margin < allocated, skip (the order would be
+rejected anyway).  Saves API calls and rejection noise.
+
+**Phased rollout:**
+- Phase 1: Off-exchange queue + proximity gate (no merge) — single biggest impact.
+- Phase 2: Pre-flight balance check — kills the 132 rejections.
+- Phase 3: Merge-on-exchange — one order per symbol+direction, combined sizing.
+- Phase 4: All bridge exchange calls routed through MCP.
+
+**Status:** Design approved 2026-06-17.  Implementation deferred pending duplicate-order
+fix and Capital.com gaps.
 
 
 ## Post-Implementation Code Review (2026-06-17)
