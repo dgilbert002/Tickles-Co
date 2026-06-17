@@ -226,7 +226,9 @@ class CcxtExecutionAdapter:
         try:
             await asyncio.to_thread(client.set_margin_mode, "cross", symbol)
             self._margin_mode_set.add(margin_key)
-        except Exception:
+        except Exception as exc:
+            LOG.debug("_ensure_cross_margin set_margin_mode failed for %s/%s %s: %s",
+                      exchange, account_name, symbol, exc)
             try:
                 # Bybit fallback — private API
                 clean = symbol.replace("/", "").split(":")[0]
@@ -237,8 +239,9 @@ class CcxtExecutionAdapter:
                     })
                 )
                 self._margin_mode_set.add(margin_key)
-            except Exception:
-                pass  # already cross, unsupported, or non-crypto symbol
+            except Exception as exc:
+                LOG.debug("_ensure_cross_margin Bybit fallback failed for %s/%s %s: %s",
+                          exchange, account_name, symbol, exc)
 
     # ------------------------------------------------------------------
     # Modify stop-loss on an existing open position
@@ -283,7 +286,22 @@ class CcxtExecutionAdapter:
 
         if ex in ("bitget",):
             try:
+                # Bitget rejects new TPSL orders when one already exists
+                # for the same position.  Cancel any existing loss-plan first.
                 plan = "long" if direction == "long" else "short"
+                clean = symbol.replace("/", "").split(":")[0]
+                try:
+                    await asyncio.to_thread(
+                        lambda: client.private_mix_post_v2_mix_order_cancel_tpsl_order({
+                            "symbol": clean,
+                            "marginCoin": "USDT",
+                            "productType": "USDT-FUTURES",
+                            "planType": "loss_plan",
+                            "holdSide": plan,
+                        })
+                    )
+                except Exception:
+                    pass  # no existing TPSL to cancel — that's fine
                 clean = symbol.replace("/", "").split(":")[0]
                 # Execute price slightly past trigger so it fills after activation.
                 exec_price = round(sl_price * 0.99, 4) if direction == "long" else round(sl_price * 1.01, 4)
@@ -517,14 +535,14 @@ class CcxtExecutionAdapter:
             body.update({
                 "tpslMode": "Full",
                 "stopLoss": str(sl), "takeProfit": str(tp),
-                "slTriggerBy": "LastPrice", "tpTriggerBy": "LastPrice",
+                "slTriggerBy": "MarkPrice", "tpTriggerBy": "LastPrice",
                 "slOrderType": "Market", "tpOrderType": "Market",
             })
         elif sl is not None:
             # SL only: do NOT include slOrderType (Bybit rejects it when tpSlMode is empty)
             body.update({
                 "stopLoss": str(sl),
-                "slTriggerBy": "LastPrice",
+                "slTriggerBy": "MarkPrice",
             })
         elif tp is not None:
             # TP only: do NOT include tpOrderType (same reason)

@@ -290,7 +290,7 @@ class DemoBridge:
             "WHERE contest_id = 'copy-trade-scenarios' AND tracked_position_id IS NOT NULL "
             "UNION "
             "SELECT DISTINCT tracked_position_id FROM public.demo_orders "
-            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled')"
+            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled','queued')"
         )
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
@@ -299,23 +299,30 @@ class DemoBridge:
 
     async def _queue_price(self, symbol: str):
         """Current price via paper's fetch_latest_price."""
-        pool = await self._ensure_pool()
-        return await _fetch_price(pool, symbol, None, "1m")
+        try:
+            pool = await self._ensure_pool()
+            return await _fetch_price(pool, symbol, None, "1m")
+        except Exception as exc:
+            LOG.debug("_queue_price failed for %s: %s", symbol, exc)
+            return None
 
     async def _queue_candles(self, symbol: str, n: int = 60) -> list:
         """Recent candles via paper's _symbol_lookup_candidates."""
-        pool = await self._ensure_pool()
-        for cand_sym in _symbol_lookup_candidates(symbol):
-            rows = await pool.fetch_all(
-                "SELECT c.timestamp, c.open, c.high, c.low, c.close "
-                "FROM public.candles c "
-                "JOIN public.instruments i ON i.id = c.instrument_id "
-                "WHERE i.symbol = $1 AND c.timeframe = '1m' "
-                "ORDER BY c.timestamp DESC LIMIT $2",
-                (cand_sym, n),
-            )
-            if rows:
-                return [dict(r) for r in reversed(rows)]
+        try:
+            pool = await self._ensure_pool()
+            for cand_sym in _symbol_lookup_candidates(symbol):
+                rows = await pool.fetch_all(
+                    "SELECT c.timestamp, c.open, c.high, c.low, c.close "
+                    "FROM public.candles c "
+                    "JOIN public.instruments i ON i.id = c.instrument_id "
+                    "WHERE i.symbol = $1 AND c.timeframe = '1m' "
+                    "ORDER BY c.timestamp DESC LIMIT $2",
+                    (cand_sym, n),
+                )
+                if rows:
+                    return [dict(r) for r in reversed(rows)]
+        except Exception as exc:
+            LOG.debug("_queue_candles failed for %s: %s", symbol, exc)
         return []
 
     async def _get_new_signals(self) -> List[Dict]:
@@ -510,36 +517,42 @@ class DemoBridge:
                 (sym, direction, acct["exchange"], acct["account_name"]))
             if existing:
                 old_entry = float(existing["paper_entry"] or 0)
-                entry_diff = abs(entry - old_entry) / old_entry if old_entry > 0 else 999
-                new_ts = signal.get("signal_timestamp")
-                old_ts = existing.get("ordered_at")
-
-                if entry_diff <= 0.02:  # within 2% — same trade, updated
-                    if new_ts and old_ts and new_ts > old_ts:
-                        # Newer — replace
-                        if existing["status"] == "pending" and existing.get("exchange_order_id"):
-                            await self._cancel_demo_order(
-                                tp_id, acct["account_name"],
-                                existing["exchange_order_id"],
-                                exchange=acct["exchange"])
-                        await dpool.execute(
-                            "UPDATE public.demo_orders SET status = 'cancelled', "
-                            "error_message = 'replaced by newer signal', "
-                            "updated_at = NOW() WHERE id = $1",
-                            (existing["id"],))
-                        LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
-                                 tp_id, existing["id"], acct["exchange"],
-                                 acct["account_name"], sym, old_entry, entry)
-                        # Fall through — place new order below
-                    else:
-                        # Older or same age — keep existing
-                        LOG.debug("Signal #%d: existing order #%d is current (same trade) — skip",
-                                  tp_id, existing["id"])
-                        continue
+                # Guard: zero or negative old_entry means corrupted row — treat as different trade
+                if old_entry <= 0:
+                    LOG.debug("Signal #%d: existing order #%d has paper_entry=%.4f — treating as different trade",
+                              tp_id, existing["id"], old_entry)
                 else:
-                    # Different trade — both valid
-                    LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f — both valid",
-                              tp_id, entry, old_entry)
+                    entry_diff = abs(entry - old_entry) / old_entry
+                    # Use signal_timestamp from tracked_position; fall back to NOW()
+                    new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
+                    old_ts = existing.get("ordered_at")
+
+                    if entry_diff <= 0.02:  # within 2% — same trade, updated
+                        if new_ts > old_ts:
+                            # Newer — replace
+                            if existing["status"] == "pending" and existing.get("exchange_order_id"):
+                                await self._cancel_demo_order(
+                                    tp_id, acct["account_name"],
+                                    existing["exchange_order_id"],
+                                    exchange=acct["exchange"])
+                            await dpool.execute(
+                                "UPDATE public.demo_orders SET status = 'cancelled', "
+                                "error_message = 'replaced by newer signal', "
+                                "updated_at = NOW() WHERE id = $1",
+                                (existing["id"],))
+                            LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
+                                     tp_id, existing["id"], acct["exchange"],
+                                     acct["account_name"], sym, old_entry, entry)
+                            # Fall through — place new order below
+                        else:
+                            # Older or same age — keep existing
+                            LOG.debug("Signal #%d: existing order #%d is current (same trade) — skip",
+                                      tp_id, existing["id"])
+                            continue
+                    else:
+                        # Different trade — both valid
+                        LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f — both valid",
+                                  tp_id, entry, old_entry)
 
             # Skip when sizing produces zero notional (free balance exhausted).
             if notional_eff <= 0 or allocated <= 0:
@@ -1250,7 +1263,18 @@ class DemoBridge:
                 LOG.info("Expired queued #%d %s %s (dist=%.1f%%)",
                          r["id"], r["symbol"], r["direction"], dist_pct)
 
-            elif r["status"] == "pending" and r.get("exchange_order_id"):
+            elif r["status"] == "pending":
+                # Guard: promoted-but-never-placed orders have no exchange_order_id
+                if not r.get("exchange_order_id"):
+                    await pool.execute(
+                        "UPDATE public.demo_orders SET status = 'expired', "
+                        "error_message = 'promoted but never placed', "
+                        "updated_at = NOW() WHERE id = $1",
+                        (r["id"],))
+                    expired_queued += 1
+                    LOG.info("Expired unplaced pending #%d %s %s (dist=%.1f%%)",
+                             r["id"], r["symbol"], r["direction"], dist_pct)
+                    continue
                 # On exchange — cancel, then mark
                 try:
                     await self._cancel_demo_order(
