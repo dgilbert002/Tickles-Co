@@ -390,43 +390,55 @@ class DemoBridge:
         notional = float(signal["notional_usd"] or 0)
         
         if entry <= 0:
-            return
+            return False
 
         # ── Smart Queue proximity gate ──
         # Don't place orders when price is far from entry.  Queued orders
         # wait until price approaches (promoted by _promote_queued).
         current_price = await self._queue_price(sym)
-        if current_price is not None and current_price > 0:
-            dist_pct = _dist_to_entry(current_price, entry) * 100.0
-            if dist_pct > SMART_QUEUE_PLACE_PCT:
-                # Beyond threshold — queue, don't place
-                pool = await self._ensure_pool()
-                await pool.execute(
-                    "INSERT INTO public.demo_orders "
-                    "(exchange, account_name, symbol, direction, paper_entry, "
-                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                    "ON CONFLICT DO NOTHING",
-                    (sym, direction, entry, sl, tp, tp_id))
-                LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
-                          tp_id, sym, direction, entry, dist_pct)
-                return
-            # Within threshold — verify wick touch before placing
-            candles = await self._queue_candles(
-                sym, SMART_QUEUE_TOUCH_CANDLES)
-            if not _entry_touched(candles, entry):
-                # Close but no wick yet — queue anyway
-                pool = await self._ensure_pool()
-                await pool.execute(
-                    "INSERT INTO public.demo_orders "
-                    "(exchange, account_name, symbol, direction, paper_entry, "
-                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                    "ON CONFLICT DO NOTHING",
-                    (sym, direction, entry, sl, tp, tp_id))
-                LOG.debug("Queued signal #%d %s %s (within %.1f%% but no wick touch)",
-                          tp_id, sym, direction, dist_pct)
-                return
+        if current_price is None or current_price <= 0:
+            # No price data — queue, don't place blindly
+            pool = await self._ensure_pool()
+            await pool.execute(
+                "INSERT INTO public.demo_orders "
+                "(exchange, account_name, symbol, direction, paper_entry, "
+                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                "ON CONFLICT DO NOTHING",
+                (sym, direction, entry, sl, tp, tp_id))
+            LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
+            return False
+
+        dist_pct = _dist_to_entry(current_price, entry) * 100.0
+        if dist_pct > SMART_QUEUE_PLACE_PCT:
+            # Beyond threshold — queue, don't place
+            pool = await self._ensure_pool()
+            await pool.execute(
+                "INSERT INTO public.demo_orders "
+                "(exchange, account_name, symbol, direction, paper_entry, "
+                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                "ON CONFLICT DO NOTHING",
+                (sym, direction, entry, sl, tp, tp_id))
+            LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
+                      tp_id, sym, direction, entry, dist_pct)
+            return False
+        # Within threshold — verify wick touch before placing
+        candles = await self._queue_candles(
+            sym, SMART_QUEUE_TOUCH_CANDLES)
+        if not _entry_touched(candles, entry):
+            # Close but no wick yet — queue anyway
+            pool = await self._ensure_pool()
+            await pool.execute(
+                "INSERT INTO public.demo_orders "
+                "(exchange, account_name, symbol, direction, paper_entry, "
+                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                "ON CONFLICT DO NOTHING",
+                (sym, direction, entry, sl, tp, tp_id))
+            LOG.debug("Queued signal #%d %s %s (within %.1f%% but no wick touch)",
+                      tp_id, sym, direction, dist_pct)
+            return False
 
         # Map the actor to agent, then find accounts
         actor_id = signal.get("actor_id", "")
@@ -445,6 +457,8 @@ class DemoBridge:
             if key not in seen:
                 seen.add(key)
                 unique_accounts.append(a)
+        
+        placed_any = False
         
         # Phase 6 (2026-05-29) — ACCURATE per-agent sizing.
         # The OLD flat DEMO_MARGIN_USD logic is removed: each account is now
@@ -602,6 +616,7 @@ class DemoBridge:
                 acc = [u for u in updates if u.status == "accepted"]
                 
                 if acc:
+                    placed_any = True
                     ext_id = acc[0].external_order_id
                     self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
                         "order_id": ext_id,
@@ -669,6 +684,8 @@ class DemoBridge:
                 flog("mirror_error", tp_id=tp_id, agent=agent_id,
                      exchange=acct["exchange"], account=acct["account_name"],
                      symbol=sym, error=str(exc)[:300])
+
+        return placed_any
 
     async def _cancel_demo_order(self, tp_id: int, acct_name: str, order_id: str,
                                   exchange: str = "bybit"):
@@ -1278,8 +1295,11 @@ class DemoBridge:
         if signals:
             LOG.info("Tick: %d new signals to mirror", len(signals))
             for s in signals:
-                await self._mirror_signal(s, mappings)
-                self._mirrored.add(s["id"])
+                was_placed = await self._mirror_signal(s, mappings)
+                if was_placed:
+                    self._mirrored.add(s["id"])
+                # If queued (was_placed=False), do NOT add to _mirrored —
+                # _promote_queued will handle it when price approaches.
                 await asyncio.sleep(0.3)  # Rate limit
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
