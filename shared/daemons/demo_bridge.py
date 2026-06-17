@@ -14,7 +14,7 @@ Design:
 Usage:
   python3 -m shared.daemons.demo_bridge
 """
-import asyncio, logging, os, re, signal, sys
+import asyncio, logging, os, re, signal, sys, time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -1165,7 +1165,7 @@ class DemoBridge:
     # Smart Queue — promote / expire
     # ═══════════════════════════════════════════════════════════════════
 
-    async def _promote_queued(self, mappings: Dict[str, List[Dict]]):
+    async def _promote_queued(self):
         """Promote queued orders to pending when price is within place threshold.
 
         Checks current price + candle wick-touch for every order with
@@ -1308,11 +1308,22 @@ class DemoBridge:
         # 0. Refresh real demo-account balances (drives accurate per-agent sizing)
         await self._refresh_balances(mappings)
 
+        # Refresh exchange leverage limits cache (every 5 min)
+        if not hasattr(self, "_last_limits_refresh"):
+            self._last_limits_refresh = 0.0
+        if time.monotonic() - self._last_limits_refresh > 300:
+            try:
+                from shared.market_data.exchange_limits import clear_cache
+                clear_cache()
+            except Exception:
+                pass
+            self._last_limits_refresh = time.monotonic()
+
         # ── Smart Queue ──
         # 0a. Expire queued/pending orders that drifted past close threshold
         await self._expire_distant()
         # 0b. Promote queued orders whose price is now within place threshold
-        await self._promote_queued(mappings)
+        await self._promote_queued()
 
         # 1. Place limit orders for new signals
         signals = await self._get_new_signals()
