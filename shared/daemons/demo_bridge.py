@@ -404,8 +404,15 @@ class DemoBridge:
         # wait until price approaches (promoted by _promote_queued).
         current_price = await self._queue_price(sym)
         if current_price is None or current_price <= 0:
-            # No price data - queue, don't place blindly
+            # No price data - queue, don't place blindly (skip if recently queued)
             pool = await self._ensure_pool()
+            recent = await pool.fetch_one(
+                "SELECT id FROM public.demo_orders "
+                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
+                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
+                (tp_id,))
+            if recent:
+                return False
             await pool.execute(
                 "INSERT INTO public.demo_orders "
                 "(exchange, account_name, symbol, direction, paper_entry, "
@@ -418,8 +425,15 @@ class DemoBridge:
 
         dist_pct = _dist_to_entry(current_price, entry) * 100.0
         if dist_pct > SMART_QUEUE_PLACE_PCT:
-            # Beyond threshold - queue, don't place
+            # Beyond threshold - queue, don't place (skip if recently queued)
             pool = await self._ensure_pool()
+            recent = await pool.fetch_one(
+                "SELECT id FROM public.demo_orders "
+                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
+                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
+                (tp_id,))
+            if recent:
+                return False
             await pool.execute(
                 "INSERT INTO public.demo_orders "
                 "(exchange, account_name, symbol, direction, paper_entry, "
@@ -434,8 +448,15 @@ class DemoBridge:
         candles = await self._queue_candles(
             sym, SMART_QUEUE_TOUCH_CANDLES)
         if not _entry_touched(candles, entry):
-            # Close but no wick yet - queue anyway
+            # Close but no wick yet - queue anyway (skip if recently queued)
             pool = await self._ensure_pool()
+            recent = await pool.fetch_one(
+                "SELECT id FROM public.demo_orders "
+                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
+                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
+                (tp_id,))
+            if recent:
+                return False
             await pool.execute(
                 "INSERT INTO public.demo_orders "
                 "(exchange, account_name, symbol, direction, paper_entry, "
@@ -940,6 +961,44 @@ class DemoBridge:
                 pnl_pct = ((mark - entry) / entry * 100) if entry > 0 else 0
                 if direction == "short":
                     pnl_pct = -pnl_pct
+
+                # BE-lock check FIRST (runs before the continue, for both
+                # existing and newly-discovered positions).
+                be_existing = False
+                already_locked = False
+                if "be_lock" in (agent_id or "") and entry > 0 and mark > 0:
+                    # Quick check: is this position already BE-locked?
+                    be_row = await pool.fetch_one(
+                        "SELECT id, metadata FROM public.demo_orders "
+                        "WHERE exchange = $1 AND account_name = $2 "
+                        "AND symbol = $3 AND status IN ('filled','pending') "
+                        "AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1",
+                        (ex, acct_name, sym))
+                    be_existing = bool(be_row)
+                    already_locked = bool((be_row["metadata"] or {}).get("be_locked")) if be_row else False
+                    if not already_locked:
+                        pnl_pct = ((mark - entry) / entry) * 100.0
+                        if direction == "short":
+                            pnl_pct = -pnl_pct
+                        threshold = self._demo_sizing("demo_be_lock_threshold_pct", 5.0)
+                        offset   = self._demo_sizing("demo_be_lock_offset_pct", 0.002)
+                        if pnl_pct >= threshold:
+                            new_sl = entry * (1.0 + offset) if direction == "long" else entry * (1.0 - offset)
+                            ok = await self._adapter.modify_sl(
+                                exchange=ex, account_name=acct_name,
+                                symbol=sym, sl_price=new_sl, direction=direction,
+                                size=abs(contracts))
+                            if ok and be_row:
+                                await pool.execute(
+                                    "UPDATE public.demo_orders SET "
+                                    "paper_sl = $1, "
+                                    "metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                                    "  '{be_locked}', 'true'::jsonb), "
+                                    "updated_at = NOW() WHERE id = $2",
+                                    (round(new_sl, 8), be_row["id"]))
+                            LOG.info("BE-LOCK %s/%s %s %s @+%.1f%% -> SL=%.6g (%s)",
+                                     ex, acct_name, sym, direction, pnl_pct,
+                                     new_sl, "ok" if ok else "failed")
 
                 # Check if we already have a demo_orders row for this position.
                 # Prefer filled rows (the real position) over pending ones
