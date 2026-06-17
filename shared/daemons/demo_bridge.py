@@ -774,10 +774,17 @@ class DemoBridge:
                 mark = float(pos.get("markPrice") or 0)
                 upnl = float(pos.get("unrealizedPnl") or 0)
                 notional = float(pos.get("notional") or 0) or (entry * abs(contracts))
-                # CCXT normalises side to "long"/"short"; contracts may be absolute
-                # on some demo exchanges.  Use side as the primary direction signal.
+                # Bitget demo CCXT adapter reports side='short' for long
+                # positions — contracts is the numeric truth.  When both
+                # signals disagree, trust contracts over side.
                 raw_side = str(pos.get("side", "")).lower()
-                direction = raw_side if raw_side in ("long", "short") else ("long" if contracts > 0 else "short")
+                sign_dir = "long" if contracts > 0 else "short"
+                if raw_side in ("long", "short") and raw_side != sign_dir:
+                    direction = sign_dir  # override CCXT side with numeric truth
+                elif raw_side in ("long", "short"):
+                    direction = raw_side
+                else:
+                    direction = sign_dir
                 pnl_pct = ((mark - entry) / entry * 100) if entry > 0 else 0
                 if direction == "short":
                     pnl_pct = -pnl_pct
@@ -912,7 +919,8 @@ class DemoBridge:
                             new_sl = entry * (1.0 + offset) if direction == "long" else entry * (1.0 - offset)
                             ok = await self._adapter.modify_sl(
                                 exchange=ex, account_name=acct_name,
-                                symbol=sym, sl_price=new_sl, direction=direction)
+                                symbol=sym, sl_price=new_sl, direction=direction,
+                                size=abs(contracts))
                             if ok:
                                 target_id = existing["id"] if existing else None
                                 if target_id:

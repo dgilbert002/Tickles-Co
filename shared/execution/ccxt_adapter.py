@@ -101,10 +101,10 @@ class CcxtExecutionAdapter:
             if cls is None:
                 raise RuntimeError(f"ccxt has no exchange named {exchange!r}")
 
-            from shared.utils.credentials import Credentials
-            creds = Credentials.get(exchange, account_name)
-            if not creds.get("apiKey") or not creds.get("secret"):
-                creds = self._load_creds_from_db(exchange, account_name)
+            # Credentials live in the exchange_accounts DB table — single source
+            # of truth shared by bridge, dashboard, and MCP server.  Environment
+            # variables are for human reference only.
+            creds = self._load_creds_from_db(exchange, account_name)
 
             config = {"enableRateLimit": True, "options": {"defaultType": self._default_type}}
             config.update(creds)
@@ -118,12 +118,15 @@ class CcxtExecutionAdapter:
     def _load_creds_from_db(self, exchange: str, account_name: str) -> Dict[str, str]:
         try:
             import subprocess
+            # Single-quote escape: replace ' with '' (SQL standard).
+            _esc = lambda s: s.replace("'", "''")
             pw = os.environ.get("DB_PASSWORD", "")
             result = subprocess.run(
                 ["psql", "-U", "admin", "-h", "localhost", "-d", "tickles_shared",
                  "-t", "-A", "-c",
                  f"SELECT api_key, api_secret, api_passphrase FROM exchange_accounts "
-                 f"WHERE exchange='{exchange}' AND account_name='{account_name}' AND is_active=TRUE"],
+                 f"WHERE exchange = '{_esc(exchange)}' "
+                 f"AND account_name = '{_esc(account_name)}' AND is_active = TRUE"],
                 env={**os.environ, "PGPASSWORD": pw},
                 capture_output=True, text=True, timeout=15,
             )
@@ -248,6 +251,7 @@ class CcxtExecutionAdapter:
         symbol: str,
         sl_price: float,
         direction: str,
+        size: Optional[float] = None,
     ) -> bool:
         """Move the stop-loss on an open position (used by demo BE-lock).
 
@@ -280,15 +284,22 @@ class CcxtExecutionAdapter:
         if ex in ("bitget",):
             try:
                 plan = "long" if direction == "long" else "short"
+                clean = symbol.replace("/", "").split(":")[0]
+                # Execute price slightly past trigger so it fills after activation.
+                exec_price = round(sl_price * 0.99, 4) if direction == "long" else round(sl_price * 1.01, 4)
+                body = {
+                    "symbol": clean,
+                    "marginCoin": "USDT",
+                    "productType": "USDT-FUTURES",
+                    "planType": "loss_plan",
+                    "triggerPrice": str(round(sl_price, 4)),
+                    "executePrice": str(exec_price),
+                    "holdSide": plan,
+                }
+                if size is not None:
+                    body["size"] = str(round(abs(size), 4))
                 await asyncio.to_thread(
-                    lambda: client.private_mix_post_position_tpsl_order({
-                        "symbol": symbol.replace("/", "").split(":")[0],
-                        "marginCoin": "USDT",
-                        "planType": "loss_plan",
-                        "triggerPrice": str(round(sl_price, 4)),
-                        "triggerType": "mark_price",
-                        "holdSide": plan,
-                    })
+                    lambda: client.private_mix_post_v2_mix_order_place_tpsl_order(body)
                 )
                 return True
             except Exception as exc:
