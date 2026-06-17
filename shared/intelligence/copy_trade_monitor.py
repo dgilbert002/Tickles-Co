@@ -812,7 +812,9 @@ class LiveCopyTradeMonitor:
             "allocated": allocated,
             "leverage": leverage,
             "be_locked": False,
-            "be_price": entry * 1.05 if direction == "long" else entry * 0.95,
+            "be_price": entry * (1.0 + float(_sizing("demo_be_lock_threshold_pct", 5.0)) / 100.0)
+                if direction == "long"
+                else entry * (1.0 - float(_sizing("demo_be_lock_threshold_pct", 5.0)) / 100.0),
             "entered_at": fill_at,
         })
 
@@ -927,16 +929,16 @@ class LiveCopyTradeMonitor:
                     triggered = False
                     if pos["direction"] == "long" and latest_candle["close"] >= pos.get("be_price", 0):
                         triggered = True
-                        pos["sl"] = pos["entry"] * 1.001
+                        pos["sl"] = pos["entry"] * (1.0 + float(_sizing("demo_be_lock_offset_pct", 0.002)))
                     elif pos["direction"] == "short" and latest_candle["close"] <= pos.get("be_price", float("inf")):
                         triggered = True
-                        pos["sl"] = pos["entry"] * 0.999
+                        pos["sl"] = pos["entry"] * (1.0 - float(_sizing("demo_be_lock_offset_pct", 0.002)))
                     if triggered:
                         old_lev = pos["leverage"]
                         pos["be_locked"] = True
                         # Liquidation-safe BE leverage (NOT a naive 100x, which
                         # would put liquidation at/inside the 0.1% BE stop).
-                        be_lev = be_lock_leverage(0.001)
+                        be_lev = be_lock_leverage(float(_sizing("demo_be_lock_offset_pct", 0.002)))
                         pos["leverage"] = be_lev
                         pos["allocated"] = pos["allocated"] * (old_lev / be_lev)
                         await self._persist_be_lock(agent_name, pos)
@@ -976,16 +978,16 @@ class LiveCopyTradeMonitor:
                         triggered = False
                         if pos["direction"] == "long" and hi >= pos["be_price"]:
                             triggered = True
-                            pos["sl"] = pos["entry"] * 1.001  # SL→BE+fees
+                            pos["sl"] = pos["entry"] * (1.0 + float(_sizing("demo_be_lock_offset_pct", 0.002)))  # SL→BE+fees
                         elif pos["direction"] == "short" and lo <= pos["be_price"]:
                             triggered = True
-                            pos["sl"] = pos["entry"] * 0.999  # SL→BE+fees
+                            pos["sl"] = pos["entry"] * (1.0 - float(_sizing("demo_be_lock_offset_pct", 0.002)))  # SL→BE+fees
                         if triggered:
                             # Keep notional constant; raise leverage to free
                             # margin but stay liquidation-safe (NOT naive 100x).
                             old_lev = pos["leverage"]
                             pos["be_locked"] = True
-                            be_lev = be_lock_leverage(0.001)
+                            be_lev = be_lock_leverage(float(_sizing("demo_be_lock_offset_pct", 0.002)))
                             pos["leverage"] = be_lev
                             pos["allocated"] = pos["allocated"] * (old_lev / be_lev)
                             # Persist BE lock to DB so it survives restarts

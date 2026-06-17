@@ -1,5 +1,5 @@
 """
-demo_bridge.py — mirrors paper competition SIGNALS to demo exchange accounts.
+demo_bridge.py - mirrors paper competition SIGNALS to demo exchange accounts.
 
 Watches tracked_positions for new pending/open entries and places LIMIT ORDERS
 on assigned demo accounts at the signal's entry_price BEFORE the paper trade triggers.
@@ -28,7 +28,7 @@ from shared.intelligence.copy_trade_monitor import (
     _symbol_lookup_candidates, _distance_to_entry as _dist_to_entry, _entry_touched,
 )
 from shared.intelligence.position_monitor import fetch_latest_price as _fetch_price
-# Phase 1 (2026-05-29): forensic transaction log — every mirror event is
+# Phase 1 (2026-05-29): forensic transaction log - every mirror event is
 # appended to /opt/tickles/shared/logs/paper_demo.log for the dashboard's
 # "Paper vs Demo vs Live" live-log viewer and shell-side grep.
 from shared.daemons.demo_forensic_log import flog
@@ -39,18 +39,18 @@ POLL_INTERVAL_S = int(os.environ.get("DEMO_BRIDGE_POLL_S", "15"))
 # Strip options-contract suffixes (e.g. -260531-90-P) before routing to CCXT.
 _OPT_RE_DEMO = re.compile(r"-\d{6}-\d+-[PC]$")
 
-# Phase 1 (2026-05-29) FIX — position sizing.
+# Phase 1 (2026-05-29) FIX - position sizing.
 #
 # THE BUG: every tracked_position carries notional_usd = 1000 (the full paper
 # wallet). The bridge mirrored that 1:1 as the order NOTIONAL and committed
 # margin = notional / leverage onto each ~1000 USD demo account. Because the
 # bridge fires for EVERY signal on EVERY account, those orders STACKED until
-# the account margin was completely exhausted — that is why the demo accounts
+# the account margin was completely exhausted - that is why the demo accounts
 # ended up with e.g. a BNB position of 5120 notional and NEGATIVE free margin,
 # after which every new order is rejected with "ab not enough" (retCode
 # 110007). In other words it committed ~100% (and more) of the wallet.
 #
-# THE FIX: size each demo order the same way the paper agents do — commit a
+# THE FIX: size each demo order the same way the paper agents do - commit a
 # small FIXED margin per trade (the 5%-risk paper agents allocate ~$50 of a
 # $1000 wallet), then derive notional = margin * leverage. This keeps each
 # order tiny relative to the wallet, leaves headroom for fees/slippage, and
@@ -62,7 +62,7 @@ DEMO_MARGIN_USD = float(os.environ.get("DEMO_MARGIN_USD", "50"))
 DEMO_NOTIONAL_SAFETY_PCT = float(os.environ.get("DEMO_NOTIONAL_SAFETY_PCT", "0.99"))
 
 # ---------------------------------------------------------------------------
-# Phase 6 (2026-05-29) — ACCURATE per-agent demo sizing.
+# Phase 6 (2026-05-29) - ACCURATE per-agent demo sizing.
 #
 # WHY: the flat DEMO_MARGIN_USD ($50) sizing above was safe but NOT faithful.
 # A demo account that mirrors `copy_spot_lev_3x` (3x notional on the full
@@ -95,12 +95,12 @@ AGENT_MODE: Dict[str, str] = {
     "copy_rose_b":          "lev_5pct",
     "copy_rose_c":          "lev_5pct",
 }
-# Max concurrent OPEN demo positions per account, by mode — mirrors the paper
+# Max concurrent OPEN demo positions per account, by mode - mirrors the paper
 # agent's concurrency rule so the demo never over-places and exhausts margin.
 MODE_MAX_CONCURRENT: Dict[str, int] = {
     "spot_seq": 1, "spot_seq_ch": 33, "spot_lev_3x": 1, "lev_3pct": 33, "lev_5pct": 20,
 }
-# Risk % / leverage knobs — read from copy_sizing_config (same DB table as
+# Risk % / leverage knobs - read from copy_sizing_config (same DB table as
 # the paper engine) so Settings UI changes affect both layers.  The module-level
 # defaults here only apply during import before the first tick's DB refresh;
 # each tick() calls _refresh_sizing() which pulls the live values.
@@ -139,8 +139,8 @@ class DemoBridge:
     async def _load_mappings(self) -> Dict[str, List[Dict]]:
         """Load agent→account mappings: {agent_id: [{exchange, account_name}, ...]}
 
-        Also populates self._acct_agent — the REVERSE map keyed by
-        "{exchange}/{account_name}" → agent_id — so every demo order we place
+        Also populates self._acct_agent - the REVERSE map keyed by
+        "{exchange}/{account_name}" → agent_id - so every demo order we place
         can be stamped with the agent it belongs to (the demo account follows
         that agent's scenario). Mappings are currently 1 account ↔ 1 agent.
         """
@@ -186,7 +186,7 @@ class DemoBridge:
                     bal = await self._adapter.fetch_balance(
                         exchange=a["exchange"], account_name=a["account_name"])
                     usdt = float(bal.get("USDT") or 0.0)
-                    # Always update — even zero balance must be recorded
+                    # Always update - even zero balance must be recorded
                     # so sizing sees the real free balance, not the fallback.
                     if "USDT" in bal:
                         self._acct_balance[key] = usdt
@@ -214,19 +214,19 @@ class DemoBridge:
         """
         mode = AGENT_MODE.get(agent_id or "", "lev_5pct")
         bal = balance if balance is not None and balance > 0 else DEMO_FALLBACK_BALANCE
-        # Leverage from SL distance — identical formula to the paper agents.
+        # Leverage from SL distance - identical formula to the paper agents.
         if sl is not None and sl > 0 and entry > 0:
             sl_dist = abs(entry - sl) / entry
         else:
             sl_dist = 0.05
         if sl_dist < 0.005:
             sl_dist = 0.005
-        # Liquidation-safe leverage — mirrors copy_trade_monitor.lev_after_buffer:
+        # Liquidation-safe leverage - mirrors copy_trade_monitor.lev_after_buffer:
         # L <= 1 / (sl_dist * safety + mmr) keeps the forced-liquidation price
         # strictly beyond the stop (the old (1/sl_dist)*0.97 put liquidation
         # BEFORE the stop for any stop tighter than ~5%).
-        _liq_safety = float(os.environ.get("DEMO_LIQ_SAFETY", "1.15"))
-        _liq_mmr = float(os.environ.get("DEMO_LIQ_MMR", "0.006"))
+        _liq_safety = self._demo_sizing("liq_safety", 1.15)
+        _liq_mmr = self._demo_sizing("liq_mmr", 0.006)
         _lev_cap = self._demo_sizing("leverage_cap", 100.0)
         lev_from_sl = min(1.0 / (sl_dist * _liq_safety + _liq_mmr), _lev_cap)
 
@@ -237,7 +237,7 @@ class DemoBridge:
         if mode == "spot_seq":
             allocated, leverage = bal, 1.0
         elif mode == "spot_seq_ch":
-            # chart_hacker copier: 3% risk, dynamic leverage from SL distance —
+            # chart_hacker copier: 3% risk, dynamic leverage from SL distance -
             # identical to copy_trade_monitor's spot_seq_ch branch.
             allocated, leverage = bal * _risk3, lev_from_sl
         elif mode == "spot_lev_3x":
@@ -257,7 +257,7 @@ class DemoBridge:
 
         Only counts RECENT orders (last 24h) toward the concurrency cap. Older
         pending limit orders are sitting at entry prices far from current market
-        — they should NOT block new signals from being placed. The paper-level
+        - they should NOT block new signals from being placed. The paper-level
         tracked_position timeout (7 days) handles stale-paper cleanup; the bridge
         cancels the corresponding demo order when the paper position expires.
         """
@@ -273,11 +273,11 @@ class DemoBridge:
     async def _load_mirrored(self):
         """Load already-mirrored tracked_position IDs from persistent tracking.
 
-        Phase 1 (2026-05-29) FIX — duplicate-order stacking on restart:
+        Phase 1 (2026-05-29) FIX - duplicate-order stacking on restart:
         previously this only excluded positions that had a PAPER fill
         (competition_trades). A pending signal whose paper leg had not yet
         filled was NOT excluded, so EVERY daemon restart re-placed a fresh
-        resting limit order for it — duplicate orders piled up on the exchange
+        resting limit order for it - duplicate orders piled up on the exchange
         and ate the account margin ("ab not enough" / "balance not enough").
         We now ALSO exclude any tracked_position that already has a
         pending/filled demo order, so restarts never duplicate. Rejected
@@ -290,7 +290,7 @@ class DemoBridge:
             "WHERE contest_id = 'copy-trade-scenarios' AND tracked_position_id IS NOT NULL "
             "UNION "
             "SELECT DISTINCT tracked_position_id FROM public.demo_orders "
-            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled','queued')"
+            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled','queued','cancelled','rejected')"
         )
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
@@ -345,7 +345,7 @@ class DemoBridge:
         return [dict(r) for r in rows]
 
     async def _get_cancelled_signals(self) -> List[Dict]:
-        """Get mirrored signals that are now cancelled — cancel their demo orders."""
+        """Get mirrored signals that are now cancelled - cancel their demo orders."""
         if not self._orders:
             return []
         pool = await self._ensure_pool()
@@ -374,7 +374,7 @@ class DemoBridge:
             if actor_id.startswith('jarvais_trader_'):
                 # All regular agents trade trader signals. Exclude the
                 # chart_hacker copier (copy_charthacker) and the rose copiers
-                # — they only mirror their own source. (2026-05-29 rename: the
+                # - they only mirror their own source. (2026-05-29 rename: the
                 # old `startswith('copy_ch_')` test no longer matches
                 # 'copy_charthacker', so exclude it explicitly.)
                 if agent_id != 'copy_charthacker' and not agent_id.startswith('copy_rose_'):
@@ -385,7 +385,7 @@ class DemoBridge:
         """Place limit order on demo accounts for a new signal."""
         tp_id = signal["id"]
         sym = signal["instrument_symbol"]
-        # Strip options contract suffixes only — keep :USDT perp suffix
+        # Strip options contract suffixes only - keep :USDT perp suffix
         # (all accounts use swap/perps, never spot).
         import re as _re2
         _opt_re = _re2.compile(r"-\d{6}-\d+-[PC]$")
@@ -404,7 +404,7 @@ class DemoBridge:
         # wait until price approaches (promoted by _promote_queued).
         current_price = await self._queue_price(sym)
         if current_price is None or current_price <= 0:
-            # No price data — queue, don't place blindly
+            # No price data - queue, don't place blindly
             pool = await self._ensure_pool()
             await pool.execute(
                 "INSERT INTO public.demo_orders "
@@ -418,7 +418,7 @@ class DemoBridge:
 
         dist_pct = _dist_to_entry(current_price, entry) * 100.0
         if dist_pct > SMART_QUEUE_PLACE_PCT:
-            # Beyond threshold — queue, don't place
+            # Beyond threshold - queue, don't place
             pool = await self._ensure_pool()
             await pool.execute(
                 "INSERT INTO public.demo_orders "
@@ -430,11 +430,11 @@ class DemoBridge:
             LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
                       tp_id, sym, direction, entry, dist_pct)
             return False
-        # Within threshold — verify wick touch before placing
+        # Within threshold - verify wick touch before placing
         candles = await self._queue_candles(
             sym, SMART_QUEUE_TOUCH_CANDLES)
         if not _entry_touched(candles, entry):
-            # Close but no wick yet — queue anyway
+            # Close but no wick yet - queue anyway
             pool = await self._ensure_pool()
             await pool.execute(
                 "INSERT INTO public.demo_orders "
@@ -467,7 +467,7 @@ class DemoBridge:
         
         placed_any = False
         
-        # Phase 6 (2026-05-29) — ACCURATE per-agent sizing.
+        # Phase 6 (2026-05-29) - ACCURATE per-agent sizing.
         # The OLD flat DEMO_MARGIN_USD logic is removed: each account is now
         # sized by the EXACT rule of the paper agent it mirrors (see
         # _compute_demo_size), computed against the account's real balance.
@@ -480,12 +480,20 @@ class DemoBridge:
             balance = self._acct_balance.get(acct_key, DEMO_FALLBACK_BALANCE)
 
             # Reproduce the mapped agent's sizing rule against the real balance.
-            # NOTE: we deliberately do NOT cap to signal["notional_usd"] — that
+            # NOTE: we deliberately do NOT cap to signal["notional_usd"] - that
             # field is always the paper WALLET (1000), not a position ceiling.
             # Capping to it would clamp spot_lev_3x (3x notional) and the
             # leveraged agents back to ~1000 and silently undo accurate sizing.
             mode, allocated, leverage, notional_eff = self._compute_demo_size(
                 agent_id, balance, entry, sl)
+            # Clamp to exchange per-symbol max (matches paper engine)
+            if leverage and leverage > 1.0:
+                try:
+                    from shared.market_data.exchange_limits import get_max_leverage
+                    sym_max = await get_max_leverage(sym)
+                    leverage = min(leverage, sym_max)
+                except Exception:
+                    pass
 
             # Respect the agent's max-concurrent rule on the demo side so we
             # don't over-place and exhaust margin (sequential agents = 1 at a
@@ -504,7 +512,7 @@ class DemoBridge:
             # ── Keep current: replace stale orders with updated trader data ──
             # If a newer signal arrives for the same symbol+direction+account
             # within 2% of an existing order's entry, cancel the old and place
-            # the new — the trader adjusted their entry/SL/TP.  Beyond 2% they're
+            # the new - the trader adjusted their entry/SL/TP.  Beyond 2% they're
             # separate trades.  Older signals defer to the existing order.
             dpool = await self._ensure_pool()
             existing = await dpool.fetch_one(
@@ -517,9 +525,9 @@ class DemoBridge:
                 (sym, direction, acct["exchange"], acct["account_name"]))
             if existing:
                 old_entry = float(existing["paper_entry"] or 0)
-                # Guard: zero or negative old_entry means corrupted row — treat as different trade
+                # Guard: zero or negative old_entry means corrupted row - treat as different trade
                 if old_entry <= 0:
-                    LOG.debug("Signal #%d: existing order #%d has paper_entry=%.4f — treating as different trade",
+                    LOG.debug("Signal #%d: existing order #%d has paper_entry=%.4f - treating as different trade",
                               tp_id, existing["id"], old_entry)
                 else:
                     entry_diff = abs(entry - old_entry) / old_entry
@@ -527,31 +535,21 @@ class DemoBridge:
                     new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
                     old_ts = existing.get("ordered_at")
 
-                    if entry_diff <= 0.02:  # within 2% — same trade, updated
+                    if entry_diff <= 0.02:  # within 2% - same trade, updated
                         if new_ts > old_ts:
-                            # Newer — replace
-                            if existing["status"] == "pending" and existing.get("exchange_order_id"):
-                                await self._cancel_demo_order(
-                                    tp_id, acct["account_name"],
-                                    existing["exchange_order_id"],
-                                    exchange=acct["exchange"])
-                            await dpool.execute(
-                                "UPDATE public.demo_orders SET status = 'cancelled', "
-                                "error_message = 'replaced by newer signal', "
-                                "updated_at = NOW() WHERE id = $1",
-                                (existing["id"],))
+                            # Newer - place new first, cancel old after
                             LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
                                      tp_id, existing["id"], acct["exchange"],
                                      acct["account_name"], sym, old_entry, entry)
-                            # Fall through — place new order below
+                            # Fall through - place new order below
                         else:
-                            # Older or same age — keep existing
-                            LOG.debug("Signal #%d: existing order #%d is current (same trade) — skip",
+                            # Older or same age - keep existing
+                            LOG.debug("Signal #%d: existing order #%d is current (same trade) - skip",
                                       tp_id, existing["id"])
                             continue
                     else:
-                        # Different trade — both valid
-                        LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f — both valid",
+                        # Different trade - both valid
+                        LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f - both valid",
                                   tp_id, entry, old_entry)
 
             # Skip when sizing produces zero notional (free balance exhausted).
@@ -567,7 +565,7 @@ class DemoBridge:
             if qty <= 0:
                 continue
 
-            # Symbol availability gate — checked against the DEMO environment's
+            # Symbol availability gate - checked against the DEMO environment's
             # actual market list (bitget PAPTRADING has only ~29 swaps; bybit
             # demo has ~678). Skips guaranteed rejections, logs once per
             # exchange/symbol pair so the gap is visible, not silent.
@@ -581,7 +579,7 @@ class DemoBridge:
                     avail_cache[avail_key] = True  # fail open
                 self._symbol_avail = avail_cache
                 if not avail_cache[avail_key]:
-                    LOG.info("Signal #%d: %s not listed on %s (demo env) — will skip this exchange",
+                    LOG.info("Signal #%d: %s not listed on %s (demo env) - will skip this exchange",
                              tp_id, sym, acct["exchange"])
             if not avail_cache[avail_key]:
                 flog("mirror_skipped_no_market", tp_id=tp_id, agent=agent_id,
@@ -604,7 +602,7 @@ class DemoBridge:
             prec = limits["amount_precision"]
             qty = round(qty, prec)
             if qty < min_amount:
-                LOG.debug("Signal #%d → %s/%s: qty=%.6f below min=%.6f for %s — skip",
+                LOG.debug("Signal #%d → %s/%s: qty=%.6f below min=%.6f for %s - skip",
                           tp_id, acct["exchange"], acct["account_name"],
                           qty, min_amount, sym)
                 continue
@@ -631,6 +629,12 @@ class DemoBridge:
                 if acc:
                     placed_any = True
                     ext_id = acc[0].external_order_id
+                    if existing and existing.get("status") == "pending" and existing.get("exchange_order_id"):
+                        try:
+                            await self._cancel_demo_order(tp_id, acct["account_name"], existing["exchange_order_id"], exchange=acct["exchange"])
+                            await dpool.execute("UPDATE public.demo_orders SET status = 'cancelled', error_message = 'replaced by newer signal', updated_at = NOW() WHERE id = $1", (existing["id"],))
+                        except Exception:
+                            pass
                     self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
                         "order_id": ext_id,
                         "exchange": acct["exchange"],
@@ -649,7 +653,7 @@ class DemoBridge:
                     # actually sized to (after the safety factor), not the raw
                     # 1000, so the dashboard "Demo Orders $" KPI is honest.
                     # Now also stamps agent_id (account↔agent attribution).
-                    # Removed the per-insert `pool.close()` — the pool is a shared
+                    # Removed the per-insert `pool.close()` - the pool is a shared
                     # singleton; closing it here broke subsequent ticks/daemons.
                     try:
                         pool = await self._ensure_pool()
@@ -676,7 +680,7 @@ class DemoBridge:
                          symbol=sym, direction=direction, paper_entry=entry,
                          qty=qty, leverage=leverage,
                          reason=(rej_msg or "")[:300])
-                    # Record error (no pool.close() — shared singleton, see above)
+                    # Record error (no pool.close() - shared singleton, see above)
                     try:
                         pool = await self._ensure_pool()
                         await pool.execute(
@@ -712,7 +716,7 @@ class DemoBridge:
             LOG.debug("Cancel order %s: %s", order_id, exc)
 
     async def _reconcile_fills(self):
-        """Phase 1 (2026-05-29) NEW — demo fill reconciliation.
+        """Phase 1 (2026-05-29) NEW - demo fill reconciliation.
 
         Previously nothing ever marked a demo limit order as 'filled', so the
         dashboard always showed "0 filled" no matter what happened on the
@@ -747,7 +751,7 @@ class DemoBridge:
                 # Phase 1 (2026-05-29): capture the execution fee on the entry
                 # fill so the forensic audit accounts for every cent. CCXT
                 # normalises this into raw["fee"]["cost"] (or a list in
-                # raw["fees"]). Best-effort — NULL stays NULL if unavailable.
+                # raw["fees"]). Best-effort - NULL stays NULL if unavailable.
                 entry_fee = self._extract_fee(raw)
                 await pool.execute(
                     "UPDATE public.demo_orders SET status='filled', demo_entry=%s, "
@@ -813,7 +817,7 @@ class DemoBridge:
             pnl = None
             exit_fee = None
 
-            # Try 1: fetch_closed_orders — returns closed positions with
+            # Try 1: fetch_closed_orders - returns closed positions with
             # realised P&L as reported by the exchange.
             try:
                 since_ms = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp() * 1000)
@@ -923,7 +927,7 @@ class DemoBridge:
                 upnl = float(pos.get("unrealizedPnl") or 0)
                 notional = float(pos.get("notional") or 0) or (entry * abs(contracts))
                 # Bitget demo CCXT adapter reports side='short' for long
-                # positions — contracts is the numeric truth.  When both
+                # positions - contracts is the numeric truth.  When both
                 # signals disagree, trust contracts over side.
                 raw_side = str(pos.get("side", "")).lower()
                 sign_dir = "long" if contracts > 0 else "short"
@@ -996,7 +1000,43 @@ class DemoBridge:
                          existing["id"]))
                     continue
 
-                # New position — try to link it to a tracked_position so the
+                # ── BE-lock check (runs for BOTH existing and new positions) ──
+                if "be_lock" in (agent_id or "") and entry > 0 and mark > 0:
+                    be_existing = bool(existing)
+                    already_locked = False
+                    if be_existing:
+                        meta_row = await pool.fetch_one(
+                            "SELECT metadata FROM public.demo_orders WHERE id=%s",
+                            (existing["id"],))
+                        if meta_row and meta_row.get("metadata"):
+                            already_locked = bool((meta_row["metadata"] or {}).get("be_locked"))
+                    if not already_locked:
+                        pnl_pct = ((mark - entry) / entry) * 100.0
+                        if direction == "short":
+                            pnl_pct = -pnl_pct
+                        threshold = self._demo_sizing("demo_be_lock_threshold_pct", 5.0)
+                        offset   = self._demo_sizing("demo_be_lock_offset_pct", 0.002)
+                        if pnl_pct >= threshold:
+                            new_sl = entry * (1.0 + offset) if direction == "long" else entry * (1.0 - offset)
+                            ok = await self._adapter.modify_sl(
+                                exchange=ex, account_name=acct_name,
+                                symbol=sym, sl_price=new_sl, direction=direction,
+                                size=abs(contracts))
+                            if ok:
+                                target_id = existing["id"] if be_existing else None
+                                if target_id:
+                                    await pool.execute(
+                                        "UPDATE public.demo_orders SET "
+                                        "paper_sl=%s, "
+                                        "metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                                        "  '{be_locked}', 'true''::jsonb), "
+                                        "updated_at=NOW() WHERE id=%s",
+                                        (round(new_sl, 8), target_id))
+                                LOG.info("BE-LOCK %s/%s %s %s @+%.1f%% → SL=%.6g (%s)",
+                                         ex, acct_name, sym, direction, pnl_pct,
+                                         new_sl, "ok" if ok else "failed")
+
+                # New position - try to link it to a tracked_position so the
                 # dashboard can do paper-vs-demo comparison (drift, slip, etc.).
                 tp_id = None
                 _paper_entry = None
@@ -1006,7 +1046,7 @@ class DemoBridge:
                     # Match by symbol + direction, preferring the most recent
                     # open position whose entry_price is within ±5% of the
                     # exchange's entry (symbol-name collisions across exchanges
-                    # can produce very different prices — 5% tightens it).
+                    # can produce very different prices - 5% tightens it).
                     tp_row = await pool.fetch_one(
                         "SELECT id, entry_price, stop_loss, take_profit_1 "
                         "FROM public.tracked_positions "
@@ -1046,42 +1086,7 @@ class DemoBridge:
                 except Exception as exc:
                     LOG.debug("_sync_positions insert failed: %s", exc)
 
-                # ── BE-lock check (piggybacks on sync since we have markPrice) ──
-                # Only for agents whose agent_id contains "be_lock" (copy_lev_be_lock,
-                # copy_opt_lev_be_lock).  Skip if already locked (metadata flag).
-                if "be_lock" in (agent_id or "") and entry > 0 and mark > 0:
-                    already_locked = False
-                    if existing:
-                        meta_row = await pool.fetch_one(
-                            "SELECT metadata FROM public.demo_orders WHERE id=%s",
-                            (existing["id"],))
-                        if meta_row and meta_row.get("metadata"):
-                            already_locked = bool((meta_row["metadata"] or {}).get("be_locked"))
-                    if not already_locked:
-                        pnl_pct = ((mark - entry) / entry) * 100.0
-                        if direction == "short":
-                            pnl_pct = -pnl_pct
-                        threshold = self._demo_sizing("demo_be_lock_threshold_pct", 5.0)
-                        offset   = self._demo_sizing("demo_be_lock_offset_pct", 0.002)
-                        if pnl_pct >= threshold:
-                            new_sl = entry * (1.0 + offset) if direction == "long" else entry * (1.0 - offset)
-                            ok = await self._adapter.modify_sl(
-                                exchange=ex, account_name=acct_name,
-                                symbol=sym, sl_price=new_sl, direction=direction,
-                                size=abs(contracts))
-                            if ok:
-                                target_id = existing["id"] if existing else None
-                                if target_id:
-                                    await pool.execute(
-                                        "UPDATE public.demo_orders SET "
-                                        "paper_sl=%s, "
-                                        "metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
-                                        "  '{be_locked}', 'true'::jsonb), "
-                                        "updated_at=NOW() WHERE id=%s",
-                                        (round(new_sl, 8), target_id))
-                                LOG.info("BE-LOCK %s/%s %s %s @+%.1f%% → SL=%.6g (%s)",
-                                         ex, acct_name, sym, direction, pnl_pct,
-                                         new_sl, "ok" if ok else "failed")
+
 
             if sym_set:
                 LOG.info("_sync_positions %s/%s: %d positions synced",
@@ -1112,7 +1117,7 @@ class DemoBridge:
         never fill. Cancel it so it doesn't count against the cap.
 
         Different from the old _cancel_stale_orders (time-based, which was
-        wrong — orders should track toward entry indefinitely). This only
+        wrong - orders should track toward entry indefinitely). This only
         cancels orders whose paper lifecycle has moved past 'pending'.
 
         Exchange-side cancellation is best-effort; the DB update is the
@@ -1124,7 +1129,7 @@ class DemoBridge:
             "FROM public.demo_orders d "
             "JOIN public.tracked_positions tp ON tp.id = d.tracked_position_id "
             "WHERE d.status = 'pending' "
-            "AND tp.status IN ('open', 'closed', 'expired')",
+            "AND tp.status IN ('closed', 'expired')",
         )
         if not rows:
             return
@@ -1162,7 +1167,7 @@ class DemoBridge:
             LOG.debug("_refresh_sizing failed (%s); using prior/defaults", exc)
 
     # ═══════════════════════════════════════════════════════════════════
-    # Smart Queue — promote / expire
+    # Smart Queue - promote / expire
     # ═══════════════════════════════════════════════════════════════════
 
     async def _promote_queued(self):
@@ -1171,7 +1176,7 @@ class DemoBridge:
         Checks current price + candle wick-touch for every order with
         status='queued'.  If price is within SMART_QUEUE_PLACE_PCT AND a
         recent 1m candle's [low,high] range contains the entry price, the
-        order is promoted — status → 'pending', and the next _mirror_signal
+        order is promoted - status → 'pending', and the next _mirror_signal
         call will place it on the exchange.
         """
         pool = await self._ensure_pool()
@@ -1203,7 +1208,7 @@ class DemoBridge:
             if dist_pct > SMART_QUEUE_PLACE_PCT:
                 continue  # still too far
 
-            # Within threshold — verify wick touch
+            # Within threshold - verify wick touch
             candles = await self._queue_candles(
                 sym, SMART_QUEUE_TOUCH_CANDLES)
             if not _entry_touched(candles, entry):
@@ -1214,6 +1219,8 @@ class DemoBridge:
                 "UPDATE public.demo_orders SET status = 'pending', "
                 "updated_at = NOW() WHERE id = $1",
                 (r["id"],))
+            if r.get("tracked_position_id"):
+                self._mirrored.discard(r["tracked_position_id"])
             promoted += 1
             LOG.info("Promoted queued→pending #%d %s %s @%.2f (dist=%.1f%%)",
                      r["id"], sym, r["direction"], entry, dist_pct)
@@ -1254,7 +1261,7 @@ class DemoBridge:
                 continue  # still within holding zone
 
             if r["status"] == "queued":
-                # Never placed on exchange — just mark expired locally
+                # Never placed on exchange - just mark expired locally
                 await pool.execute(
                     "UPDATE public.demo_orders SET status = 'expired', "
                     "updated_at = NOW() WHERE id = $1",
@@ -1275,7 +1282,7 @@ class DemoBridge:
                     LOG.info("Expired unplaced pending #%d %s %s (dist=%.1f%%)",
                              r["id"], r["symbol"], r["direction"], dist_pct)
                     continue
-                # On exchange — cancel, then mark
+                # On exchange - cancel, then mark
                 try:
                     await self._cancel_demo_order(
                         r.get("tracked_position_id", 0),
@@ -1331,10 +1338,7 @@ class DemoBridge:
             LOG.info("Tick: %d new signals to mirror", len(signals))
             for s in signals:
                 was_placed = await self._mirror_signal(s, mappings)
-                if was_placed:
-                    self._mirrored.add(s["id"])
-                # If queued (was_placed=False), do NOT add to _mirrored —
-                # _promote_queued will handle it when price approaches.
+                self._mirrored.add(s["id"])
                 await asyncio.sleep(0.3)  # Rate limit
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
@@ -1354,8 +1358,8 @@ class DemoBridge:
 
         # 1c. Cancel demo orders where the paper tracked_position is already
         # open/closed/expired. These demo limits missed their entry and will
-        # never fill — the paper side already moved on. (Not the same as the
-        # stale-by-time cleanup — these are orphaned by paper lifecycle, which
+        # never fill - the paper side already moved on. (Not the same as the
+        # stale-by-time cleanup - these are orphaned by paper lifecycle, which
         # is the authoritative signal.)
         await self._cancel_orphan_orders()
 
@@ -1374,10 +1378,10 @@ class DemoBridge:
                 if oid:
                     await self._cancel_demo_order(tp_id, acct_name, oid, exchange=exch)
             if orders:
-                LOG.info("Signal #%d cancelled — removed %d demo orders", tp_id, len(orders))
+                LOG.info("Signal #%d cancelled - removed %d demo orders", tp_id, len(orders))
 
     async def run_forever(self):
-        LOG.info("DemoBridge starting — signal-driven (poll=%ds)", POLL_INTERVAL_S)
+        LOG.info("DemoBridge starting - signal-driven (poll=%ds)", POLL_INTERVAL_S)
         await self._load_mirrored()
         while not self._stop.is_set():
             try:
