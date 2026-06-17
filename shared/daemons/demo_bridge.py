@@ -107,6 +107,14 @@ _DEMO_SIZING_CACHE: Dict[str, Any] = {
 # Fallback balance when the exchange balance can't be fetched (~paper wallet).
 DEMO_FALLBACK_BALANCE = float(os.environ.get("DEMO_FALLBACK_BALANCE", "1000.0"))
 
+# ── Smart Queue proximity thresholds ──
+# Place when price is within this % of entry (with wick-touch verification).
+SMART_QUEUE_PLACE_PCT = float(os.environ.get("SMART_QUEUE_PLACE_PCT", "5.0"))
+# Close/cancel when price moves beyond this % of entry (frees margin).
+SMART_QUEUE_CLOSE_PCT = float(os.environ.get("SMART_QUEUE_CLOSE_PCT", "10.0"))
+# How many 1m candles to check for entry-touch verification.
+SMART_QUEUE_TOUCH_CANDLES = int(os.environ.get("SMART_QUEUE_TOUCH_CANDLES", "60"))
+
 
 class DemoBridge:
     def __init__(self):
@@ -283,6 +291,64 @@ class DemoBridge:
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Smart Queue — distance-to-entry helpers (reuse paper's proven math)
+    # ═══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _distance_to_entry(cur: float, entry: float) -> float:
+        """Absolute distance from current price to entry, as a ratio (0.0–∞)."""
+        if entry <= 0:
+            return 999.0
+        return abs(cur - entry) / entry
+
+    @staticmethod
+    def _entry_touched(candles: List[Dict], entry: float) -> bool:
+        """True if any candle's [low, high] range contains the entry price."""
+        for c in (candles or []):
+            if float(c.get("low", 0) or 0) <= entry <= float(c.get("high", 0) or 0):
+                return True
+        return False
+
+    async def _get_latest_candles(self, symbol: str, n: int = 60) -> List[Dict]:
+        """Fetch the most recent N 1m candles for a symbol."""
+        pool = await self._ensure_pool()
+        rows = await pool.fetch_all(
+            "SELECT c.timestamp, c.open, c.high, c.low, c.close "
+            "FROM public.candles c "
+            "JOIN public.instruments i ON i.id = c.instrument_id "
+            "WHERE i.symbol ILIKE $1 AND c.timeframe = '1m' "
+            "ORDER BY c.timestamp DESC LIMIT $2",
+            (symbol.replace(":USDT", "").replace("/", "") + "%", n),
+        )
+        return [dict(r) for r in reversed(rows or [])]
+
+    async def _get_latest_price(self, symbol: str) -> Optional[float]:
+        """Fastest available current price: candle close → tracked_position current_price."""
+        pool = await self._ensure_pool()
+        # Try candles first
+        row = await pool.fetch_one(
+            "SELECT c.close FROM public.candles c "
+            "JOIN public.instruments i ON i.id = c.instrument_id "
+            "WHERE i.symbol ILIKE $1 AND c.timeframe = '1m' "
+            "ORDER BY c.timestamp DESC LIMIT 1",
+            (symbol.replace(":USDT", "").replace("/", "") + "%",),
+        )
+        if row:
+            return float(row["close"])
+        # Fallback: tracked_positions.current_price for open positions
+        row = await pool.fetch_one(
+            "SELECT current_price FROM public.tracked_positions "
+            "WHERE instrument_symbol = $1 AND current_price IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (symbol,),
+        )
+        if row:
+            return float(row["current_price"])
+        return None
+
+    # ═══════════════════════════════════════════════════════════════════
+
     async def _get_new_signals(self) -> List[Dict]:
         """Get tracked_positions with pending/open status that haven't been mirrored."""
         pool = await self._ensure_pool()
@@ -356,7 +422,43 @@ class DemoBridge:
         
         if entry <= 0:
             return
-        
+
+        # ── Smart Queue proximity gate ──
+        # Don't place orders when price is far from entry.  Queued orders
+        # wait until price approaches (promoted by _promote_queued).
+        current_price = await self._get_latest_price(sym)
+        if current_price is not None and current_price > 0:
+            dist_pct = self._distance_to_entry(current_price, entry) * 100.0
+            if dist_pct > SMART_QUEUE_PLACE_PCT:
+                # Beyond threshold — queue, don't place
+                pool = await self._ensure_pool()
+                await pool.execute(
+                    "INSERT INTO public.demo_orders "
+                    "(exchange, account_name, symbol, direction, paper_entry, "
+                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                    "ON CONFLICT DO NOTHING",
+                    (sym, direction, entry, sl, tp, tp_id))
+                LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
+                          tp_id, sym, direction, entry, dist_pct)
+                return
+            # Within threshold — verify wick touch before placing
+            candles = await self._get_latest_candles(
+                sym, SMART_QUEUE_TOUCH_CANDLES)
+            if not self._entry_touched(candles, entry):
+                # Close but no wick yet — queue anyway
+                pool = await self._ensure_pool()
+                await pool.execute(
+                    "INSERT INTO public.demo_orders "
+                    "(exchange, account_name, symbol, direction, paper_entry, "
+                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                    "ON CONFLICT DO NOTHING",
+                    (sym, direction, entry, sl, tp, tp_id))
+                LOG.debug("Queued signal #%d %s %s (within %.1f%% but no wick touch)",
+                          tp_id, sym, direction, dist_pct)
+                return
+
         # Map the actor to agent, then find accounts
         actor_id = signal.get("actor_id", "")
         
@@ -1013,6 +1115,131 @@ class DemoBridge:
         except Exception as exc:
             LOG.debug("_refresh_sizing failed (%s); using prior/defaults", exc)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Smart Queue — promote / expire
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def _promote_queued(self, mappings: Dict[str, List[Dict]]):
+        """Promote queued orders to pending when price is within place threshold.
+
+        Checks current price + candle wick-touch for every order with
+        status='queued'.  If price is within SMART_QUEUE_PLACE_PCT AND a
+        recent 1m candle's [low,high] range contains the entry price, the
+        order is promoted — status → 'pending', and the next _mirror_signal
+        call will place it on the exchange.
+        """
+        pool = await self._ensure_pool()
+        rows = await pool.fetch_all(
+            "SELECT id, symbol, direction, paper_entry, tracked_position_id "
+            "FROM public.demo_orders "
+            "WHERE status = 'queued' "
+            "ORDER BY created_at ASC LIMIT 100"
+        )
+        if not rows:
+            return
+        LOG.debug("_promote_queued: checking %d queued orders", len(rows))
+
+        promoted = 0
+        for r in rows:
+            entry = float(r["paper_entry"] or 0)
+            if entry <= 0:
+                continue
+            sym = r["symbol"]
+
+            # Get current price + candles
+            price = await self._get_latest_price(sym)
+            if price is None:
+                continue
+
+            dist = self._distance_to_entry(price, entry)
+            dist_pct = dist * 100.0
+
+            if dist_pct > SMART_QUEUE_PLACE_PCT:
+                continue  # still too far
+
+            # Within threshold — verify wick touch
+            candles = await self._get_latest_candles(
+                sym, SMART_QUEUE_TOUCH_CANDLES)
+            if not self._entry_touched(candles, entry):
+                continue  # within range but no wick kiss yet
+
+            # Promote: status queued → pending so _mirror_signal picks it up
+            await pool.execute(
+                "UPDATE public.demo_orders SET status = 'pending', "
+                "updated_at = NOW() WHERE id = $1",
+                (r["id"],))
+            promoted += 1
+            LOG.info("Promoted queued→pending #%d %s %s @%.2f (dist=%.1f%%)",
+                     r["id"], sym, r["direction"], entry, dist_pct)
+
+        if promoted:
+            LOG.info("_promote_queued: %d orders promoted", promoted)
+
+    async def _expire_distant(self):
+        """Close/cancel orders where price has drifted past the close threshold.
+
+        Queued orders (never placed): status → 'expired', no exchange call.
+        Pending orders (on exchange): cancel on exchange + status → 'cancelled'.
+        """
+        pool = await self._ensure_pool()
+        rows = await pool.fetch_all(
+            "SELECT id, symbol, direction, paper_entry, status, "
+            "exchange_order_id, exchange, account_name "
+            "FROM public.demo_orders "
+            "WHERE status IN ('queued', 'pending') "
+            "ORDER BY created_at ASC LIMIT 100"
+        )
+        if not rows:
+            return
+
+        expired_queued = 0
+        cancelled_pending = 0
+        for r in rows:
+            entry = float(r["paper_entry"] or 0)
+            if entry <= 0:
+                continue
+
+            price = await self._get_latest_price(r["symbol"])
+            if price is None:
+                continue
+
+            dist_pct = self._distance_to_entry(price, entry) * 100.0
+            if dist_pct <= SMART_QUEUE_CLOSE_PCT:
+                continue  # still within holding zone
+
+            if r["status"] == "queued":
+                # Never placed on exchange — just mark expired locally
+                await pool.execute(
+                    "UPDATE public.demo_orders SET status = 'expired', "
+                    "updated_at = NOW() WHERE id = $1",
+                    (r["id"],))
+                expired_queued += 1
+                LOG.info("Expired queued #%d %s %s (dist=%.1f%%)",
+                         r["id"], r["symbol"], r["direction"], dist_pct)
+
+            elif r["status"] == "pending" and r.get("exchange_order_id"):
+                # On exchange — cancel, then mark
+                try:
+                    await self._cancel_demo_order(
+                        r.get("tracked_position_id", 0),
+                        r["account_name"],
+                        r["exchange_order_id"],
+                        exchange=r.get("exchange", "bybit"),
+                    )
+                    await pool.execute(
+                        "UPDATE public.demo_orders SET status = 'cancelled', "
+                        "updated_at = NOW() WHERE id = $1",
+                        (r["id"],))
+                    cancelled_pending += 1
+                    LOG.info("Cancelled distant #%d %s %s (dist=%.1f%%)",
+                             r["id"], r["symbol"], r["direction"], dist_pct)
+                except Exception as exc:
+                    LOG.debug("_expire_distant cancel failed #%d: %s", r["id"], exc)
+
+        if expired_queued or cancelled_pending:
+            LOG.info("_expire_distant: %d expired (queued) + %d cancelled (pending)",
+                     expired_queued, cancelled_pending)
+
     async def tick(self):
         mappings = await self._load_mappings()
         if not mappings:
@@ -1023,6 +1250,12 @@ class DemoBridge:
 
         # 0. Refresh real demo-account balances (drives accurate per-agent sizing)
         await self._refresh_balances(mappings)
+
+        # ── Smart Queue ──
+        # 0a. Expire queued/pending orders that drifted past close threshold
+        await self._expire_distant()
+        # 0b. Promote queued orders whose price is now within place threshold
+        await self._promote_queued(mappings)
 
         # 1. Place limit orders for new signals
         signals = await self._get_new_signals()
