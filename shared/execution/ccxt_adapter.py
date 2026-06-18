@@ -435,6 +435,10 @@ class CcxtExecutionAdapter:
                     params["stopLossPrice"] = str(sl)
                 if tp:
                     params["takeProfitPrice"] = str(tp)
+            elif ex == "toobit":
+                # Toobit rejects SL/TP in create_order params.
+                # Place entry clean — stops not attached at order time.
+                pass
             else:
                 if sl:
                     params["stopLoss"] = {"price": sl}
