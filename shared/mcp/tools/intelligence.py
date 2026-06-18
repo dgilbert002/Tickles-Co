@@ -72,9 +72,11 @@ async def _get_pool() -> Any:
 async def _get_company_pool(company_id: str) -> Any:
     """Return a pool for the company-specific database.
     
-    Falls back to shared pool if the company DB doesn't exist yet.
+    jarvais data lives in tickles_shared (not tickles_jarvais).
     """
     from shared.utils.db import get_shared_pool
+    if company_id == "jarvais":
+        return await get_shared_pool()
     try:
         from shared.utils.db import get_pool
         dbname = f"tickles_{company_id}"
@@ -889,16 +891,18 @@ async def _handle_signals_recent(p: Dict[str, Any]) -> Dict[str, Any]:
     arg_idx = 1
 
     if since:
-        # Accept ISO timestamps or relative strings like "24h"
+        # Accept ISO timestamps or relative strings like "24h" — convert to datetime
         try:
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
             if isinstance(since, str) and since.endswith("h"):
                 hours = int(since[:-1])
-                since = (_dt.now(_tz.utc) - _td(hours=hours)).isoformat()
+                since = _dt.now(_tz.utc) - _td(hours=hours)
+            elif isinstance(since, str):
+                since = _dt.fromisoformat(since)
         except (ValueError, TypeError):
             pass  # use as-is, let DB reject if invalid
         conditions.append(f"created_at >= ${arg_idx}")
-        args.append(str(since))
+        args.append(since)
         arg_idx += 1
     if direction:
         conditions.append(f"consensus_direction = ${arg_idx}")
@@ -949,7 +953,6 @@ async def _handle_signals_recent(p: Dict[str, Any]) -> Dict[str, Any]:
                     else None,
                     "consensus_method": r["consensus_method"],
                     "instrument_symbol": r["instrument_symbol"],
-                    "exchange": r["exchange"],
                     "market_data_fresh": r["market_data_fresh"],
                     "market_data_at": _fmt_ts(r["market_data_at"]),
                     "created_at": _fmt_ts(r["created_at"]),
