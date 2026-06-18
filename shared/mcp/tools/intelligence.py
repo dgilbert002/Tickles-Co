@@ -1703,12 +1703,12 @@ async def _handle_traders_leaderboard(p: Dict[str, Any]) -> Dict[str, Any]:
             JOIN public.collector_catalog cc ON cc.source_type = tpf.platform
             LEFT JOIN public.tracked_positions tp
                 ON tp.trader_profile_id = tpf.id
-                AND tp.created_at >= NOW() - INTERVAL '%s days'
+                AND 1=1  -- all-time; no date filter
             WHERE cc.source_slug = $1
             GROUP BY tpf.id, tpf.display_name, tpf.handle_normalized
             ORDER BY %s DESC
             """
-            % (days, order_col),
+            % (order_col,),
             (source_slug,),
         )
         traders = []
