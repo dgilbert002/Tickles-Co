@@ -1364,6 +1364,34 @@ class DemoBridge:
                 continue
 
             dist_pct = _dist_to_entry(price, entry) * 100.0
+
+            # Stale pending: order is on exchange but price crossed entry
+            # hours ago and never filled.  The fill window is closed.
+            if (r["status"] == "pending" and r.get("ordered_at") and
+                r.get("exchange_order_id")):
+                age_h = (datetime.now(timezone.utc) - r["ordered_at"]).total_seconds() / 3600
+                past_entry = (
+                    (r["direction"] == "long" and price > entry * 1.01) or
+                    (r["direction"] == "short" and price < entry * 0.99)
+                )
+                if age_h > 1 and past_entry:
+                    try:
+                        await self._cancel_demo_order(
+                            r.get("tracked_position_id", 0),
+                            r["account_name"], r["exchange_order_id"],
+                            exchange=r.get("exchange", "bybit"))
+                    except Exception:
+                        pass
+                    await pool.execute(
+                        "UPDATE public.demo_orders SET status = 'cancelled', "
+                        "error_message = 'stale: fill window closed (%.1fh, price past entry)', "
+                        "updated_at = NOW() WHERE id = $1",
+                        (r["id"],))
+                    cancelled_pending += 1
+                    LOG.info("Cancelled stale pending #%d %s %s (age=%.1fh, dist=%.1f%%)",
+                             r["id"], r["symbol"], r["direction"], age_h, dist_pct)
+                    continue
+
             if dist_pct <= SMART_QUEUE_CLOSE_PCT:
                 continue  # still within holding zone
 
