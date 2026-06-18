@@ -475,7 +475,7 @@ class CcxtExecutionAdapter:
         
         # Bitget: SL/TP attached after order only for market orders (position exists immediately).
         # For limit orders, skip — position doesn't exist until fill, TPSL would fail.
-        if ex == "bitget" and intent.order_type != ORDER_TYPE_LIMIT and (sl or tp):
+        if ex == "bitget" and (sl or tp):
             try:
                 await self._bitget_set_sl_tp(client, sym, sl, tp, intent.direction)
                 LOG.info("ccxt: Bitget SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
@@ -484,7 +484,7 @@ class CcxtExecutionAdapter:
 
         # Toobit: SL/TP attached after order via /api/v1/futures/position/trading-stop
         # (create_order does not accept stopLoss/takeProfit params).
-        if ex == "toobit" and intent.order_type != ORDER_TYPE_LIMIT and (sl or tp):
+        if ex == "toobit" and (sl or tp):
             try:
                 await self._toobit_set_sl_tp(client, sym, sl, tp)
                 LOG.info("ccxt: Toobit SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
