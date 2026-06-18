@@ -598,10 +598,8 @@ class CcxtExecutionAdapter:
 
     async def _toobit_set_sl_tp(self, client, symbol, sl, tp, direction: str = DIRECTION_LONG):
         """Attach SL/TP to an open Toobit position via trading-stop endpoint."""
-        # Toobit uses HYPE-SWAP-USDT format (not HYPEUSDT or HYPE/USDT:USDT)
-        base = symbol.split("/")[0]
-        clean = f"{base}-SWAP-USDT"
-        body = {"symbol": clean, "side": "LONG" if direction == DIRECTION_LONG else "SHORT"}
+        clean = symbol.replace("/", "").split(":")[0]
+        body = {"symbol": clean, "side": "buy" if direction == DIRECTION_LONG else "sell"}
         if sl is not None:
             body["stopLoss"] = str(sl)
         if tp is not None:
