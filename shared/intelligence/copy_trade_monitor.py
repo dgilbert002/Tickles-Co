@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+_OPTION_RE = re.compile(r"-\d{6}-\d+-[CP]$", re.IGNORECASE)
 import signal
 import sys
 from collections import defaultdict
