@@ -120,7 +120,12 @@ def freshness_envelope(
             "threshold_seconds": threshold_seconds
         }
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Freshness check failed: {e}"
+        # Null timestamp — return data with freshness warning instead of error
+        data["freshness"] = {
+            "status": "unknown",
+            "lag_seconds": None,
+            "threshold_seconds": threshold_seconds,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "warning": str(e),
         }
+        return data
