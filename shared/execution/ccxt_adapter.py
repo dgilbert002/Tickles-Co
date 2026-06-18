@@ -475,7 +475,16 @@ class CcxtExecutionAdapter:
                 LOG.info("ccxt: Bitget SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
             except Exception as exc:
                 LOG.warning("ccxt: Bitget SL/TP attach failed (non-fatal): %s", exc)
-        
+
+        # Toobit: SL/TP attached after order via /api/v1/futures/position/trading-stop
+        # (create_order does not accept stopLoss/takeProfit params).
+        if ex == "toobit" and intent.order_type != ORDER_TYPE_LIMIT and (sl or tp):
+            try:
+                await self._toobit_set_sl_tp(client, sym, sl, tp)
+                LOG.info("ccxt: Toobit SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
+            except Exception as exc:
+                LOG.warning("ccxt: Toobit SL/TP attach failed (non-fatal): %s", exc)
+
         return updates
 
     @staticmethod
@@ -580,6 +589,17 @@ class CcxtExecutionAdapter:
                 "triggerPrice": str(tp),
                 "executePrice": str(exec_price),
             }))
+
+    async def _toobit_set_sl_tp(self, client, symbol, sl, tp):
+        """Attach SL/TP to an open Toobit position via trading-stop endpoint."""
+        clean = symbol.replace("/", "").split(":")[0]
+        body = {"symbol": clean}
+        if sl is not None:
+            body["stopLoss"] = str(sl)
+        if tp is not None:
+            body["takeProfit"] = str(tp)
+        await asyncio.to_thread(
+            lambda: client.private_post_api_v1_futures_position_trading_stop(body))
 
     async def _generic_set_sl_tp(self, client, symbol, sl, tp, direction: str = DIRECTION_LONG):
         is_long = direction == DIRECTION_LONG
