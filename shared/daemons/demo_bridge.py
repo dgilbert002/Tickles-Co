@@ -1061,22 +1061,24 @@ class DemoBridge:
                                 _slip_backfill = round((entry - _pe_backfill) / _pe_backfill, 6)
                     except Exception:
                         pass
-                    await pool.execute(
-                        "UPDATE public.demo_orders SET "
-                        "demo_pnl=%s, demo_entry=COALESCE(demo_entry,%s), "
-                        "notional_usd=%s, updated_at=NOW(), "
-                        "direction=%s, "
-                        "tracked_position_id=COALESCE(tracked_position_id,%s), "
-                        "paper_entry=%s, "
-                        "paper_sl=COALESCE(paper_sl,%s), "
-                        "paper_tp=COALESCE(paper_tp,%s), "
-                        "slippage_entry=%s "
-                        "WHERE id=%s",
-                        (round(upnl, 8), entry, round(notional, 2),
-                         direction,
-                         tp_id_backfill, _pe_backfill,
-                         _sl_backfill, _tp_backfill, _slip_backfill,
-                         existing["id"]))
+                    try:
+                        await pool.execute(
+                            "UPDATE public.demo_orders SET "
+                            "demo_pnl=%s, demo_entry=COALESCE(demo_entry,%s), "
+                            "notional_usd=%s, updated_at=NOW(), "
+                            "direction=%s, "
+                            "paper_entry=COALESCE(paper_entry,%s), "
+                            "paper_sl=COALESCE(paper_sl,%s), "
+                            "paper_tp=COALESCE(paper_tp,%s), "
+                            "slippage_entry=%s "
+                            "WHERE id=%s",
+                            (round(upnl, 8), entry, round(notional, 2),
+                             direction,
+                             _pe_backfill,
+                             _sl_backfill, _tp_backfill, _slip_backfill,
+                             existing["id"]))
+                    except Exception:
+                        pass
                     continue
 
                 # ── BE-lock check (runs for BOTH existing and new positions) ──
