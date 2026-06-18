@@ -516,6 +516,14 @@ class DemoBridge:
                 except Exception:
                     pass
 
+            # Pre-flight balance check: skip if free balance can't cover allocation.
+            # Saves API calls that would be rejected with "ab not enough."
+            if allocated > balance * 0.98:  # 2% headroom for concurrent orders
+                LOG.debug("Signal #%d → %s/%s: SKIP (allocated=%.2f > free=%.2f)",
+                          tp_id, acct["exchange"], acct["account_name"],
+                          allocated, balance)
+                continue
+
             # Respect the agent's max-concurrent rule on the demo side so we
             # don't over-place and exhaust margin (sequential agents = 1 at a
             # time; 5%/3% parallel agents = 20/33).
