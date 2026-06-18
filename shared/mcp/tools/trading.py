@@ -1608,6 +1608,87 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
             logger.error("market_unsubscribe failed: %s", e)
             return {"status": "error", "message": str(e)}
 
+    # --- demo.orders.list ---
+    t_demo_orders_list = McpTool(
+        name="demo.orders.list",
+        description="List demo orders with status counts, rejections, and filled-but-unclosed detection.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "companyId": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+        },
+        tags={"phase": "3", "group": "trading", "status": "live"},
+    )
+
+    async def _demo_orders_list(p: Dict[str, Any]) -> Dict[str, Any]:
+        """Query demo_orders for the cron's rejection analysis and orphan detection."""
+        from shared.utils.db import get_shared_pool
+        try:
+            company_id = p.get("companyId", "jarvais")
+            limit = min(int(p.get("limit", 1000)), 5000)
+            pool = await get_shared_pool()
+
+            # Status counts
+            status_rows = await pool.fetch_all(
+                "SELECT status, COUNT(*) as cnt FROM public.demo_orders GROUP BY status ORDER BY cnt DESC")
+            statuses = {r["status"]: r["cnt"] for r in status_rows}
+
+            # Per-account breakdown
+            acct_rows = await pool.fetch_all(
+                "SELECT exchange, account_name, COUNT(*) as total, "
+                "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending, "
+                "SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as filled, "
+                "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) as rejected, "
+                "SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) as cancelled "
+                "FROM public.demo_orders GROUP BY exchange, account_name "
+                "ORDER BY exchange, account_name")
+            accounts = [dict(r) for r in acct_rows]
+
+            # Rejection reasons (last 7 days)
+            rej_rows = await pool.fetch_all(
+                "SELECT LEFT(error_message, 120) as reason, COUNT(*) as n, "
+                "MIN(ordered_at) as first_seen, MAX(ordered_at) as last_seen "
+                "FROM public.demo_orders WHERE status='rejected' "
+                "AND ordered_at > NOW() - INTERVAL '7 days' "
+                "GROUP BY LEFT(error_message, 120) ORDER BY n DESC LIMIT 10")
+            rejections = []
+            for r in rej_rows:
+                d = dict(r)
+                d["first_seen"] = str(d["first_seen"]) if d.get("first_seen") else None
+                d["last_seen"] = str(d["last_seen"]) if d.get("last_seen") else None
+                rejections.append(d)
+
+            # Filled but never closed
+            orphan_rows = await pool.fetch_all(
+                "SELECT exchange, account_name, symbol, COUNT(*) as n "
+                "FROM public.demo_orders WHERE status='filled' AND closed_at IS NULL "
+                "GROUP BY exchange, account_name, symbol ORDER BY n DESC LIMIT 50")
+            orphans = [dict(r) for r in orphan_rows]
+
+            # Pending with paper status
+            pending_rows = await pool.fetch_all(
+                "SELECT tp.status as paper_status, COUNT(*) as n "
+                "FROM public.demo_orders d "
+                "JOIN public.tracked_positions tp ON tp.id = d.tracked_position_id "
+                "WHERE d.status = 'pending' AND d.exchange != 'queue' "
+                "GROUP BY tp.status")
+            pending_paper = {r["paper_status"]: r["n"] for r in pending_rows}
+
+            return {
+                "ok": True,
+                "statuses": statuses,
+                "accounts": accounts,
+                "rejections": rejections,
+                "orphaned_filled": orphans,
+                "orphaned_filled_count": len(orphans),
+                "pending_paper_status": pending_paper,
+            }
+        except Exception as exc:
+            logger.exception("demo.orders.list failed")
+            return {"ok": False, "error": str(exc)}
+
     return [
         (t_banker_snapshot, _banker_snapshot),
         (t_banker_positions, _banker_positions),
@@ -1625,6 +1706,7 @@ def _build_tools(ctx: ToolContext) -> list[tuple[McpTool, Any]]:
         (t_account_history, _account_history),
         (t_market_subscribe, _market_subscribe),
         (t_market_unsubscribe, _market_unsubscribe),
+        (t_demo_orders_list, _demo_orders_list),
     ]
 
 
