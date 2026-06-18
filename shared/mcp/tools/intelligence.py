@@ -972,51 +972,49 @@ async def _handle_signals_recent(p: Dict[str, Any]) -> Dict[str, Any]:
 async def _handle_signals_pending(p: Dict[str, Any]) -> Dict[str, Any]:
     """Count media items awaiting interpretation.
 
+    Only counts images from TRACKED traders (matching the interpretation
+    service's fetch_pending_media query).  Also returns the total downloaded
+    count so the caller can see how many are being skipped due to untracked
+    status.
+
     Params:
         companyId (str, optional): Not used (shared table).
         sourceId (int, optional): Filter by collector source.
         mediaType (str, optional): Filter by media_type.
 
     Returns:
-        Dict with pending_count and oldest_pending_age_seconds.
+        Dict with pending_tracked, pending_total, oldest_age_seconds.
     """
     source_id = p.get("sourceId")
     media_type = p.get("mediaType")
 
-    conditions = ["processing_status = 'downloaded'"]
-    args: List[Any] = []
-    arg_idx = 1
-
-    if source_id is not None:
-        conditions.append(f"source_id = ${arg_idx}")
-        args.append(int(source_id))
-        arg_idx += 1
-    if media_type:
-        conditions.append(f"media_type = ${arg_idx}")
-        args.append(str(media_type))
-        arg_idx += 1
-
-    where_clause = "WHERE " + " AND ".join(conditions)
-
     try:
         pool = await _get_pool()
-        row = await pool.fetch_one(
-            f"""
-            SELECT
-                COUNT(*) AS pending_count,
-                EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::FLOAT
-                    AS oldest_age_seconds
-            FROM public.media_items
-            {where_clause}
-            """,
-            *args,
-        )
-        if row is None:
-            return {"ok": True, "pending_count": 0, "oldest_age_seconds": None}
+        # Total downloaded (all traders)
+        row_all = await pool.fetch_one(
+            """SELECT COUNT(*) as cnt, EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::FLOAT as oldest
+               FROM public.media_items
+               WHERE processing_status = 'downloaded' AND media_type = 'image'""")
+        total = row_all["cnt"] if row_all else 0
+
+        # Tracked only (what the interpretation service actually processes)
+        row_tracked = await pool.fetch_one(
+            """SELECT COUNT(*) as cnt, EXTRACT(EPOCH FROM (NOW() - MIN(m.created_at)))::FLOAT as oldest
+               FROM public.media_items m
+               JOIN public.news_items n ON n.id = m.news_item_id
+               JOIN public.trader_profiles tp ON tp.handle_normalized = LOWER(n.author)
+               WHERE m.processing_status = 'downloaded'
+                 AND m.media_type = 'image'
+                 AND tp.is_tracked = TRUE""")
+        tracked = row_tracked["cnt"] if row_tracked else 0
+
         return {
             "ok": True,
-            "pending_count": row["pending_count"] or 0,
-            "oldest_age_seconds": row["oldest_age_seconds"],
+            "pending_tracked": tracked,
+            "pending_total": total,
+            "pending_untracked": total - tracked,
+            "oldest_age_seconds": row_tracked["oldest"] if row_tracked else None,
+            "note": "pending_total includes all downloaded images. pending_tracked is what the pipeline actually processes (is_tracked=TRUE)."
         }
     except Exception as exc:
         logger.exception("signals_pending query failed")
