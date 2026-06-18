@@ -190,6 +190,13 @@ class DemoBridge:
                     # so sizing sees the real free balance, not the fallback.
                     if "USDT" in bal:
                         self._acct_balance[key] = usdt
+                    # Persist to DB so dashboard/cron see live balance
+                    pool = await self._ensure_pool()
+                    await pool.execute(
+                        "UPDATE public.exchange_accounts "
+                        "SET last_balance = $1, last_tested_at = NOW() "
+                        "WHERE exchange = $2 AND account_name = $3",
+                        (round(usdt, 2), a["exchange"], a["account_name"]))
                 except Exception as exc:
                     LOG.debug("balance refresh %s failed: %s", key, exc)
                 self._acct_balance.setdefault(key, DEMO_FALLBACK_BALANCE)
@@ -1144,8 +1151,8 @@ class DemoBridge:
                         "(exchange, account_name, agent_id, symbol, direction, "
                         "tracked_position_id, paper_entry, demo_entry, paper_sl, paper_tp, "
                         "notional_usd, demo_pnl, slippage_entry, "
-                        "status, ordered_at) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',NOW()) "
+                        "status, ordered_at, filled_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',NOW(),NOW()) "
                         "ON CONFLICT DO NOTHING",
                         (ex, acct_name, agent_id, sym, direction,
                          tp_id, _paper_entry, round(entry, 8), _paper_sl, _paper_tp,
@@ -1392,6 +1399,24 @@ class DemoBridge:
             except Exception:
                 pass
             self._last_limits_refresh = time.monotonic()
+
+        # Persist margin mode to DB (one-time per account, first tick only)
+        if not hasattr(self, "_margin_persisted"):
+            self._margin_persisted = set()
+        for acct_key in self._acct_balance:
+            if acct_key not in self._margin_persisted:
+                ex, name = acct_key.split("/", 1)
+                try:
+                    pool = await self._ensure_pool()
+                    await pool.execute(
+                        "UPDATE public.exchange_accounts "
+                        "SET metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                        "  '{margin_mode}', '\"cross\"'::jsonb) "
+                        "WHERE exchange = $1 AND account_name = $2",
+                        (ex, name))
+                    self._margin_persisted.add(acct_key)
+                except Exception:
+                    pass
 
         # ── Smart Queue ──
         # 0a. Expire queued/pending orders that drifted past close threshold
