@@ -486,7 +486,7 @@ class CcxtExecutionAdapter:
         # (create_order does not accept stopLoss/takeProfit params).
         if ex == "toobit" and (sl or tp):
             try:
-                await self._toobit_set_sl_tp(client, sym, sl, tp)
+                await self._toobit_set_sl_tp(client, sym, sl, tp, intent.direction)
                 LOG.info("ccxt: Toobit SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
             except Exception as exc:
                 LOG.warning("ccxt: Toobit SL/TP attach failed (non-fatal): %s", exc)
@@ -596,10 +596,10 @@ class CcxtExecutionAdapter:
                 "executePrice": str(exec_price),
             }))
 
-    async def _toobit_set_sl_tp(self, client, symbol, sl, tp):
+    async def _toobit_set_sl_tp(self, client, symbol, sl, tp, direction: str = DIRECTION_LONG):
         """Attach SL/TP to an open Toobit position via trading-stop endpoint."""
         clean = symbol.replace("/", "").split(":")[0]
-        body = {"symbol": clean}
+        body = {"symbol": clean, "side": "BUY" if direction == DIRECTION_LONG else "SELL"}
         if sl is not None:
             body["stopLoss"] = str(sl)
         if tp is not None:

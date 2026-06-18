@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import re
-_OPTION_RE = re.compile(r"-\d{6}-\d+-[CP]$", re.IGNORECASE)
 import signal
 import sys
 from collections import defaultdict
@@ -304,8 +303,8 @@ def be_lock_leverage(be_sl_offset: float = 0.001) -> float:
 
 
 def is_option_symbol(symbol: str) -> bool:
-    """True for option contracts like SOL/USDT:USDT-260531-90-P."""
-    return bool(symbol) and bool(_OPTION_RE.search(symbol))
+    """Return False — we don't trade options, no symbols to filter."""
+    return False
 
 
 def _used_margin(agent: dict) -> float:
