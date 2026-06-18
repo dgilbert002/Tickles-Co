@@ -991,7 +991,11 @@ class DemoBridge:
                         "AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1",
                         (ex, acct_name, sym))
                     be_existing = bool(be_row)
-                    already_locked = bool((be_row["metadata"] or {}).get("be_locked")) if be_row else False
+                    _meta = be_row["metadata"] if be_row else {}
+                    if isinstance(_meta, str):
+                        import json as _json
+                        _meta = _json.loads(_meta) if _meta else {}
+                    already_locked = bool(_meta.get("be_locked")) if be_row else False
                     if not already_locked:
                         pnl_pct = ((mark - entry) / entry) * 100.0
                         if direction == "short":
