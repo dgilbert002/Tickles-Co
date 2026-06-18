@@ -196,6 +196,15 @@ class DemoBridge:
                     pool = await self._ensure_pool()
                     total_usdt = float(bal.get("__total__USDT", usdt))
                     free_usdt = usdt
+                    # Sanity floor: if free balance dropped >90% from last known
+                    # value, the exchange returned garbage (Toobit decimal quirk).
+                    prev = self._acct_balance.get(key)
+                    if prev and prev > 0 and usdt < prev * 0.1:
+                        LOG.warning("balance sanity: %s dropped %.2f->%.2f — keeping %.2f",
+                                    key, prev, usdt, prev)
+                        usdt = prev
+                        free_usdt = usdt
+                    self._acct_balance[key] = usdt
                     await pool.execute(
                         "UPDATE public.exchange_accounts "
                         "SET last_balance = $1, "
