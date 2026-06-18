@@ -587,6 +587,7 @@ class DemoBridge:
                         # Different trade - both valid
                         LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f - both valid",
                                   tp_id, entry, old_entry)
+                        existing = None  # prevent cancel-after-placement from destroying unrelated trade
 
             # Skip when sizing produces zero notional (free balance exhausted).
             if notional_eff <= 0 or allocated <= 0:
@@ -1165,6 +1166,38 @@ class DemoBridge:
             if sym_set:
                 LOG.info("_sync_positions %s/%s: %d positions synced",
                          ex, acct_name, len(sym_set))
+
+                # Detect closed positions: filled rows on this account
+                # whose symbol was NOT seen in current fetch_positions.
+                # The position was closed on the exchange since last tick.
+                closed_ids = await pool.fetch_all(
+                    "SELECT id, symbol, direction, demo_entry, demo_pnl, "
+                    "paper_tp, slippage_exit "
+                    "FROM public.demo_orders "
+                    "WHERE exchange = $1 AND account_name = $2 "
+                    "AND status = 'filled' AND closed_at IS NULL "
+                    "AND NOT (symbol = ANY($3::text[]))",
+                    (ex, acct_name, list(sym_set)))
+                for cr in closed_ids:
+                    # Try to get exit price from closed orders
+                    exit_px = cr.get("demo_entry")
+                    try:
+                        co = await asyncio.to_thread(
+                            lambda: client.fetch_closed_orders(
+                                cr["symbol"], limit=1))
+                        if co:
+                            exit_px = float(co[0].get("average") or co[0].get("price") or exit_px)
+                    except Exception:
+                        pass
+                    await pool.execute(
+                        "UPDATE public.demo_orders SET "
+                        "status = 'closed', closed_at = NOW(), "
+                        "exit_price = $1, demo_pnl = COALESCE(demo_pnl, 0) "
+                        "WHERE id = $2",
+                        (round(exit_px, 8) if exit_px else None, cr["id"]))
+                if closed_ids:
+                    LOG.info("_sync_positions %s/%s: %d positions detected as closed",
+                             ex, acct_name, len(closed_ids))
 
     @staticmethod
     def _extract_fee(raw: Dict) -> Optional[float]:
