@@ -190,13 +190,22 @@ class DemoBridge:
                     # so sizing sees the real free balance, not the fallback.
                     if "USDT" in bal:
                         self._acct_balance[key] = usdt
-                    # Persist to DB so dashboard/cron see live balance
+                    # Persist to DB so dashboard/cron see live balances
+                    # last_balance = free USDT (for order sizing gas gauge)
+                    # metadata stores full breakdown: total, free, used, equity
                     pool = await self._ensure_pool()
+                    total_usdt = float(bal.get("__total__USDT", usdt))
+                    free_usdt = usdt
                     await pool.execute(
                         "UPDATE public.exchange_accounts "
-                        "SET last_balance = $1, last_tested_at = NOW() "
-                        "WHERE exchange = $2 AND account_name = $3",
-                        (round(usdt, 2), a["exchange"], a["account_name"]))
+                        "SET last_balance = $1, "
+                        "    metadata = jsonb_set(jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                        "      '{balance_free}', $2::text::jsonb), "
+                        "      '{balance_total}', $3::text::jsonb), "
+                        "    last_tested_at = NOW() "
+                        "WHERE exchange = $4 AND account_name = $5",
+                        (round(free_usdt, 2), str(round(free_usdt, 2)),
+                         str(round(total_usdt, 2)), a["exchange"], a["account_name"]))
                 except Exception as exc:
                     LOG.debug("balance refresh %s failed: %s", key, exc)
                 self._acct_balance.setdefault(key, DEMO_FALLBACK_BALANCE)

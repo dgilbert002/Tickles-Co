@@ -686,9 +686,11 @@ class CcxtExecutionAdapter:
             # Prefer the flat free dict (available balance, no reserved margin).
             free_dict = bal.get("free", {})
             if free_dict:
-                # Return ALL free balances, including zeros — callers need to
-                # see free=0 to detect exhaustion and stop placing orders.
-                return {k: float(v or 0) for k, v in free_dict.items()}
+                result = {k: float(v or 0) for k, v in free_dict.items()}
+                total_dict = bal.get("total", {})
+                for k, v in total_dict.items():
+                    result[f"__total__{k}"] = float(v or 0)
+                return result
             # Fallback: extract "free" from each per-currency dict (legacy format).
             result = {}
             for k, v in bal.items():

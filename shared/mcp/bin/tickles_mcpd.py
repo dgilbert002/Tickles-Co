@@ -56,6 +56,7 @@ from ..tools import (
     meta,
     provisioning,
     routing,
+    snapshot,
     symbols,
     trading,
 )
@@ -104,6 +105,7 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
     accounts.register(reg, ctx)
     competitions.register(reg, ctx)
     collector.register(reg, ctx)
+    snapshot.register(reg, ctx)
     register_builtin_providers(reg, LOG)
 
     LOG.info("[build_registry] registered tools=%d", len(reg.list_tools()))
