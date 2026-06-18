@@ -195,9 +195,17 @@ class DemoBridge:
                     # metadata stores full breakdown: total, free, used, equity
                     pool = await self._ensure_pool()
                     total_usdt = float(bal.get("__total__USDT", usdt))
+                    unrealized_pnl = float(bal.get("__unrealizedPL__USDT", 0))
                     free_usdt = usdt
                     # Sanity floor: if free balance dropped >90% from last known
                     # value, the exchange returned garbage (Toobit decimal quirk).
+                    prev = self._acct_balance.get(key)
+                    if prev and prev > 0 and usdt < prev * 0.1:
+                        LOG.warning("balance sanity: %s dropped %.2f->%.2f — keeping %.2f",
+                                    key, prev, usdt, prev)
+                        usdt = prev
+                        free_usdt = usdt
+                    # Sanity floor: if balance dropped >90%, keep prev
                     prev = self._acct_balance.get(key)
                     if prev and prev > 0 and usdt < prev * 0.1:
                         LOG.warning("balance sanity: %s dropped %.2f->%.2f — keeping %.2f",
@@ -208,13 +216,17 @@ class DemoBridge:
                     await pool.execute(
                         "UPDATE public.exchange_accounts "
                         "SET last_balance = $1, "
-                        "    metadata = jsonb_set(jsonb_set(COALESCE(metadata,'{}'::jsonb), "
-                        "      '{balance_free}', $2::text::jsonb), "
-                        "      '{balance_total}', $3::text::jsonb), "
+                        "    metadata = jsonb_set("
+                        "      jsonb_set("
+                        "        jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                        "          '{balance_free}', $2::text::jsonb), "
+                        "        '{balance_total}', $3::text::jsonb), "
+                        "      '{unrealized_pnl}', $4::text::jsonb), "
                         "    last_tested_at = NOW() "
-                        "WHERE exchange = $4 AND account_name = $5",
+                        "WHERE exchange = $5 AND account_name = $6",
                         (round(free_usdt, 2), str(round(free_usdt, 2)),
-                         str(round(total_usdt, 2)), a["exchange"], a["account_name"]))
+                         str(round(total_usdt, 2)), str(round(unrealized_pnl, 2)),
+                         a["exchange"], a["account_name"]))
                 except Exception as exc:
                     LOG.debug("balance refresh %s failed: %s", key, exc)
                 self._acct_balance.setdefault(key, DEMO_FALLBACK_BALANCE)
