@@ -70,11 +70,17 @@ async def _get_pool() -> Any:
 
 
 async def _get_company_pool(company_id: str) -> Any:
-    """Return a pool for the company-specific database."""
-    from shared.utils.db import get_pool
-
-    dbname = f"tickles_{company_id}"
-    return await get_pool(dbname)
+    """Return a pool for the company-specific database.
+    
+    Falls back to shared pool if the company DB doesn't exist yet.
+    """
+    from shared.utils.db import get_shared_pool
+    try:
+        from shared.utils.db import get_pool
+        dbname = f"tickles_{company_id}"
+        return await get_pool(dbname)
+    except Exception:
+        return await get_shared_pool()
 
 
 def _image_to_base64(path: str) -> str:
@@ -883,8 +889,16 @@ async def _handle_signals_recent(p: Dict[str, Any]) -> Dict[str, Any]:
     arg_idx = 1
 
     if since:
+        # Accept ISO timestamps or relative strings like "24h"
+        try:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            if isinstance(since, str) and since.endswith("h"):
+                hours = int(since[:-1])
+                since = (_dt.now(_tz.utc) - _td(hours=hours)).isoformat()
+        except (ValueError, TypeError):
+            pass  # use as-is, let DB reject if invalid
         conditions.append(f"created_at >= ${arg_idx}")
-        args.append(since)
+        args.append(str(since))
         arg_idx += 1
     if direction:
         conditions.append(f"consensus_direction = ${arg_idx}")
@@ -900,6 +914,8 @@ async def _handle_signals_recent(p: Dict[str, Any]) -> Dict[str, Any]:
         arg_idx += 1
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    # Build complete args tuple — limit must be included in params
+    args.append(limit)
 
     try:
         pool = await _get_company_pool(company_id)
@@ -908,15 +924,14 @@ async def _handle_signals_recent(p: Dict[str, Any]) -> Dict[str, Any]:
             SELECT
                 id, news_item_id, media_item_id, trader_profile_id,
                 model_version, param_hash, consensus_direction, consensus_confidence,
-                consensus_method, instrument_symbol, exchange, market_data_fresh,
+                consensus_method, instrument_symbol, market_data_fresh,
                 market_data_at, created_at
             FROM public.signal_interpretations
             {where_clause}
             ORDER BY created_at DESC
             LIMIT ${arg_idx}
             """,
-            *args,
-            limit,
+            tuple(args),
         )
         signals = []
         for r in rows:
