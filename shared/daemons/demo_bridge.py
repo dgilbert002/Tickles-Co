@@ -1140,7 +1140,7 @@ class DemoBridge:
                                         "UPDATE public.demo_orders SET "
                                         "paper_sl=%s, "
                                         "metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
-                                        "  '{be_locked}', 'true''::jsonb), "
+                                        "  '{be_locked}', 'true'::jsonb), "
                                         "updated_at=NOW() WHERE id=%s",
                                         (round(new_sl, 8), target_id))
                                 LOG.info("BE-LOCK %s/%s %s %s @+%.1f%% → SL=%.6g (%s)",
