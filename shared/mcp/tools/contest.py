@@ -198,40 +198,44 @@ def _handle_contest_leaderboard(p: Dict[str, Any]) -> Dict[str, Any]:
         if not contest:
             return {"status": "error", "message": f"contest {contest_id} not found"}
 
-        starting_balance = float(contest[0]["starting_balance_usd"])
 
-        # 2. Get latest equity for all participants in this contest
-        # We sum equity across all venues for each agent in the contest
+        # 2. Get full rankings from contest_participants (single source of truth)
         sql = """
             SELECT 
                 p.agent_id,
                 p.company_id,
                 p.strategy_ref,
-                SUM(b.equity) as total_equity
+                p.equity_usd,
+                p.realized_pnl_usd,
+                p.unrealized_pnl_usd,
+                p.return_pct,
+                p.win_rate,
+                p.total_trades,
+                p.open_positions,
+                p.total_fees_usd,
+                p.scores
             FROM public.contest_participants p
-            JOIN public.paper_wallets w ON w.contest_id = p.contest_id 
-                AND w.company_id = p.company_id AND w.agent_id = p.agent_id
-            JOIN public.banker_balances b ON b.account_id_external = w.account_id_external
             WHERE p.contest_id = %s
-            GROUP BY p.agent_id, p.company_id, p.strategy_ref
-            ORDER BY total_equity DESC
+            ORDER BY p.equity_usd DESC
         """
         rows = db_helper.query(sql, (contest_id,))
 
         rankings = []
         for i, r in enumerate(rows):
-            equity = float(r["total_equity"])
-            pnl_usd = equity - starting_balance
-            pnl_pct = (pnl_usd / starting_balance * 100) if starting_balance > 0 else 0
-            
             rankings.append({
                 "rank": i + 1,
                 "agentId": r["agent_id"],
                 "companyId": r["company_id"],
-                "strategy": r["strategy_ref"],
-                "equity": equity,
-                "pnlUsd": pnl_usd,
-                "pnlPct": pnl_pct
+                "strategyRef": r["strategy_ref"],
+                "equityUsd": float(r["equity_usd"]) if r["equity_usd"] else 0,
+                "realizedPnlUsd": float(r["realized_pnl_usd"]) if r["realized_pnl_usd"] else 0,
+                "unrealizedPnlUsd": float(r["unrealized_pnl_usd"]) if r["unrealized_pnl_usd"] else 0,
+                "returnPct": float(r["return_pct"]) if r["return_pct"] else 0,
+                "winRate": float(r["win_rate"]) if r["win_rate"] else 0,
+                "totalTrades": int(r["total_trades"]) if r["total_trades"] else 0,
+                "openPositions": int(r["open_positions"]) if r["open_positions"] else 0,
+                "totalFeesUsd": float(r["total_fees_usd"]) if r["total_fees_usd"] else 0,
+                "scores": r["scores"],
             })
 
         return {
