@@ -406,8 +406,14 @@ class CcxtExecutionAdapter:
                     await asyncio.to_thread(_set)
                     self._leverage_cache[cache_key] = effective_lev
                 except Exception as exc:
-                    LOG.warning("ccxt: set_leverage(%sx %s) failed: %s",
-                                effective_lev, sym, exc)
+                    err = str(exc)
+                    if "110043" in err or "leverage not modified" in err:
+                        # Already set — cache it to skip future attempts
+                        self._leverage_cache[cache_key] = effective_lev
+                        LOG.debug("ccxt: leverage %sx already set for %s (cached)", effective_lev, sym)
+                    else:
+                        LOG.warning("ccxt: set_leverage(%sx %s) failed: %s",
+                                    effective_lev, sym, exc)
 
         # ── SL/TP params ──
         params: Dict[str, Any] = {}
