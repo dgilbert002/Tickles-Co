@@ -1638,13 +1638,32 @@ class PositionMonitor:
                 position.get("instrument_exchange"),
             )
             if instrument_id is None:
-                logger.error(
-                    "F2 cannot settle position %s: instrument unresolved "
-                    "(symbol=%s exchange=%s)",
+                # Unresolved instrument (e.g. US30 on toobit, CFD without DB row).
+                # Settle with zero fees — the position MUST close, we can't leave
+                # it open forever just because the fee profile is missing.
+                logger.warning(
+                    "F2 settling position %s without instrument (symbol=%s exchange=%s) — fees=0",
                     position["id"],
                     position["instrument_symbol"],
                     position.get("instrument_exchange"),
                 )
+                raw_entry = position.get("entry_price")
+                raw_notional = position.get("notional_usd")
+                direction = position.get("direction")
+                if raw_entry and exit_price and raw_notional:
+                    entry_f = float(raw_entry)
+                    exit_f = float(exit_price)
+                    notional_f = float(raw_notional)
+                    if direction == "long":
+                        gross_pnl = notional_f * (exit_f / entry_f - 1.0)
+                    else:
+                        gross_pnl = notional_f * (1.0 - exit_f / entry_f)
+                else:
+                    gross_pnl = 0.0
+                await update_position_outcome(
+                    pool, position["id"], "closed", outcome,
+                    exit_price, round(gross_pnl, 4), now,
+                    realized_pnl_final=round(gross_pnl, 4))
                 return None
 
             opened_at = position.get("signal_timestamp") or position["created_at"]
@@ -1671,12 +1690,28 @@ class PositionMonitor:
                 closed_at=now,
             )
             if breakdown is None:
-                logger.error(
-                    "F2 cannot settle position %s: no fee profile for "
-                    "instrument_id=%s",
-                    position["id"],
-                    instrument_id,
-                )
+                # Fee profile missing — settle with zero fees.  Same as above:
+                # the position must close.
+                logger.warning(
+                    "F2 settling position %s without fee profile (instrument_id=%s) — fees=0",
+                    position["id"], instrument_id)
+                raw_entry = position.get("entry_price")
+                raw_notional = position.get("notional_usd")
+                direction = position.get("direction")
+                if raw_entry and exit_price and raw_notional:
+                    entry_f = float(raw_entry)
+                    exit_f = float(exit_price)
+                    notional_f = float(raw_notional)
+                    if direction == "long":
+                        gross_pnl = notional_f * (exit_f / entry_f - 1.0)
+                    else:
+                        gross_pnl = notional_f * (1.0 - exit_f / entry_f)
+                else:
+                    gross_pnl = 0.0
+                await update_position_outcome(
+                    pool, position["id"], "closed", outcome,
+                    exit_price, round(gross_pnl, 4), now,
+                    realized_pnl_final=round(gross_pnl, 4))
                 return None
 
             net_pnl_float = float(breakdown.net_pnl_usd)
