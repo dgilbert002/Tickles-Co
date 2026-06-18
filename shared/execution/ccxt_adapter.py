@@ -690,6 +690,12 @@ class CcxtExecutionAdapter:
                 total_dict = bal.get("total", {})
                 for k, v in total_dict.items():
                     result[f"__total__{k}"] = float(v or 0)
+                # Unrealized PnL from exchange info
+                info_list = bal.get("info", [])
+                if info_list and isinstance(info_list, list):
+                    upnl = info_list[0].get("unrealizedPL")
+                    if upnl is not None:
+                        result["__unrealizedPL__USDT"] = float(upnl)
                 return result
             # Fallback: extract "free" from each per-currency dict (legacy format).
             result = {}

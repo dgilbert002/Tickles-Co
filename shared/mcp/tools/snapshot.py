@@ -41,7 +41,8 @@ async def _handle_snapshot(p: Dict[str, Any]) -> Dict[str, Any]:
         acct_rows = await pool.fetch_all(
             """SELECT exchange, account_name, account_type, last_balance, last_tested_at,
                       metadata->>'balance_total' as balance_total,
-                      metadata->>'margin_mode' as margin_mode
+                      metadata->>'margin_mode' as margin_mode,
+                      metadata->>'unrealized_pnl' as unrealized_pnl
                FROM public.exchange_accounts
                WHERE is_active = TRUE AND account_type IN ('demo', 'live')
                ORDER BY exchange, account_name""")
@@ -54,6 +55,7 @@ async def _handle_snapshot(p: Dict[str, Any]) -> Dict[str, Any]:
                 "freeUsdt": float(r["last_balance"] or 0),
                 "totalUsdt": float(r["balance_total"] or 0) if r["balance_total"] else None,
                 "marginMode": r["margin_mode"] or "unknown",
+                "unrealizedPnl": float(r["unrealized_pnl"] or 0) if r["unrealized_pnl"] else None,
                 "lastTestedAt": str(r["last_tested_at"]) if r["last_tested_at"] else None,
             }
             accounts.append(acct)
