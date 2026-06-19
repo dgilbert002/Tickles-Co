@@ -484,7 +484,7 @@ class CcxtExecutionAdapter:
 
         # Toobit: SL/TP attached after order via /api/v1/futures/position/trading-stop
         # (create_order does not accept stopLoss/takeProfit params).
-        if ex == "toobit" and (sl or tp):
+        if ex == "toobit" and intent.order_type != ORDER_TYPE_LIMIT and (sl or tp):
             try:
                 await self._toobit_set_sl_tp(client, sym, sl, tp, intent.direction)
                 LOG.info("ccxt: Toobit SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
@@ -598,8 +598,13 @@ class CcxtExecutionAdapter:
 
     async def _toobit_set_sl_tp(self, client, symbol, sl, tp, direction: str = DIRECTION_LONG):
         """Attach SL/TP to an open Toobit position via trading-stop endpoint."""
-        clean = symbol.replace("/", "").split(":")[0]
-        body = {"symbol": clean, "side": "buy" if direction == DIRECTION_LONG else "sell"}
+        # Toobit uses raw exchange market IDs (SOL-SWAP-USDT, not SOLUSDT or SOL/USDT:USDT)
+        # and uppercase LONG/SHORT for side (matching fetchPositions response).
+        mk = client.market(symbol)
+        body = {
+            "symbol": mk["id"],
+            "side": "LONG" if direction == DIRECTION_LONG else "SHORT",
+        }
         if sl is not None:
             body["stopLoss"] = str(sl)
         if tp is not None:
