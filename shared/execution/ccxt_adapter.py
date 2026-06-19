@@ -418,8 +418,8 @@ class CcxtExecutionAdapter:
         # ── SL/TP params ──
         params: Dict[str, Any] = {}
         if sl or tp:
-            if ex == "bybit":
-                # Bybit: string params, no extra wrapper
+            if ex == "bybit" or ex == "toobit":
+                # Bybit/Toobit: flat string params (stopLoss/takeProfit)
                 if sl:
                     params["stopLoss"] = str(sl)
                 if tp:
@@ -525,7 +525,7 @@ class CcxtExecutionAdapter:
             return _reject("no SL or TP provided")
 
         try:
-            if ex == "bybit":
+            if ex == "bybit" or ex == "toobit":
                 await self._bybit_set_sl_tp(client, symbol, stop_loss, take_profit)
             elif ex == "bitget":
                 await self._bitget_set_sl_tp(client, symbol, stop_loss, take_profit, direction)
