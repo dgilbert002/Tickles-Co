@@ -425,17 +425,10 @@ class CcxtExecutionAdapter:
                 if tp:
                     params["takeProfit"] = str(tp)
             elif ex == "bitget":
-                # Bitget limit orders with SL/TP: place the order clean first,
-                # then attach stops via TPSL endpoint after acceptance.
-                # Don't pass stopLossPrice/takeProfitPrice in create_order params
-                # for limit orders — Bitget demo rejects them on limit orders.
-                if intent.order_type == ORDER_TYPE_LIMIT:
-                    pass  # SL/TP attached after order via TPSL
-                else:
-                    if sl:
-                        params["stopLossPrice"] = str(sl)
-                    if tp:
-                        params["takeProfitPrice"] = str(tp)
+                # Bitget rejects having BOTH stopLossPrice AND takeProfitPrice
+                # in create_order params ("can only contain one"). Strip both,
+                # attach via TPSL endpoint after acceptance.
+                pass  # SL/TP attached after order via TPSL
             elif ex == "blofin":
                 if sl:
                     params["stopLossPrice"] = str(sl)
