@@ -484,7 +484,7 @@ class CcxtExecutionAdapter:
 
         # Toobit: SL/TP attached after order via /api/v1/futures/position/trading-stop
         # (create_order does not accept stopLoss/takeProfit params).
-        if ex == "toobit" and intent.order_type != ORDER_TYPE_LIMIT and (sl or tp):
+        if ex == "toobit" and intent.order_type != ORDER_TYPE_LIMIT and (sl or tp):  # tpslMode=Full in _toobit_set_sl_tp
             try:
                 await self._toobit_set_sl_tp(client, sym, sl, tp, intent.direction)
                 LOG.info("ccxt: Toobit SL/TP attached: %s SL=%s TP=%s", sym, sl, tp)
@@ -609,6 +609,7 @@ class CcxtExecutionAdapter:
             body["stopLoss"] = str(sl)
         if tp is not None:
             body["takeProfit"] = str(tp)
+        body["tpslMode"] = "Full"
         await asyncio.to_thread(
             lambda: client.private_post_api_v1_futures_position_trading_stop(body))
 
