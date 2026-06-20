@@ -447,7 +447,13 @@ class CcxtExecutionAdapter:
         # ── Place order ──
         def _place() -> Dict[str, Any]:
             order_type = ORDER_TYPE_MARKET if intent.order_type == ORDER_TYPE_MARKET else ORDER_TYPE_LIMIT
-            kwargs = {"symbol": sym, "type": order_type, "side": side, "amount": float(intent.quantity)}
+            qty = float(intent.quantity)
+            # Toobit has non-1 contractSize (0.001 BTC, 0.1 alts). CCXT stores
+            # it but doesn't auto-apply — divide amount by contractSize.
+            if ex == "toobit" and client.markets and sym in client.markets:
+                cs = client.markets[sym].get("contractSize", 1) or 1
+                qty = qty / cs
+            kwargs = {"symbol": sym, "type": order_type, "side": side, "amount": qty}
             if intent.requested_price:
                 kwargs["price"] = float(intent.requested_price)
             if params:
