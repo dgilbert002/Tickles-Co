@@ -69,6 +69,15 @@ AGENTS = [
     ("Rose B: Lev Par",   1.0, 1.0, "lev_parallel_rose"),
     ("Rose C: +BE Lock",  1.0, 1.0, "lev_be_lock_rose"),
     ("D: 3% Lev Par",     1.0, 1.0, "lev_parallel_3pct"),
+    ("BCUSA A: Spot Seq", 1.0, 1.0, "spot_seq_bcusa"),
+    ("BCUSA B: Lev Par",  1.0, 1.0, "lev_parallel_bcusa"),
+    ("BCUSA C: +BE Lock", 1.0, 1.0, "lev_be_lock_bcusa"),
+    ("BIN A: Spot Seq",   1.0, 1.0, "spot_seq_binance"),
+    ("BIN B: Lev Par",    1.0, 1.0, "lev_parallel_binance"),
+    ("BIN C: +BE Lock",   1.0, 1.0, "lev_be_lock_binance"),
+    ("UFO A: Spot Seq",   1.0, 1.0, "spot_seq_ufo"),
+    ("UFO B: Lev Par",    1.0, 1.0, "lev_parallel_ufo"),
+    ("UFO C: +BE Lock",   1.0, 1.0, "lev_be_lock_ufo"),
 ]
 
 # Display-name → DB-id mapping. Round-7 persistence migration (2026-05-24):
@@ -89,6 +98,15 @@ NAME_TO_ID = {
     "Rose B: Lev Par":   "copy_rose_b",
     "Rose C: +BE Lock":  "copy_rose_c",
     "D: 3% Lev Par":    "copy_lev_3pct",
+    "BCUSA A: Spot Seq": "copy_bcusa_a",
+    "BCUSA B: Lev Par":  "copy_bcusa_b",
+    "BCUSA C: +BE Lock": "copy_bcusa_c",
+    "BIN A: Spot Seq":   "copy_binance_a",
+    "BIN B: Lev Par":    "copy_binance_b",
+    "BIN C: +BE Lock":   "copy_binance_c",
+    "UFO A: Spot Seq":   "copy_ufo_a",
+    "UFO B: Lev Par":    "copy_ufo_b",
+    "UFO C: +BE Lock":   "copy_ufo_c",
 }
 ID_TO_NAME = {v: k for k, v in NAME_TO_ID.items()}
 
@@ -626,7 +644,7 @@ class LiveCopyTradeMonitor:
                   AND (
                     tp.actor_id LIKE 'jarvais_trader_%'
                     OR tp.actor_id = 'jarvais_chart_hacker'
-                    OR tp.actor_id = 'jarvais_rose_ch'
+                    OR tp.actor_id LIKE 'jarvais_%_ch'
                   )
                 ORDER BY tp.signal_timestamp DESC
                 LIMIT 200
@@ -1394,16 +1412,23 @@ class LiveCopyTradeMonitor:
                         or bool(pos.get("chart_hacker_endorsed"))
                     )
                     is_ch_agent = (agent_mode == "spot_seq_ch")
-                    is_rose_pos = (actor == "jarvais_rose_ch")
-                    is_rose_agent = agent_mode.endswith("_rose")
-                    # Regular agents skip ChartHacker-only and Rose positions
-                    if not is_ch_agent and not is_rose_agent and (actor == "jarvais_chart_hacker" or is_rose_pos):
+                    # Channel-specific agents: mode ends with channel tag (e.g. _rose, _bcusa)
+                    # They only take positions from matching actor_id (e.g. jarvais_rose_ch)
+                    channel_tag = None
+                    for suffix in ("_rose", "_bcusa", "_binance", "_ufo"):
+                        if agent_mode.endswith(suffix):
+                            channel_tag = suffix[1:]
+                            break
+                    is_channel_agent = channel_tag is not None
+                    is_channel_pos = is_channel_agent and actor == f"jarvais_{channel_tag}_ch"
+                    # Regular agents skip ChartHacker and channel-specific positions
+                    if not is_ch_agent and not is_channel_agent and (actor == "jarvais_chart_hacker" or ("_ch" in actor and actor != "jarvais_chart_hacker")):
                         continue
                     # CH agent mirrors chart_hacker rows OR trader legs CH endorsed
                     if is_ch_agent and not is_ch_pos:
                         continue
-                    # Rose agent only takes rose_ch positions
-                    if is_rose_agent and not is_rose_pos:
+                    # Channel agent only takes matching channel positions
+                    if is_channel_agent and not is_channel_pos:
                         continue
                     if pos["id"] in self._agent_entered.get(agent_name, set()):
                         continue
