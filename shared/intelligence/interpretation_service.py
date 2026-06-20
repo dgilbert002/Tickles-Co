@@ -5008,8 +5008,9 @@ class InterpretationService:
             if chart_hacker_pid is not None:
                 # Generate channel-specific actor_id for Telegram (was hardcoded to rose_ch)
                 if news_source == "telegram":
-                    # Sanitize channel name to a valid identifier: "BCUSA" -> "bcusa", "binance killers" -> "binance_killers"
-                    chan_tag = _re.sub(r"[^a-z0-9_]", "_", (media_row.get("channel_name") or "unknown").lower().strip())[:20]
+                    import re as _regex
+                    # Sanitize channel name to a valid identifier: "BCUSA" -> "bcusa"
+                    chan_tag = _regex.sub(r"[^a-z0-9_]", "_", (media_row.get("channel_name") or "unknown").lower().strip())[:20]
                     ch_actor_id = f"{company}_{chan_tag}_ch"
                 else:
                     ch_actor_id = f"{company}_chart_hacker"
