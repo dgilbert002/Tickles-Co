@@ -1190,7 +1190,11 @@ class DemoBridge:
                         "notional_usd, demo_pnl, slippage_entry, "
                         "status, ordered_at, filled_at) "
                         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',NOW(),NOW()) "
-                        "ON CONFLICT DO NOTHING",
+                        "ON CONFLICT (tracked_position_id, exchange, account_name) "
+                        "WHERE tracked_position_id IS NOT NULL "
+                        "DO UPDATE SET status = 'filled', "
+                        "  filled_at = COALESCE(demo_orders.filled_at, NOW()), "
+                        "  updated_at = NOW()",
                         (ex, acct_name, agent_id, sym, direction,
                          tp_id, _paper_entry, round(entry, 8), _paper_sl, _paper_tp,
                          round(notional, 2), round(upnl, 8), _slip))
