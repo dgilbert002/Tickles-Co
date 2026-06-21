@@ -282,11 +282,15 @@ async def list_active_instruments(pool) -> List[Tuple[int, str, str]]:
     Dormant symbols fetch on-demand from CCXT when needed.
     """
     # 1. Get position-aware instruments for Bybit/Bitget (smart collection)
+    # Strip :USDT/:USDC/:BUSD/:USD suffix to match instruments table,
+    # same regex as _PERP_SUFFIX_RE in copy_trade_monitor._symbol_lookup_candidates
     pos_rows = await pool.fetch_all(
         """
         SELECT DISTINCT i.id, i.symbol, i.exchange 
         FROM instruments i
-        INNER JOIN tracked_positions tp ON tp.instrument_symbol = i.symbol
+        INNER JOIN tracked_positions tp ON (
+            i.symbol = regexp_replace(tp.instrument_symbol, ':(USDT|USDC|BUSD|USD)$', '')
+        )
         WHERE i.is_active = TRUE 
           AND i.exchange IN ('bybit', 'bitget')
           AND tp.status IN ('pending', 'open')

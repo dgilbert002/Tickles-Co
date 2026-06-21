@@ -36,6 +36,8 @@ import re as _re
 # Options suffix regex: strips date-strike-type tails like -260531-90-P
 _OPTIONS_SUFFIX_RE = _re.compile(r"-\d{6}-\d+-[PC]$")
 
+# Perp suffix regex: strips CCXT :USDT/:USDC/:BUSD/:USD suffixes to match\n# instruments table forms. Same as _PERP_SUFFIX_RE in copy_trade_monitor.\n_PERP_SUFFIX_RE = _re.compile(r":(USDT|USDC|BUSD|USD)$", _re.IGNORECASE)
+
 import asyncio
 import base64
 import hashlib
@@ -391,46 +393,34 @@ async def _ccxt_live_price(
 def _quant_symbol_candidates(symbol: str) -> List[str]:
     """Return alternate ``instruments.symbol`` forms to look up in DB.
 
-    The collector / LLM may yield slash form (``BTC/USDT``), no-slash
-    (``BTCUSDT``), or perp-suffixed (``TAOUSDT.P``). The instruments
-    table can store any of those depending on origin, so we try all
-    plausible forms before short-circuiting the quant track.
+    Uses the same _PERP_SUFFIX_RE regex as _symbol_lookup_candidates
+    in copy_trade_monitor.py — the single source of truth for symbol matching.
 
-    Args:
-        symbol: Caller's input.
-
-    Returns:
-        Ordered, deduped list of forms.
+    Order: stripped form first (matches instruments table), then original
+    (matches tracked_positions), then slash/no-slash variants.
     """
     if not symbol:
         return []
-    s = symbol.strip().upper()
-    out: List[str] = [s]
-    # Strip CCXT perpetual suffix (:USDT, :USDC, :BUSD, :USD)
-    for colon_quote in (":USDT", ":USDC", ":BUSD", ":USD"):
-        if s.endswith(colon_quote):
-            stripped = s[: -len(colon_quote)]
-            if stripped not in out:
-                out.append(stripped)
-    base = s[:-2] if s.endswith(".P") else s
-    if base != s and base not in out:
-        out.append(base)
-    if "/" not in base and len(base) > 3:
+    s = symbol.strip()
+    out: List[str] = []
+    # Strip :USDT / :USDC / :BUSD / :USD perp suffix (same as _PERP_SUFFIX_RE)
+    stripped = _PERP_SUFFIX_RE.sub("", s)
+    if stripped != s:
+        out.append(stripped)
+    if s not in out:
+        out.append(s)
+    # Try slash ↔ no-slash variants
+    if "/" not in stripped and len(stripped) > 3:
         for quote in ("USDT", "USDC", "BUSD", "USD"):
-            if base.endswith(quote) and len(base) > len(quote):
-                slash = base[: -len(quote)] + "/" + quote
+            if stripped.endswith(quote) and len(stripped) > len(quote):
+                slash = stripped[:-len(quote)] + "/" + quote
                 if slash not in out:
                     out.append(slash)
                 break
-    elif "/" in base:
-        no_slash = base.replace("/", "")
+    elif "/" in stripped:
+        no_slash = stripped.replace("/", "")
         if no_slash not in out:
             out.append(no_slash)
-        # Perp variant ``BTC/USDT.P`` -> ``BTCUSDT.P``
-        if not s.endswith(".P"):
-            perp = no_slash + ".P"
-            if perp not in out:
-                out.append(perp)
     return out
 
 
