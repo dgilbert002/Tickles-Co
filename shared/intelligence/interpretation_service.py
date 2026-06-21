@@ -36,7 +36,9 @@ import re as _re
 # Options suffix regex: strips date-strike-type tails like -260531-90-P
 _OPTIONS_SUFFIX_RE = _re.compile(r"-\d{6}-\d+-[PC]$")
 
-# Perp suffix regex: strips CCXT :USDT/:USDC/:BUSD/:USD suffixes to match\n# instruments table forms. Same as _PERP_SUFFIX_RE in copy_trade_monitor.\n_PERP_SUFFIX_RE = _re.compile(r":(USDT|USDC|BUSD|USD)$", _re.IGNORECASE)
+# Perp suffix regex: strips CCXT :USDT/:USDC/:BUSD/:USD suffixes to match
+# instruments table forms. Same as _PERP_SUFFIX_RE in copy_trade_monitor.
+_PERP_SUFFIX_RE = _re.compile(r":(USDT|USDC|BUSD|USD)$", _re.IGNORECASE)
 
 import asyncio
 import base64
