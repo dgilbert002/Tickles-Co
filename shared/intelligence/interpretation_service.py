@@ -1887,8 +1887,11 @@ async def run_quant_track(
                     "FROM public.candles "
                     "WHERE instrument_id = $1 AND source = $2 AND timeframe = $3 "
                     "ORDER BY timestamp DESC LIMIT 100",
-                    (instrument_id, exch, _tf),
+                    (instrument_id, exch, query_tf),
                 )
+                # Re-aggregate if needed (on-demand fetch inserts 1m candles)
+                if use_1m and candles:
+                    candles = _aggregate_to_timeframe(candles, _tf)
         except Exception as exc:
             logger.warning(
                 "Quant track: on-demand fetch failed for %s@%s: %s",
