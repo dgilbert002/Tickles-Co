@@ -273,12 +273,41 @@ def time_from_ms(ms: int):
 # Main
 # --------------------------------------------------------------------
 async def list_active_instruments(pool) -> List[Tuple[int, str, str]]:
-    rows = await pool.fetch_all(
-        "SELECT id, symbol, exchange FROM instruments "
-        "WHERE is_active = TRUE AND asset_class = 'crypto' "
-        "ORDER BY exchange, symbol"
+    """Get instruments for candle collection - hybrid approach.
+    
+    Toobit: Always collect all crypto instruments (hard 16.6hr history limit -
+    cannot fetch on-demand). This keeps ~50-200 symbols.
+    
+    Bybit/Bitget: Smart collection - only for symbols with pending/open positions.
+    Dormant symbols fetch on-demand from CCXT when needed.
+    """
+    # 1. Get position-aware instruments for Bybit/Bitget (smart collection)
+    pos_rows = await pool.fetch_all(
+        """
+        SELECT DISTINCT i.id, i.symbol, i.exchange 
+        FROM instruments i
+        INNER JOIN tracked_positions tp ON tp.instrument_symbol = i.symbol
+        WHERE i.is_active = TRUE 
+          AND i.exchange IN ('bybit', 'bitget')
+          AND tp.status IN ('pending', 'open')
+        ORDER BY i.exchange, i.symbol
+        """
     )
-    return [(r["id"], r["symbol"], r["exchange"]) for r in rows]
+    result = [(r["id"], r["symbol"], r["exchange"]) for r in pos_rows]
+    
+    # 2. Get ALL crypto instruments for Toobit (can't fetch history on-demand)
+    toobit_rows = await pool.fetch_all(
+        """
+        SELECT id, symbol, exchange FROM instruments 
+        WHERE is_active = TRUE 
+          AND exchange = 'toobit'
+          AND asset_class = 'crypto'
+        ORDER BY exchange, symbol
+        """
+    )
+    result.extend([(r["id"], r["symbol"], r["exchange"]) for r in toobit_rows])
+    
+    return result
 
 
 def _install_signal_handlers(loop, stop: asyncio.Event) -> None:

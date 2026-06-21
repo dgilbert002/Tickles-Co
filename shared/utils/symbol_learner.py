@@ -133,19 +133,106 @@ RULES:
             agent_id="symbol_learner",
         )
         content = response.get("content", "")
+        # Strip code fences
         content = re.sub(r"```(?:json)?\s*", "", content).strip()
         content = re.sub(r"```\s*$", "", content).strip()
+        # Gemini Flash often outputs reasoning text before/after JSON.
+        # Find the JSON array or object and extract it.
+        json_start = -1
+        for ch in ("[", "{"):
+            idx = content.find(ch)
+            if idx != -1 and (json_start == -1 or idx < json_start):
+                json_start = idx
+        if json_start >= 0:
+            content = content[json_start:]
+        # Remove trailing text after JSON (e.g. trailing explanation)
+        # Find last ] or } and trim
+        for ch in ("]", "}"):
+            idx = content.rfind(ch)
+            if idx != -1 and idx > len(content) - 200:
+                content = content[:idx+1]
+                break
         result = json.loads(content)
-        items = result if isinstance(result, list) else result.get("matches", [])
+
+        # Normalize to a list of items — handle multiple possible formats:
+        # A) Array: [{"raw":..., "exchange":..., ...}, ...]  — ideal format
+        # B) Array: [{"raw":..., "matches": [{...}]}, ...]   — nested format
+        # C) Dict:  {"RE/USDT": "RE/USDT (crypto)", ...}     — string-value dict
+        # D) Dict with matches key
+        items: list = []
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict):
+            if "matches" in result and isinstance(result["matches"], list):
+                items = result["matches"]
+            else:
+                # Dictionary with unknown keys → convert to list of items.
+                # If the values are just label strings (no exchange/symbol data),
+                # treat them as already-resolved-to-null (unresolvable).
+                for k, v in result.items():
+                    if isinstance(v, str):
+                        # String value like "RE/USDT (crypto)" — no usable mapping
+                        items.append({"raw": k, "cleaned": k.split("/")[0] if "/" in k else k,
+                                      "_null_value": True})
+                    elif isinstance(v, list):
+                        # List of match objects: {"RE/USDT": [{"exchange":..., "instrument":...}]}
+                        if v:
+                            items.append({"raw": k, "cleaned": k.split("/")[0] if "/" in k else k,
+                                          "matches": v})
+                        else:
+                            items.append({"raw": k, "cleaned": k.split("/")[0] if "/" in k else k,
+                                          "_null_value": True})
+                    elif isinstance(v, dict):
+                        v = dict(v)
+                        v.setdefault("raw", k)
+                        items.append(v)
+
         resolved: Dict[str, Optional[dict]] = {s: None for s, _ in unknowns}
         for item in items:
             raw = item.get("raw", "")
-            if raw in resolved:
+            if raw not in resolved:
+                # Try matching by cleaned_base too
+                for (db_raw, db_cleaned) in unknowns:
+                    if db_cleaned and item.get("cleaned", "") == db_cleaned:
+                        raw = db_raw
+                        break
+                if raw not in resolved:
+                    continue
+
+            # If the LLM explicitly returned a null/empty result for this symbol,
+            # store a sentinel so the caller knows it was definitively unresolvable
+            # (don't leave as None which would trigger the "retry" guard).
+            if item.get("_null_value"):
+                resolved[raw] = {"_explicit_null": True}
+                continue
+
+            # Handle both flat and nested formats
+            if "matches" in item and isinstance(item["matches"], list) and item["matches"]:
+                best = item["matches"][0]
+                if isinstance(best, str):
+                    # Match is a raw string like "RE/USDT (crypto)" — no usable exchange/symbol data
+                    resolved[raw] = {"_explicit_null": True}
+                    continue
+                elif isinstance(best, dict):
+                    exchange = best.get("exchange", "")
+                    symbol = best.get("instrument", best.get("symbol", ""))
+                    base_currency = item.get("cleaned", item.get("base", ""))
+                    asset_type = best.get("asset_type", "unknown")
+                else:
+                    resolved[raw] = {"_explicit_null": True}
+                    continue
+            else:
+                exchange = item.get("exchange", "")
+                symbol = item.get("symbol", "")
+                base_currency = item.get("base", item.get("cleaned", ""))
+                asset_type = item.get("asset_type", "unknown")
+
+            if exchange and symbol:
                 resolved[raw] = {
-                    "exchange": item.get("exchange", ""),
-                    "symbol": item.get("symbol", ""),
-                    "base": item.get("base", ""),
-                    "asset_type": item.get("asset_type", "unknown"),
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "base": base_currency,
+                    "asset_type": asset_type,
                     "llm_response": content[:2000],
                     "llm_model": model,
                 }
@@ -167,7 +254,7 @@ async def resolve_pending(pool: DatabasePool) -> int:
     # Get pending unknowns
     rows = await pool.fetch_all(
         """
-        SELECT raw_symbol, cleaned_base
+        SELECT raw_symbol, cleaned_base, seen_count
         FROM unresolved_symbols
         WHERE status = 'pending'
         ORDER BY first_seen_at
@@ -178,19 +265,42 @@ async def resolve_pending(pool: DatabasePool) -> int:
     if not rows:
         logger.info("symbol_learner: no pending unknowns")
         return 0
-    
+
+    # Guard: auto-mark repeatedly-pending symbols as unresolvable after many cycles.
+    # This prevents infinite LLM retries on symbols that don't exist anywhere.
+    resolved_count = 0
+    for r in rows:
+        seen = r.get("seen_count", 0) or 0
+        if seen >= 8:
+            await pool.execute(
+                """UPDATE unresolved_symbols
+                   SET status = 'unresolvable', resolved_at = NOW(),
+                       notes = 'Auto-unresolvable after ' || $2 || ' retry cycles'
+                   WHERE raw_symbol = $1""",
+                (r["raw_symbol"], seen),
+            )
+            logger.info("symbol_learner: %s → UNRESOLVABLE (max retries: %d cycles)", r["raw_symbol"], seen)
+            resolved_count += 1
+    # Re-fetch after marking max-retries
+    rows = await pool.fetch_all(
+        """SELECT raw_symbol, cleaned_base
+           FROM unresolved_symbols WHERE status = 'pending'
+           ORDER BY first_seen_at LIMIT 50"""
+    )
+    if not rows:
+        logger.info("symbol_learner: all pending symbols were auto-resolved (max retries)")
+        return resolved_count
+
     unknowns = [(r["raw_symbol"], r["cleaned_base"] or "") for r in rows]
     logger.info("symbol_learner: resolving %d unknowns...", len(unknowns))
-    
+
     # Get all instruments
     instruments = await _get_all_instruments(pool)
     instruments_text = _build_instruments_text(instruments)
-    
+
     # LLM resolution
     resolved = await _llm_resolve_symbols(unknowns, instruments_text)
-    
-    # Store results
-    resolved_count = 0
+
     # Guard: if LLM call completely failed (all None), leave all as pending.
     # Only mark individual symbols unresolvable if the LLM explicitly said so.
     all_failed = all(v is None for v in resolved.values())
@@ -203,6 +313,48 @@ async def resolve_pending(pool: DatabasePool) -> int:
     
     for raw_symbol, mapping in resolved.items():
         if mapping and mapping.get("symbol") and mapping.get("exchange"):
+            # Verify the instrument actually exists in the DB to prevent hallucination
+            exists = await pool.fetch_one(
+                """SELECT 1 FROM unified_instruments
+                   WHERE exchange = $1 AND exchange_symbol = $2 AND is_active = TRUE
+                   LIMIT 1""",
+                (mapping["exchange"], mapping["symbol"]),
+            )
+            if not exists:
+                logger.info(
+                    "symbol_learner: %s → %s/%s REJECTED (not in unified_instruments)",
+                    raw_symbol, mapping["exchange"], mapping["symbol"],
+                )
+                await pool.execute(
+                    """UPDATE unresolved_symbols
+                       SET status = 'unresolvable', resolved_at = NOW(),
+                           notes = 'LLM suggested ' || $2 || '/' || $3 || ' but instrument not found in DB'
+                       WHERE raw_symbol = $1""",
+                    (raw_symbol, mapping["exchange"], mapping["symbol"]),
+                )
+                continue
+
+            # Safety check: the resolved base must match the original base exactly
+            # (case-insensitive). The LLM's job is to find exchange+symbol, not to
+            # change the base currency. This prevents substring hallucinations
+            # like RE→REZ, REN→RENDER, FANTOM→S.
+            cleaned = (mapping.get("cleaned_base", "") or "").strip().upper()
+            resolved_base = (mapping.get("base", "") or "").strip().upper()
+            if cleaned and resolved_base and cleaned != resolved_base:
+                logger.info(
+                    "symbol_learner: %s → %s/%s REJECTED (base mismatch: '%s' vs '%s')",
+                    raw_symbol, mapping["exchange"], mapping["symbol"],
+                    cleaned, resolved_base,
+                )
+                await pool.execute(
+                    """UPDATE unresolved_symbols
+                       SET status = 'unresolvable', resolved_at = NOW(),
+                           notes = 'LLM matched ' || $2 || '→' || $3 || ' but base mismatch: ' || $4 || ' vs ' || $5
+                       WHERE raw_symbol = $1""",
+                    (raw_symbol, mapping["exchange"], mapping["symbol"], cleaned, resolved_base),
+                )
+                continue
+
             # Insert into symbol_mappings
             await pool.execute(
                 """

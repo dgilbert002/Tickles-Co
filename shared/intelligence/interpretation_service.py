@@ -406,6 +406,12 @@ def _quant_symbol_candidates(symbol: str) -> List[str]:
         return []
     s = symbol.strip().upper()
     out: List[str] = [s]
+    # Strip CCXT perpetual suffix (:USDT, :USDC, :BUSD, :USD)
+    for colon_quote in (":USDT", ":USDC", ":BUSD", ":USD"):
+        if s.endswith(colon_quote):
+            stripped = s[: -len(colon_quote)]
+            if stripped not in out:
+                out.append(stripped)
     base = s[:-2] if s.endswith(".P") else s
     if base != s and base not in out:
         out.append(base)
@@ -1536,6 +1542,152 @@ def _resolve_quant_timeframe(chart_timeframe: Optional[str]) -> str:
     return "1m"
 
 
+def _tf_to_minutes(timeframe: str) -> int:
+    """Convert timeframe string to minutes.
+    
+    Examples:
+        "1m" -> 1
+        "5m" -> 5
+        "15m" -> 15
+        "30m" -> 30
+        "1h" -> 60
+        "4h" -> 240
+        "1d" -> 1440
+        "1w" -> 10080
+    """
+    if not timeframe:
+        return 1
+    
+    tf = timeframe.strip().lower()
+    
+    # Direct minute mappings
+    if tf in ("1m", "5m", "15m", "30m"):
+        return int(tf.replace("m", ""))
+    
+    # Hour mappings
+    if tf in ("1h", "4h"):
+        return int(tf.replace("h", "")) * 60
+    
+    # Day/week mappings
+    if tf in ("1d", "day", "daily"):
+        return 1440
+    if tf in ("1w", "week", "weekly"):
+        return 10080
+    
+    # Fallback
+    return 1
+
+
+async def _fetch_historical_candles(
+    pool: DatabasePool,
+    instrument_id: int,
+    symbol: str,
+    exchange: str,
+    candles_needed: int,
+) -> int:
+    """Fetch historical candles from CCXT and insert into database.
+    
+    Args:
+        pool: Database pool for shared database
+        instrument_id: Instrument ID in our database
+        symbol: Trading symbol (e.g., "BTC/USDT")
+        exchange: Exchange name (e.g., "bybit")
+        candles_needed: Number of 1m candles to fetch
+    
+    Returns:
+        Number of candles successfully fetched and inserted
+    """
+    import ccxt.async_support as ccxt_async
+    
+    logger.info(
+        "Fetching %d historical candles for %s@%s from CCXT",
+        candles_needed, symbol, exchange,
+    )
+    
+    # Initialize CCXT exchange
+    try:
+        exchange_class = getattr(ccxt_async, exchange, None)
+        if not exchange_class:
+            logger.warning("Unknown exchange: %s", exchange)
+            return 0
+        
+        ex = exchange_class({"enableRateLimit": True})
+    except Exception as exc:
+        logger.warning("Failed to initialize CCXT for %s: %s", exchange, exc)
+        return 0
+    
+    try:
+        # Calculate time range (candles_needed minutes ago to now)
+        now_ms = int(time.time() * 1000)
+        since_ms = now_ms - (candles_needed * 60 * 1000)
+        
+        # Fetch in batches of 1000 (CCXT limit)
+        all_candles = []
+        current_since = since_ms
+        batch_size = 1000
+        
+        while current_since < now_ms and len(all_candles) < candles_needed:
+            try:
+                candles = await ex.fetch_ohlcv(
+                    symbol,
+                    timeframe="1m",
+                    since=current_since,
+                    limit=batch_size,
+                )
+                
+                if not candles:
+                    break
+                
+                all_candles.extend(candles)
+                
+                # Move to next batch
+                if len(candles) < batch_size:
+                    break
+                current_since = candles[-1][0] + 60000  # Next minute
+                
+                # Rate limiting
+                await asyncio.sleep(0.1)
+                
+            except Exception as exc:
+                logger.warning("CCXT fetch error for %s@%s: %s", symbol, exchange, exc)
+                break
+        
+        logger.info("Fetched %d candles from CCXT for %s@%s", len(all_candles), symbol, exchange)
+        
+        # Insert into database
+        if all_candles:
+            async with pool.acquire() as conn:
+                for candle in all_candles:
+                    ts_ms, open_, high, low, close, volume = candle
+                    ts = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+                    
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO candles (instrument_id, source, timeframe, timestamp, 
+                                                 open, high, low, close, volume)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ON CONFLICT (instrument_id, source, timeframe, timestamp)
+                            DO UPDATE SET open=$5, high=$6, low=$7, close=$8, volume=$9
+                            """,
+                            instrument_id, exchange, "1m", ts,
+                            float(open_), float(high), float(low), float(close), float(volume or 0),
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to insert candle: %s", exc)
+            
+            return len(all_candles)
+        
+        return 0
+    
+    finally:
+        # Clean up exchange connection
+        try:
+            await ex.close()
+        except Exception:
+            pass
+
+
 async def run_quant_track(
     shared_pool: DatabasePool,
     company_pool: DatabasePool,
@@ -1626,9 +1778,47 @@ async def run_quant_track(
         )
         candles = []
 
+    # On-demand fetch for dormant symbols (smart collection)
+    # If we have <50 candles, fetch historical data from CCXT
     if len(candles) < 50:
         logger.info(
-            "Quant track: only %d candles for %s@%s, need >=50; "
+            "Quant track: only %d candles for %s@%s, fetching on-demand from CCXT",
+            len(candles), resolved_symbol, exch,
+        )
+        try:
+            # Calculate candles needed based on timeframe
+            tf_minutes = _tf_to_minutes(_tf)
+            candles_needed = 100 * tf_minutes  # 100 candles at target timeframe
+            # Hard cap at 100 days (144,000 minutes)
+            max_candles = 144000
+            candles_needed = min(candles_needed, max_candles)
+            
+            fetched_count = await _fetch_historical_candles(
+                shared_pool, instrument_id, resolved_symbol or instrument_symbol, exch, candles_needed
+            )
+            
+            if fetched_count > 0:
+                logger.info(
+                    "Quant track: fetched %d candles on-demand for %s@%s",
+                    fetched_count, resolved_symbol, exch,
+                )
+                # Re-query the database
+                candles = await shared_pool.fetch_all(
+                    "SELECT timestamp, open, high, low, close, volume "
+                    "FROM public.candles "
+                    "WHERE instrument_id = $1 AND source = $2 AND timeframe = $3 "
+                    "ORDER BY timestamp DESC LIMIT 100",
+                    (instrument_id, exch, _tf),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Quant track: on-demand fetch failed for %s@%s: %s",
+                resolved_symbol, exch, exc,
+            )
+
+    if len(candles) < 50:
+        logger.info(
+            "Quant track: only %d candles for %s@%s after fetch, need >=50; "
             "attempting CCXT live-price fallback",
             len(candles), resolved_symbol, exch,
         )
