@@ -39,7 +39,7 @@ from .candle_loader import load_candles_sync
 from .ch_writer import ClickHouseWriter
 from .engine import BacktestConfig, run_backtest
 from .indicators import get as get_indicator
-from .queue import BacktestQueue, HEARTBEAT_TTL_S
+from .bt_queue import BacktestQueue, HEARTBEAT_TTL_S
 from .strategies import get as get_strategy
 from shared.utils.db import get_shared_pool
 

@@ -454,7 +454,7 @@ async def _build_data_edge_block(symbol: Optional[str]) -> str:
         sym = symbol.strip().upper()
         # Try multiple forms since competition_trades may store perp-suffixed form
         _perp_re = __import__('re').compile(r":(USDT|USDC|BUSD|USD)$", __import__('re').IGNORECASE)
-        stripped = _perp__re.sub("", sym)
+        stripped = _perp_re.sub("", sym)
         candidates = [stripped] if stripped != sym else [sym]
         if sym not in candidates:
             candidates.append(sym)
@@ -4656,17 +4656,17 @@ class InterpretationService:
                 # "FLUX/USDT Perpetual" -> "FLUX/USDT"
                 # "YB / TetherUS Perpetual" -> "YB/USDT"
                 # "Zcash / U.S. Dollar - 2D - CRYPTO" -> "ZEC/USD"
-                s = __re.sub(r'(?i)\s*perpetual\s*(contract)?\s*$', '', s)
-                s = __re.sub(r'(?i)\s*-\s*\d+[DWMh]\s*-\s*CRYPTO\s*$', '', s)
+                s = _re.sub(r'(?i)\s*perpetual\s*(contract)?\s*$', '', s)
+                s = _re.sub(r'(?i)\s*-\s*\d+[DWMh]\s*-\s*CRYPTO\s*$', '', s)
                 s = s.replace(' / ', '/').replace('TetherUS', 'USDT').replace('TETHERUS', 'USDT')
-                s = __re.sub(r'(?i)/U\.S\.\s*Dollar', '/USD', s)
+                s = _re.sub(r'(?i)/U\.S\.\s*Dollar', '/USD', s)
                 s = s.replace('Bitcoin', 'BTC').replace('Zcash', 'ZEC')
                 # Exchange prefix: "BYBIT:BTCUSDT.P" -> "BTCUSDT.P"
-                s = __re.sub(r"^[A-Z]+:", "", s)
+                s = _re.sub(r"^[A-Z]+:", "", s)
                 # Perp/futures suffixes: .P, /P, :USDT, :USDC, 1!, USDT.P
-                s = __re.sub(r"[.:/]P$", "", s)
-                s = __re.sub(r":USDT$|:USDC$", "", s)
-                s = __re.sub(r"[12]!$", "", s)
+                s = _re.sub(r"[.:/]P$", "", s)
+                s = _re.sub(r":USDT$|:USDC$", "", s)
+                s = _re.sub(r"[12]!$", "", s)
                 # Slash form: "BITTENSOR/USDT" or "YB/TETHERUS"
                 if "/" in s:
                     parts = s.split("/", 1)
@@ -4699,11 +4699,11 @@ class InterpretationService:
                     if _digits and len(_digits.group(1)) >= 3:
                         if "/" in s:
                             _base, _rest = s.split("/", 1)
-                            _clean = __re.sub(r'^\d+', '', _base)
+                            _clean = _re.sub(r'^\d+', '', _base)
                             if _clean and len(_clean) >= 2:
                                 s = f"{_clean}/{_rest}"
                         else:
-                            _clean = __re.sub(r'^\d+', '', s)
+                            _clean = _re.sub(r'^\d+', '', s)
                             if _clean and len(_clean) >= 2:
                                 s = _clean
                 # Add /USDT if we end up with a bare base token

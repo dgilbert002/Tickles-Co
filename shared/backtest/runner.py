@@ -25,7 +25,7 @@ import sys
 import time
 from typing import List, Dict
 
-from backtest.queue import BacktestQueue
+from backtest.bt_queue import BacktestQueue
 from backtest.worker import main as worker_main
 
 log = logging.getLogger("tickles.runner")
