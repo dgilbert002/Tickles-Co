@@ -1679,6 +1679,80 @@ async def _fetch_historical_candles(
         except Exception:
             pass
 
+def _aggregate_to_timeframe(candles_1m: list, target_tf: str) -> list:
+    """Aggregate 1m candles to a higher timeframe.
+    
+    Args:
+        candles_1m: List of candle dicts with timestamp, open, high, low, close, volume
+        target_tf: Target timeframe (e.g., "5m", "15m", "1h", "4h", "1d")
+    
+    Returns:
+        List of aggregated candle dicts
+    """
+    if not candles_1m:
+        return []
+    
+    tf_minutes = _tf_to_minutes(target_tf)
+    if tf_minutes <= 1:
+        return candles_1m  # No aggregation needed
+    
+    # Sort candles by timestamp ascending
+    candles = sorted(candles_1m, key=lambda c: c["timestamp"])
+    
+    # Aggregation: group by timeframe bucket
+    aggregated = []
+    bucket_start = None
+    bucket_candles = []
+    
+    for candle in candles:
+        ts = candle["timestamp"]
+        # Calculate which timeframe bucket this candle belongs to
+        if isinstance(ts, str):
+            ts = __import__('datetime').datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=__import__('datetime').timezone.utc)
+        
+        epoch_seconds = int(ts.timestamp())
+        bucket_key = (epoch_seconds // (tf_minutes * 60)) * (tf_minutes * 60)
+        bucket_time = __import__('datetime').datetime.fromtimestamp(bucket_key, tz=__import__('datetime').timezone.utc)
+        
+        if bucket_start is None:
+            bucket_start = bucket_time
+        
+        if bucket_time != bucket_start:
+            # Flush previous bucket
+            if bucket_candles:
+                aggregated.append({
+                    "timestamp": bucket_start,
+                    "open": bucket_candles[0]["open"],
+                    "high": max(c["high"] for c in bucket_candles),
+                    "low": min(c["low"] for c in bucket_candles),
+                    "close": bucket_candles[-1]["close"],
+                    "volume": sum(c["volume"] for c in bucket_candles),
+                })
+            bucket_start = bucket_time
+            bucket_candles = [candle]
+        else:
+            bucket_candles.append(candle)
+    
+    # Flush last bucket
+    if bucket_candles:
+        aggregated.append({
+            "timestamp": bucket_start,
+            "open": bucket_candles[0]["open"],
+            "high": max(c["high"] for c in bucket_candles),
+            "low": min(c["low"] for c in bucket_candles),
+            "close": bucket_candles[-1]["close"],
+            "volume": sum(c["volume"] for c in bucket_candles),
+        })
+    
+    # Sort descending (newest first) to match DB query order
+    aggregated.sort(key=lambda c: c["timestamp"], reverse=True)
+    return aggregated[:100]  # Return max 100 candles
+
+
+
+
 
 async def run_quant_track(
     shared_pool: DatabasePool,
@@ -1775,6 +1849,14 @@ async def run_quant_track(
         )
         raw_candles = []
 
+    # Aggregate 1m candles to target timeframe on-the-fly
+    if use_1m and raw_candles:
+        candles = _aggregate_to_timeframe(raw_candles, _tf)
+        logger.debug("Quant track: aggregated %d 1m candles to %s -> %d candles",
+                     len(raw_candles), _tf, len(candles))
+    else:
+        candles = raw_candles
+
     # On-demand fetch for dormant symbols (smart collection)
     # If we have <50 candles, fetch historical data from CCXT
     if len(candles) < 50:
@@ -1821,12 +1903,16 @@ async def run_quant_track(
         )
         return await _quant_degraded_from_ccxt(instrument_symbol, exch)
 
-    # Freshness guard on the most recent candle
+    # Freshness guard on the most recent candle.
+    # For higher timeframes, allow the candle to be up to twice its period
+    # old (e.g. a 4h candle closed 3h ago is valid — next hasn't closed yet).
     latest_ts = candles[0]["timestamp"]
+    tf_mins = _tf_to_minutes(_tf)
+    tf_threshold = max(freshness_threshold, tf_mins * 60 * 2)
     try:
         validate_freshness(
             latest_ts,
-            threshold_seconds=freshness_threshold,
+            threshold_seconds=tf_threshold,
             context=f"quant_candles:{instrument_symbol}@{exchange}",
         )
     except StaleDataError as e:
