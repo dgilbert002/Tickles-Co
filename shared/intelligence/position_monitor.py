@@ -1869,26 +1869,39 @@ class PositionMonitor:
                 )
                 if triggered is None:
                     # --- LIVE PRICE FALLBACK (2026-05-30) ---
-                    # Try CCXT live ticker before giving up. For new instruments
-                    # with no candle history, this is the only activation path.
+                    # Try price-feed daemon first, then CCXT direct ticker.
+                    live = None
                     try:
                         live = await fetch_live_price_from_feed(
                             pos["instrument_symbol"])
-                        if live is not None and live > 0:
-                            direction = str(pos.get("direction") or "").lower()
-                            crossed = (
-                                (direction == "long" and live >= entry)
-                                or (direction == "short" and live <= entry)
-                            )
-                            if crossed:
-                                triggered = (now, live)
-                                logger.info(
-                                    "position %s activated via CCXT live price (no candle data): "
-                                    "%s %s entry=%.6g live=%.6g",
-                                    pos_id, pos["instrument_symbol"], direction, entry, live,
-                                )
                     except Exception:
                         pass
+                    if live is None and self._adapters:
+                        try:
+                            for adapter in self._adapters.values():
+                                try:
+                                    tick = await adapter.fetch_ticker(
+                                        pos["instrument_symbol"])
+                                    live = tick.get("last")
+                                    if live:
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+                    if live is not None and live > 0:
+                        direction = str(pos.get("direction") or "").lower()
+                        crossed = (
+                            (direction == "long" and live >= entry)
+                            or (direction == "short" and live <= entry)
+                        )
+                        if crossed:
+                            triggered = (now, live)
+                            logger.info(
+                                "position %s activated via CCXT live price (no candle data): "
+                                "%s %s entry=%.6g live=%.6g",
+                                pos_id, pos["instrument_symbol"], direction, entry, live,
+                            )
 
                 if triggered is None:
                     no_price += 1
