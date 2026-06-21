@@ -747,10 +747,13 @@ class LiveCopyTradeMonitor:
         no_candles = not touch_candles
         if no_candles:
             logger.warning("no candles for %s — entering %s without entry-touch check", sym, agent_name)
-        elif not _entry_touched(touch_candles, entry):
-            logger.info("skip %s for %s: entry %.6f not touched in last %d candles",
-                        sym, agent_name, entry, ENTRY_TOUCH_CANDLES)
-            return
+        elif not trader_pos.get("activated_at"):
+            # Position not yet activated by monitor — must verify candle touch
+            if not _entry_touched(touch_candles, entry):
+                logger.info("skip %s for %s: entry %.6f not touched in last %d candles",
+                            sym, agent_name, entry, ENTRY_TOUCH_CANDLES)
+                return
+        # else: monitor already activated — trust it, no candle check needed
 
         if no_candles:
             # No candle data at all — use tracked_positions.current_price or skip chase check
