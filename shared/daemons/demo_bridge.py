@@ -439,26 +439,45 @@ class DemoBridge:
         # ── Smart Queue proximity gate ──
         # Don't place orders when price is far from entry.  Queued orders
         # wait until price approaches (promoted by _promote_queued).
-        current_price = await self._queue_price(sym)
-        if current_price is None or current_price <= 0:
-            # No price data - queue, don't place blindly (skip if recently queued)
+        # EXCEPTION: if the position_monitor just activated this position
+        # (activated_at within the last 5 minutes), trust the monitor and
+        # place immediately — the entry WAS just touched.
+        bypass_queue = False
+        try:
             pool = await self._ensure_pool()
-            recent = await pool.fetch_one(
-                "SELECT id FROM public.demo_orders "
-                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
-                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
+            activated = await pool.fetch_one(
+                "SELECT activated_at FROM public.tracked_positions WHERE id = $1",
                 (tp_id,))
-            if recent:
+            if activated and activated["activated_at"]:
+                age_s = (datetime.now(timezone.utc) - activated["activated_at"]).total_seconds()
+                if age_s < 300:  # activated less than 5 minutes ago
+                    LOG.debug("Signal #%d %s: activated %ds ago, bypassing smart queue",
+                              tp_id, sym, int(age_s))
+                    bypass_queue = True
+        except Exception:
+            pass  # best-effort; fall through to normal gate
+
+        if not bypass_queue:
+            current_price = await self._queue_price(sym)
+            if current_price is None or current_price <= 0:
+                # No price data - queue, don't place blindly (skip if recently queued)
+                pool = await self._ensure_pool()
+                recent = await pool.fetch_one(
+                    "SELECT id FROM public.demo_orders "
+                    "WHERE tracked_position_id = $1 AND exchange = 'queue' "
+                    "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
+                    (tp_id,))
+                if recent:
+                    return False
+                await pool.execute(
+                    "INSERT INTO public.demo_orders "
+                    "(exchange, account_name, symbol, direction, paper_entry, "
+                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                    "ON CONFLICT DO NOTHING",
+                    (sym, direction, entry, sl, tp, tp_id))
+                LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
                 return False
-            await pool.execute(
-                "INSERT INTO public.demo_orders "
-                "(exchange, account_name, symbol, direction, paper_entry, "
-                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                "ON CONFLICT DO NOTHING",
-                (sym, direction, entry, sl, tp, tp_id))
-            LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
-            return False
 
         dist_pct = _dist_to_entry(current_price, entry) * 100.0
         if dist_pct > SMART_QUEUE_PLACE_PCT:
