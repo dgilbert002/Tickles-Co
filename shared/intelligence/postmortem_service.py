@@ -770,7 +770,7 @@ class PostMortemService:
                 _tags = json.loads(_tags)
             if isinstance(_tags, list) and _tags:
                 extra_blocks.append(
-                    "Techniques the vision LLM observed on the entry chart (max 5):\n"
+                    "TECHNIQUE VALIDATION (MANDATORY - this section MUST be answered):\n"
                     + json.dumps(_tags[:5])
                     + "\nFor EACH technique, judge whether it actually played out in the candle "
                     "data. Return this in techniques_validated as a list of "
