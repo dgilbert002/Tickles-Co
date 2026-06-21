@@ -1369,22 +1369,30 @@ class DemoBridge:
                 continue
             sym = r["symbol"]
 
-            # Get current price + candles
-            price = await self._queue_price(sym)
-            if price is None:
+            # Check candle-wick proximity (same as placement gate)
+            candles = await self._queue_candles(sym, SMART_QUEUE_TOUCH_CANDLES)
+            if not candles:
                 continue
-
-            dist = _dist_to_entry(price, entry)
-            dist_pct = dist * 100.0
+            
+            dist_pct = 999.0
+            target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
+            if r["direction"] == DIRECTION_LONG:
+                for c in candles:
+                    lo = c[3] if isinstance(c, list) else c.get("low", 0)
+                    if isinstance(lo, (int, float)) and entry > 0:
+                        if lo <= entry * target_band:
+                            dist_pct = abs(lo - entry) / entry * 100.0
+                            break
+            else:
+                for c in candles:
+                    hi = c[2] if isinstance(c, list) else c.get("high", 0)
+                    if isinstance(hi, (int, float)) and entry > 0:
+                        if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
+                            dist_pct = abs(hi - entry) / entry * 100.0
+                            break
 
             if dist_pct > SMART_QUEUE_PLACE_PCT:
                 continue  # still too far
-
-            # Within threshold - verify wick touch
-            candles = await self._queue_candles(
-                sym, SMART_QUEUE_TOUCH_CANDLES)
-            if not _entry_touched(candles, entry):
-                continue  # within range but no wick kiss yet
 
             # Promote: status queued → pending so _mirror_signal picks it up
             await pool.execute(
