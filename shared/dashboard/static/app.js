@@ -384,7 +384,7 @@ function radarEmptyState(m){
 function renderUnifiedTable(rows){
   let r=rows;const f=$('#unified-filter')?.value;if(f)r=filterRows(r,f,['symbol','trader_display_name','trader_handle_normalized','position_status','headline']);
   table('#unified-list-table',[
-    {label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},
+    {key:'symbol',label:'Signal',sortable:true},{key:'side',label:'Side',sortable:true},{key:'entry',label:'Entry',num:1,sortable:true},{key:'sl',label:'SL',num:1,sortable:true},{key:'tp',label:'TP1',num:1,sortable:true},
     {label:'Live',num:1},{label:'Δ entry',num:1},{label:'Win',num:1},{label:'Status'},{label:'Source'}
   ],[sigRows(r)]);wireRows()
 }
@@ -644,7 +644,7 @@ async function renderFloorSignals(){
     let appr=all.filter(r=>isPreEntry(r)||isJustFilled(r)).sort((a,b)=>signalDistance(a)-signalDistance(b));
     appr=filterRows(appr,$('#floor-signal-filter')?.value,['symbol','instrument_symbol','trader_display_name','headline']);
     if(appr.length){
-      table('#floor-signals',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(appr,12)]);
+      table('#floor-signals',[{key:'symbol',label:'Signal',sortable:true},{key:'side',label:'Side',sortable:true},{key:'entry',label:'Entry',num:1,sortable:true},{key:'sl',label:'SL',num:1,sortable:true},{key:'tp',label:'TP1',num:1,sortable:true},{label:'Δ entry',num:1},{label:'Status'},{label:'Call'}],[sigRows(appr,12)]);
     }else{
       const hit=all.filter(r=>String(r.position_status||'').toLowerCase()==='open'&&r.position_activated_at)
         .sort((a,b)=>Date.parse(b.position_activated_at)-Date.parse(a.position_activated_at)).slice(0,3);
@@ -1671,7 +1671,7 @@ async function refreshHistory(){
     $('#settings-history').innerHTML=`<table class="data-table"><thead><tr><th>When</th><th>Slot</th><th>Old</th><th>New</th><th>Actor</th></tr></thead><tbody>${histBody}</tbody></table>`;
   }catch(e){console.warn('settings: history refresh failed',e);}
 }
-function renderSignalsTable(rows){table('#signals-table',[{label:'Signal'},{label:'Side'},{label:'Entry',num:1},{label:'SL',num:1},{label:'TP1',num:1},{label:'Δ entry',num:1},{label:'Status'},{label:'Call text'}],[sigRows(rows)]);wireRows()}
+function renderSignalsTable(rows){table('#signals-table',[{key:'symbol',label:'Signal',sortable:true},{key:'side',label:'Side',sortable:true},{key:'entry',label:'Entry',num:1,sortable:true},{key:'sl',label:'SL',num:1,sortable:true},{key:'tp',label:'TP1',num:1,sortable:true},{label:'Δ entry',num:1},{label:'Status'},{label:'Call text'}],[sigRows(rows)]);wireRows()}
 /* Round 12 (2026-05-24): renderPositionsTable removed.
    Positions tab now uses Live/Historic split via renderPositionsLive() and
    renderPositionsHistoric(). The legacy single-table renderer had no callers

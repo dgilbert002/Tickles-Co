@@ -137,12 +137,27 @@ async def grade_techniques_for_position(
             planned_rr = abs(tp_f - entry_f) / abs(entry_f - sl_f)
         # Validation map from the postmortem (technique -> played_out)
         vmap = {}
-        if isinstance(validations, list):
+        has_validations = False
+        if isinstance(validations, list) and len(validations) > 0:
             for v in validations:
                 if isinstance(v, dict) and v.get("technique"):
                     t_norm = _norm_technique(str(v["technique"]))
                     if t_norm:
                         vmap[t_norm] = v.get("played_out")
+                        has_validations = True
+
+        # Skip grading entirely when the postmortem LLM didn't validate.
+        # Auto-scoring every technique on every trade creates false data —
+        # a winning trade doesn't mean all 5 techniques were correct, and
+        # a losing trade doesn't mean all 5 were wrong.  Only grade when
+        # the LLM explicitly says "this played out" or "this didn't."
+        if not has_validations:
+            logger.debug(
+                "position %s: no techniques_validated from postmortem — "
+                "skipping technique grading (no signal)",
+                position_id,
+            )
+            return 0
         trader = (row["trader_handle"] or "")[:120]
         base = _symbol_base(row["instrument_symbol"])
         tf = (row["timeframe"] or "")[:8]
