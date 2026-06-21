@@ -5009,8 +5009,11 @@ class InterpretationService:
                 # Generate channel-specific actor_id for Telegram (was hardcoded to rose_ch)
                 if news_source == "telegram":
                     import re as _regex
-                    # Sanitize channel name to a valid identifier: "BCUSA" -> "bcusa"
-                    chan_tag = _regex.sub(r"[^a-z0-9_]", "_", (media_row.get("channel_name") or "unknown").lower().strip())[:20]
+                    # Extract first word of channel name as tag (e.g. "binance killers @DigiLeak" → "binance")
+                    chan_name = (media_row.get("channel_name") or "unknown").lower().strip()
+                    chan_tag = chan_name.split()[0] if chan_name else "unknown"
+                    # Keep only a-z0-9 (e.g. "rose⚡" → "rose")
+                    chan_tag = _regex.sub(r"[^a-z0-9]", "", chan_tag)[:20]
                     ch_actor_id = f"{company}_{chan_tag}_ch"
                 else:
                     ch_actor_id = f"{company}_chart_hacker"
