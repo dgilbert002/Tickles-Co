@@ -753,7 +753,16 @@ class LiveCopyTradeMonitor:
                 logger.info("skip %s for %s: entry %.6f not touched in last %d candles",
                             sym, agent_name, entry, ENTRY_TOUCH_CANDLES)
                 return
-        # else: monitor already activated — trust it, no candle check needed
+        
+        # Chase check: even if activated, don't enter if price has run too far past entry.
+        # Paper should mirror real trading — entering at 8% past entry is unrealistic.
+        if trader_pos.get("current_price"):
+            cur = float(trader_pos["current_price"])
+            chase_dist = _distance_to_entry(cur, entry) * 100.0
+            if chase_dist > 5.0:  # same threshold as smart queue
+                logger.info("skip %s for %s: entry %.6f too far (%.1f%% past, >5%% chase limit)",
+                            sym, agent_name, entry, chase_dist)
+                return
 
         if no_candles:
             # No candle data at all — use tracked_positions.current_price or skip chase check
