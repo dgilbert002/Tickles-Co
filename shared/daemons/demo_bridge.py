@@ -471,7 +471,7 @@ class DemoBridge:
                 if direction == DIRECTION_LONG:
                     # Long: place when price dips within 5% above entry
                     for c in candles:
-                        lo = c[3] if isinstance(c, list) else c.get("low", 0)
+                        lo = c.get("low", 0)
                         if isinstance(lo, (int, float)) and entry > 0:
                             if lo <= entry * target_band:
                                 dist_pct = abs(lo - entry) / entry * 100.0
@@ -479,7 +479,7 @@ class DemoBridge:
                 else:
                     # Short: place when price rises within 5% below entry
                     for c in candles:
-                        hi = c[2] if isinstance(c, list) else c.get("high", 0)
+                        hi = c.get("high", 0)
                         if isinstance(hi, (int, float)) and entry > 0:
                             if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
                                 dist_pct = abs(hi - entry) / entry * 100.0
@@ -1378,14 +1378,14 @@ class DemoBridge:
             target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
             if r["direction"] == DIRECTION_LONG:
                 for c in candles:
-                    lo = c[3] if isinstance(c, list) else c.get("low", 0)
+                    lo = c.get("low", 0)
                     if isinstance(lo, (int, float)) and entry > 0:
                         if lo <= entry * target_band:
                             dist_pct = abs(lo - entry) / entry * 100.0
                             break
             else:
                 for c in candles:
-                    hi = c[2] if isinstance(c, list) else c.get("high", 0)
+                    hi = c.get("high", 0)
                     if isinstance(hi, (int, float)) and entry > 0:
                         if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
                             dist_pct = abs(hi - entry) / entry * 100.0

@@ -1880,12 +1880,15 @@ class PositionMonitor:
                         try:
                             for adapter in self._adapters.values():
                                 try:
-                                    tick = await adapter.fetch_ticker(
-                                        pos["instrument_symbol"])
+                                    tick = await asyncio.wait_for(
+                                        adapter.fetch_ticker(
+                                            pos["instrument_symbol"]),
+                                        timeout=4.0,
+                                    )
                                     live = tick.get("last")
                                     if live:
                                         break
-                                except Exception:
+                                except (asyncio.TimeoutError, Exception):
                                     continue
                         except Exception:
                             pass
