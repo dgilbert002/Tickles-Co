@@ -2497,7 +2497,7 @@ def _coerce_level(value: Any) -> Optional[float]:
         if isinstance(value, (int, float)):
             num = float(value)
         elif isinstance(value, str):
-            cleaned = __re.sub(r"[^0-9.\-]", "", value)
+            cleaned = _re.sub(r"[^0-9.\-]", "", value)
             if not cleaned or cleaned in ("-", ".", "-."):
                 return None
             num = float(cleaned)
@@ -3089,7 +3089,7 @@ def _parse_price_level(value: Any) -> Optional[float]:
         return None
 
     # Strip surrounding prose like "Below", "Above", "Around", "~"
-    text = __re.sub(r"^(?:below|above|around|approx\.?|~)\s*", "", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"^(?:below|above|around|approx\.?|~)\s*", "", text, flags=_re.IGNORECASE)
 
     # Strip currency symbols, commas, spaces (but preserve 'k' for suffix check)
     text = text.replace(",", "").replace(" ", "").replace("$", "")
