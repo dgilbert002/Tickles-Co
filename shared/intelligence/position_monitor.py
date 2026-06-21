@@ -1891,21 +1891,10 @@ class PositionMonitor:
                             pass
                     if live is not None and live > 0:
                         direction = str(pos.get("direction") or "").lower()
-                        # Only activate if entry is PRACTICALLY at current price.
-                        # If entry is 8% away (RENDER at 1.68 with entry 1.84),
-                        # the entry was touched hours ago — not relevant.
-                        live_dist = abs(live - entry) / entry if entry > 0 else 999
-                        if live_dist > 0.01:  # more than 1% away — no recent touch
-                            logger.debug(
-                                "position %s: live price %.4f too far from entry %.4f "
-                                "(%.1f%% — skip activation)",
-                                pos_id, live, entry, live_dist * 100,
-                            )
-                        else:
-                            crossed = (
-                                (direction == "long" and live >= entry)
-                                or (direction == "short" and live <= entry)
-                            )
+                        crossed = (
+                            (direction == "long" and live >= entry)
+                            or (direction == "short" and live <= entry)
+                        )
                         if crossed:
                             triggered = (now, live)
                             logger.info(
