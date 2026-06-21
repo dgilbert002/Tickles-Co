@@ -1754,21 +1754,26 @@ async def run_quant_track(
     logger.debug("Quant track: %s@%s timeframe=%s (hint=%s)",
                  instrument_symbol, exchange, _tf, timeframe_hint)
 
-    # Fetch last 100 candles at the resolved timeframe (shared DB)
+    # The daemon only collects 1m candles. Always query 1m and aggregate
+    # to the target timeframe on-the-fly.
+    tf_minutes = _tf_to_minutes(_tf)
+    use_1m = tf_minutes > 1  # Only aggregate if target is >1m
+
+    query_tf = "1m" if use_1m else _tf
     try:
-        candles = await shared_pool.fetch_all(
+        raw_candles = await shared_pool.fetch_all(
             "SELECT timestamp, open, high, low, close, volume "
             "FROM public.candles "
             "WHERE instrument_id = $1 AND source = $2 AND timeframe = $3 "
-            "ORDER BY timestamp DESC LIMIT 100",
-            (instrument_id, exch, _tf),
+            "ORDER BY timestamp DESC LIMIT 500",
+            (instrument_id, exch, query_tf),
         )
     except Exception as exc:
         logger.warning(
             "Quant track: candles query failed for %s@%s: %s",
             resolved_symbol, exch, exc,
         )
-        candles = []
+        raw_candles = []
 
     # On-demand fetch for dormant symbols (smart collection)
     # If we have <50 candles, fetch historical data from CCXT
