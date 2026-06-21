@@ -405,8 +405,8 @@ def _quant_symbol_candidates(symbol: str) -> List[str]:
         return []
     s = symbol.strip()
     out: List[str] = []
-    # Strip :USDT / :USDC / :BUSD / :USD perp suffix (same as _PERP_SUFFIX_RE)
-    stripped = _PERP_SUFFIX_RE.sub("", s)
+    # Strip options suffix first, then perp suffix (same as _PERP_SUFFIX_RE)
+    stripped = _PERP_SUFFIX_RE.sub("", _OPTIONS_SUFFIX_RE.sub("", s))
     if stripped != s:
         out.append(stripped)
     if s not in out:
