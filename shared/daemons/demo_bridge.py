@@ -460,7 +460,32 @@ class DemoBridge:
             LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
             return False
 
-        dist_pct = _dist_to_entry(current_price, entry) * 100.0
+        # Replace snapshot price with candle-wick proximity.
+        # Same check the paper engine uses — if any recent 1m candle
+        # wick was within 5% of entry, the order is close enough to place.
+        dist_pct = 999.0  # default: assume far
+        try:
+            candles = await self._queue_candles(sym, 60)
+            if candles:
+                target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
+                if direction == DIRECTION_LONG:
+                    # Long: place when price dips within 5% above entry
+                    for c in candles:
+                        lo = c[3] if isinstance(c, list) else c.get("low", 0)
+                        if isinstance(lo, (int, float)) and entry > 0:
+                            if lo <= entry * target_band:
+                                dist_pct = abs(lo - entry) / entry * 100.0
+                                break
+                else:
+                    # Short: place when price rises within 5% below entry
+                    for c in candles:
+                        hi = c[2] if isinstance(c, list) else c.get("high", 0)
+                        if isinstance(hi, (int, float)) and entry > 0:
+                            if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
+                                dist_pct = abs(hi - entry) / entry * 100.0
+                                break
+        except Exception:
+            pass
         if dist_pct > SMART_QUEUE_PLACE_PCT:
             # Beyond threshold - queue, don't place (skip if recently queued)
             pool = await self._ensure_pool()
