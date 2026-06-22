@@ -205,13 +205,6 @@ class DemoBridge:
                                     key, prev, usdt, prev)
                         usdt = prev
                         free_usdt = usdt
-                    # Sanity floor: if balance dropped >90%, keep prev
-                    prev = self._acct_balance.get(key)
-                    if prev and prev > 0 and usdt < prev * 0.1:
-                        LOG.warning("balance sanity: %s dropped %.2f->%.2f — keeping %.2f",
-                                    key, prev, usdt, prev)
-                        usdt = prev
-                        free_usdt = usdt
                     self._acct_balance[key] = usdt
                     await pool.execute(
                         "UPDATE public.exchange_accounts "
@@ -1136,43 +1129,7 @@ class DemoBridge:
                         pass
                     continue
 
-                # ── BE-lock check (runs for BOTH existing and new positions) ──
-                if "be_lock" in (agent_id or "") and entry > 0 and mark > 0:
-                    be_existing = bool(existing)
-                    already_locked = False
-                    if be_existing:
-                        meta_row = await pool.fetch_one(
-                            "SELECT metadata FROM public.demo_orders WHERE id=%s",
-                            (existing["id"],))
-                        if meta_row and meta_row.get("metadata"):
-                            already_locked = bool((meta_row["metadata"] or {}).get("be_locked"))
-                    if not already_locked:
-                        pnl_pct = ((mark - entry) / entry) * 100.0
-                        if direction == "short":
-                            pnl_pct = -pnl_pct
-                        threshold = self._demo_sizing("demo_be_lock_threshold_pct", 5.0)
-                        offset   = self._demo_sizing("demo_be_lock_offset_pct", 0.002)
-                        if pnl_pct >= threshold:
-                            new_sl = entry * (1.0 + offset) if direction == "long" else entry * (1.0 - offset)
-                            ok = await self._adapter.modify_sl(
-                                exchange=ex, account_name=acct_name,
-                                symbol=sym, sl_price=new_sl, direction=direction,
-                                size=abs(contracts))
-                            if ok:
-                                target_id = existing["id"] if be_existing else None
-                                if target_id:
-                                    await pool.execute(
-                                        "UPDATE public.demo_orders SET "
-                                        "paper_sl=%s, "
-                                        "metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), "
-                                        "  '{be_locked}', 'true'::jsonb), "
-                                        "updated_at=NOW() WHERE id=%s",
-                                        (round(new_sl, 8), target_id))
-                                LOG.info("BE-LOCK %s/%s %s %s @+%.1f%% → SL=%.6g (%s)",
-                                         ex, acct_name, sym, direction, pnl_pct,
-                                         new_sl, "ok" if ok else "failed")
-
-                # New position - try to link it to a tracked_position so the
+                # ── Paper-vs-demo linking ──
                 # dashboard can do paper-vs-demo comparison (drift, slip, etc.).
                 tp_id = None
                 _paper_entry = None
@@ -1393,6 +1350,10 @@ class DemoBridge:
 
             if dist_pct > SMART_QUEUE_PLACE_PCT:
                 continue  # still too far
+
+            # Verify a wick actually touched entry (not just proximity)
+            if not _entry_touched(candles, entry):
+                continue  # within range but no wick kiss yet
 
             # Promote: status queued → pending so _mirror_signal picks it up
             await pool.execute(
