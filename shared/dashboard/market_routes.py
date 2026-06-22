@@ -2445,16 +2445,23 @@ async def handle_mirror_config(request: web.Request) -> web.Response:
     """GET/POST/DELETE /api/mirror-config — agent to demo account assignments."""
     pool = await get_shared_pool()
     if request.method == "GET":
+        # Return ALL contest agents, including unassigned ones
         rows = await pool.fetch_all("""
-            SELECT cae.agent_id, ea.account_name, ea.id as account_id, ea.exchange
-            FROM public.competition_agent_exchanges cae
-            JOIN public.exchange_accounts ea ON ea.id = cae.exchange_account_id
-            WHERE cae.is_active = TRUE AND ea.is_active = TRUE
-            ORDER BY cae.agent_id, cae.priority
+            SELECT cp.agent_id,
+                   ea.account_name, ea.id as account_id, ea.exchange,
+                   cae.id IS NOT NULL as is_assigned
+            FROM public.contest_participants cp
+            LEFT JOIN public.competition_agent_exchanges cae
+                ON cae.agent_id = cp.agent_id AND cae.is_active = TRUE
+            LEFT JOIN public.exchange_accounts ea
+                ON ea.id = cae.exchange_account_id AND ea.is_active = TRUE
+            WHERE cp.contest_id = 'copy-trade-scenarios'
+            ORDER BY cp.agent_id, cae.priority
         """)
         return _json({"ok": True, "mappings": [
             {"agent_id": r["agent_id"], "account_name": r["account_name"],
-             "account_id": r["account_id"], "exchange": r["exchange"]}
+             "account_id": r["account_id"], "exchange": r["exchange"],
+             "is_assigned": r["is_assigned"]}
             for r in rows
         ]})
     if request.method == "DELETE":
