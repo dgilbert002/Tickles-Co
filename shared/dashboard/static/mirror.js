@@ -1,6 +1,6 @@
 /* Mirror Config — agent to demo account assignment + Exchange Accounts */
 function renderMirrorConfig(){
-  var agents=["copy_spot_seq","copy_lev_parallel","copy_lev_be_lock","copy_opt_spot_seq","copy_opt_lev_parallel","copy_opt_lev_be_lock","copy_charthacker","copy_spot_lev_3x","copy_rose_a","copy_rose_b","copy_rose_c","copy_lev_3pct"];
+  var agents=["copy_spot_seq","copy_lev_parallel","copy_lev_be_lock","copy_opt_spot_seq","copy_opt_lev_parallel","copy_opt_lev_be_lock","copy_charthacker","copy_spot_lev_3x","copy_rose_a","copy_rose_b","copy_rose_c","copy_lev_3pct","copy_bcusa_a","copy_bcusa_b","copy_bcusa_c","copy_binance_a","copy_binance_b","copy_binance_c","copy_ufo_a","copy_ufo_b","copy_ufo_c"];
   (async function(){
     var mappings={};
     try{
