@@ -418,8 +418,15 @@ class CcxtExecutionAdapter:
         # ── SL/TP params ──
         params: Dict[str, Any] = {}
         if sl or tp:
-            if ex == "bybit" or ex == "toobit":
-                # Bybit/Toobit: flat string params (stopLoss/takeProfit)
+            if ex == "toobit":
+                # Toobit ACCEPTS flat string stopLoss/takeProfit in createOrder
+                # (verified live). Attached immediately on LIMIT orders.
+                if sl:
+                    params["stopLoss"] = str(sl)
+                if tp:
+                    params["takeProfit"] = str(tp)
+            elif ex == "bybit":
+                # Bybit: flat string params (stopLoss/takeProfit)
                 if sl:
                     params["stopLoss"] = str(sl)
                 if tp:
@@ -434,10 +441,6 @@ class CcxtExecutionAdapter:
                     params["stopLossPrice"] = str(sl)
                 if tp:
                     params["takeProfitPrice"] = str(tp)
-            elif ex == "toobit":
-                # Toobit rejects SL/TP in create_order params.
-                # Place entry clean — stops not attached at order time.
-                pass
             else:
                 if sl:
                     params["stopLoss"] = {"price": sl}

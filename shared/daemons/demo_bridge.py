@@ -862,6 +862,23 @@ class DemoBridge:
                          r["exchange_order_id"], avg,
                          f"{slip:.4%}" if slip is not None else "n/a",
                          entry_fee)
+                # Attach SL/TP for Toobit (must post-fill — createOrder rejects them)
+                if r["exchange"] == "toobit":
+                    try:
+                        sl_row = await pool.fetch_one(
+                            "SELECT paper_sl, paper_tp, direction FROM demo_orders WHERE id = %s",
+                            (r["id"],))
+                        if sl_row and sl_row["paper_sl"] and sl_row["paper_tp"]:
+                            await self._adapter._toobit_set_sl_tp(
+                                client, r["symbol"],
+                                float(sl_row["paper_sl"]), float(sl_row["paper_tp"]),
+                                sl_row["direction"])
+                            LOG.info("Toobit SL/TP attached for order %s (SL=%.2f TP=%.2f)",
+                                     r["exchange_order_id"],
+                                     float(sl_row["paper_sl"]), float(sl_row["paper_tp"]))
+                    except Exception as sl_exc:
+                        LOG.warning("Toobit SL/TP attach failed for order %s: %s",
+                                    r["exchange_order_id"], sl_exc)
                 flog("fill", demo_order_id=r["id"], agent=r["agent_id"],
                      exchange=r["exchange"], account=r["account_name"],
                      symbol=r["symbol"], direction=r["direction"],
