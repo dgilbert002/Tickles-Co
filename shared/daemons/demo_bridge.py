@@ -94,6 +94,15 @@ AGENT_MODE: Dict[str, str] = {
     "copy_opt_lev_be_lock": "lev_5pct",
     "copy_rose_b":          "lev_5pct",
     "copy_rose_c":          "lev_5pct",
+    "copy_bcusa_a":         "spot_seq",
+    "copy_bcusa_b":         "lev_5pct",
+    "copy_bcusa_c":         "lev_5pct",
+    "copy_binance_a":       "spot_seq",
+    "copy_binance_b":       "lev_5pct",
+    "copy_binance_c":       "lev_5pct",
+    "copy_ufo_a":           "spot_seq",
+    "copy_ufo_b":           "lev_5pct",
+    "copy_ufo_c":           "lev_5pct",
 }
 # Max concurrent OPEN demo positions per account, by mode - mirrors the paper
 # agent's concurrency rule so the demo never over-places and exhausts margin.
@@ -316,11 +325,8 @@ class DemoBridge:
         """
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
-            "SELECT DISTINCT tracked_position_id FROM public.competition_trades "
-            "WHERE contest_id = 'copy-trade-scenarios' AND tracked_position_id IS NOT NULL "
-            "UNION "
             "SELECT DISTINCT tracked_position_id FROM public.demo_orders "
-            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled','queued','cancelled','rejected')"
+            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled')"
         )
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
@@ -362,7 +368,7 @@ class DemoBridge:
         rows = await pool.fetch_all(
             "SELECT tp.id, tp.actor_id, tp.instrument_symbol, tp.direction, "
             "tp.entry_price, tp.stop_loss, tp.take_profit_1, tp.status, "
-            "tp.signal_timestamp, tp.notional_usd "
+            "tp.signal_timestamp, tp.notional_usd, tp.activated_at "
             "FROM tracked_positions tp "
             "WHERE tp.status IN ('pending', 'open') "
             "AND tp.entry_price > 0 "
@@ -480,15 +486,24 @@ class DemoBridge:
         except Exception:
             pass
         if dist_pct > SMART_QUEUE_PLACE_PCT:
-            # Beyond threshold - queue, don't place (skip if recently queued)
-            pool = await self._ensure_pool()
-            recent = await pool.fetch_one(
-                "SELECT id FROM public.demo_orders "
-                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
-                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
-                (tp_id,))
-            if recent:
-                return False
+            # Beyond threshold — but position_monitor already activated this.
+            # Trust the monitor: if activated_at is set, entry WAS touched.
+            # Place immediately rather than queuing based on stale candle wicks.
+            activated_at = signal.get("activated_at")
+            if activated_at:
+                LOG.debug("Signal #%d %s: activated %s, placing despite distance",
+                          tp_id, sym, activated_at)
+                dist_pct = 0  # force through the gate
+            else:
+                # Beyond threshold - queue, don't place (skip if recently queued)
+                pool = await self._ensure_pool()
+                recent = await pool.fetch_one(
+                    "SELECT id FROM public.demo_orders "
+                    "WHERE tracked_position_id = $1 AND exchange = 'queue' "
+                    "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
+                    (tp_id,))
+                if recent:
+                    return False
             await pool.execute(
                 "INSERT INTO public.demo_orders "
                 "(exchange, account_name, symbol, direction, paper_entry, "
@@ -502,7 +517,7 @@ class DemoBridge:
         # Within threshold - verify wick touch before placing
         candles = await self._queue_candles(
             sym, SMART_QUEUE_TOUCH_CANDLES)
-        if not _entry_touched(candles, entry):
+        if not signal.get("activated_at") and not _entry_touched(candles, entry):
             # Close but no wick yet - queue anyway (skip if recently queued)
             pool = await self._ensure_pool()
             recent = await pool.fetch_one(
