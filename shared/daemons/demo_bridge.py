@@ -504,16 +504,16 @@ class DemoBridge:
                     (tp_id,))
                 if recent:
                     return False
-            await pool.execute(
-                "INSERT INTO public.demo_orders "
-                "(exchange, account_name, symbol, direction, paper_entry, "
-                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                "ON CONFLICT DO NOTHING",
-                (sym, direction, entry, sl, tp, tp_id))
-            LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
-                      tp_id, sym, direction, entry, dist_pct)
-            return False
+                await pool.execute(
+                    "INSERT INTO public.demo_orders "
+                    "(exchange, account_name, symbol, direction, paper_entry, "
+                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
+                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
+                    "ON CONFLICT DO NOTHING",
+                    (sym, direction, entry, sl, tp, tp_id))
+                LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
+                          tp_id, sym, direction, entry, dist_pct)
+                return False
         # Within threshold - verify wick touch before placing
         candles = await self._queue_candles(
             sym, SMART_QUEUE_TOUCH_CANDLES)
