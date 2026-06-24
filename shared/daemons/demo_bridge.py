@@ -1539,8 +1539,9 @@ class DemoBridge:
         if signals:
             LOG.info("Tick: %d new signals to mirror", len(signals))
             for s in signals:
-                was_placed = await self._mirror_signal(s, mappings)
-                self._mirrored.add(s["id"])
+                placed = await self._mirror_signal(s, mappings)
+                if placed:
+                    self._mirrored.add(s["id"])
                 await asyncio.sleep(0.3)  # Rate limit
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
