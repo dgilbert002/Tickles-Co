@@ -597,7 +597,7 @@ async def _recall_relevant_memories(
     trader_handle: Optional[str],
     limit_self: int = 4,
     limit_trader: int = 3,
-) -> str:
+) -> tuple:
     """Pull chart_hacker's relevant past lessons from mem0.
 
     Returns a formatted string ready to inject into the LLM prompt's
@@ -702,13 +702,19 @@ async def _recall_relevant_memories(
     except Exception:
         pass  # best-effort -- never block analysis on edge data
 
-    return (
+    text = (
         "PAST MEMORIES (use these to inform your analysis -- your own past lessons "
         "and observations about this trader). Apply these as context, but base your "
         "actual extraction on what you see in the chart:\n\n"
         + "\n\n".join(blocks)
         + "\n"
     )
+    return text, {
+        "self_ids": [it.get("id") if isinstance(it, dict) else None for it in (self_items or [])],
+        "self_metadata": [it.get("metadata") if isinstance(it, dict) else {} for it in (self_items or [])],
+        "trader_ids": [it.get("id") if isinstance(it, dict) else None for it in (trader_items or [])],
+        "trader_metadata": [it.get("metadata") if isinstance(it, dict) else {} for it in (trader_items or [])],
+    }
 
 
 def _param_hash(

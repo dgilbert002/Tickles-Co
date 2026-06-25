@@ -170,10 +170,46 @@ class EdgeScorerService:
             start,
         )
 
+        # Compute skill_score from the C1-C5 components
+        # C1: consistency, C2: discipline, C3: reasoning_clarity, C4: recall_hit, C5: agreement
+        c1 = 0.0; c1_avail = False
+        c2 = 0.0; c2_avail = False
+        c3 = 0.0; c3_avail = False
+        c5 = 0.0; c5_avail = False
+        for pm in postmortems:
+            rs = pm.get("reasoning_clarity_score")
+            if rs is not None:
+                c3 = max(c3, float(rs))
+                c3_avail = True
+        for op in opinions:
+            if op.get("would_take_trade") is not None:
+                c5 = 0.5 + (0.5 if op["would_take_trade"] else 0.0)
+                c5_avail = True
+                break
+        if recall_hit_rate is not None:
+            c4 = recall_hit_rate
+            c4_avail = True
+        else:
+            c4 = None
+            c4_avail = False
+        
+        components = {}
+        if c1_avail: components["consistency"] = c1
+        if c2_avail: components["discipline"] = c2
+        if c3_avail: components["reasoning_clarity"] = c3
+        if c4_avail: components["recall_hit"] = c4
+        if c5_avail: components["agreement_with_critic"] = c5
+        
+        if components:
+            skill_score, _dropped = _compute_skill(components)
+        else:
+            skill_score = None
+
         return ScorerInputs(
             closed_positions=list(closed_positions),
             postmortems=list(postmortems),
             opinions=list(opinions),
+            skill_score=skill_score,
         )
 
     async def _upsert(
