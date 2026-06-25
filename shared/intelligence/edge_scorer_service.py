@@ -176,11 +176,9 @@ class EdgeScorerService:
         c2 = 0.0; c2_avail = False
         c3 = 0.0; c3_avail = False
         c5 = 0.0; c5_avail = False
-        for pm in postmortems:
-            rs = pm.get("reasoning_clarity_score")
-            if rs is not None:
-                c3 = max(c3, float(rs))
-                c3_avail = True
+        # C3 reasoning_clarity: the column is hardcoded NULL in the SELECT.
+        # Skip it - renormalization handles missing components.
+        c3_avail = False
         for op in opinions:
             if op.get("would_take_trade") is not None:
                 c5 = 0.5 + (0.5 if op["would_take_trade"] else 0.0)
