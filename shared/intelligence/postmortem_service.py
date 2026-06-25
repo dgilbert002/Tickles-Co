@@ -1011,10 +1011,31 @@ class PostMortemService:
             )
             return
 
+        parsed = None
+        used_model = None
+        latency_ms = 0
         try:
             parsed, latency_ms, used_model = await self._call_llm(
                 system_prompt, user_prompt, correlation_id
             )
+        except ValueError as exc:
+            # JSON parse failure (truncated output / non-JSON) - retry with
+            # a smaller candle window to fit in the model's context window.
+            logger.warning(
+                "postmortem: JSON parse failed for pos %s, retrying with fewer candles: %s",
+                pos_id, exc)
+            try:
+                reduced_candles = candles[-15:] if len(candles) > 15 else candles
+                user_prompt_short = self._build_user_prompt(position, reduced_candles)
+                parsed, latency_ms, used_model = await self._call_llm(
+                    system_prompt, user_prompt_short, correlation_id
+                )
+            except Exception as retry_exc:
+                logger.exception(
+                    "postmortem: LLM call failed for position_id=%s (after retry): %s", pos_id, retry_exc
+                )
+                await conn.execute(_UPDATE_STATUS_SQL, "failed", pos_id)
+                return
         except Exception as exc:
             logger.exception(
                 "postmortem: LLM call failed for position_id=%s: %s", pos_id, exc
