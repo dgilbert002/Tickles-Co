@@ -1426,21 +1426,22 @@ class DemoBridge:
                 continue
 
             price = await self._queue_price(r["symbol"])
-            if price is None:
-                continue
-
-            dist_pct = _dist_to_entry(price, entry) * 100.0
+            dist_pct = 0.0
+            if price is not None and price > 0:
+                dist_pct = _dist_to_entry(price, entry) * 100.0
 
             # Stale pending: order is on exchange but price crossed entry
             # hours ago and never filled.  The fill window is closed.
             if (r["status"] == "pending" and r.get("ordered_at") and
                 r.get("exchange_order_id")):
                 age_h = (datetime.now(timezone.utc) - r["ordered_at"]).total_seconds() / 3600
-                past_entry = (
+                past_entry = (price is not None and price > 0 and (
                     (r["direction"] == "long" and price > entry * 1.01) or
                     (r["direction"] == "short" and price < entry * 0.99)
-                )
-                if age_h > 1 and past_entry:
+                ))
+                LOG.debug("_expire_distant pending check: id=%s sym=%s age_h=%.2f past_entry=%s entry=%.4f price=%.4f dist=%.1f%%",
+                          r["id"], r["symbol"], age_h, past_entry, entry, price, dist_pct)
+                if age_h > 1 and (past_entry or price is None):
                     try:
                         await self._cancel_demo_order(
                             r.get("tracked_position_id", 0),
