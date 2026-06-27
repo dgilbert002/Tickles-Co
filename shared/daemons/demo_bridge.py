@@ -754,13 +754,14 @@ class DemoBridge:
                     ext_id = acc[0].external_order_id
                     if existing and existing.get("status") == "pending" and existing.get("exchange_order_id"):
                         try:
-                            await self._cancel_demo_order(tp_id, acct["account_name"], existing["exchange_order_id"], exchange=acct["exchange"])
+                            await self._cancel_demo_order(tp_id, acct["account_name"], existing["exchange_order_id"], exchange=acct["exchange"], symbol=sym)
                             await dpool.execute("UPDATE public.demo_orders SET status = 'cancelled', error_message = 'replaced by newer signal', updated_at = NOW() WHERE id = $1", (existing["id"],))
                         except Exception:
                             pass
                     self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
                         "order_id": ext_id,
                         "exchange": acct["exchange"],
+                        "symbol": sym,
                     }
                     LOG.info("PIPE_PLACE Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
                              tp_id, agent_id or "?", acct["exchange"], acct["account_name"],
@@ -845,15 +846,21 @@ class DemoBridge:
         return placed_any
 
     async def _cancel_demo_order(self, tp_id: int, acct_name: str, order_id: str,
-                                  exchange: str = "bybit"):
-        """Cancel a limit order on the demo exchange."""
+                                  exchange: str = "bybit", symbol: str = ""):
+        """Cancel a limit order on the demo exchange.
+
+        The symbol is required for some exchanges (e.g. Toobit); passing an
+        empty string silently fails on those exchanges but the exception is
+        swallowed, leaving orphan orders on the exchange.
+        """
         try:
             client = self._adapter._get_client(exchange, acct_name)
-            await asyncio.to_thread(client.cancel_order, order_id, "")
+            await asyncio.to_thread(client.cancel_order, order_id, symbol)
             LOG.info("Cancelled demo order %s for signal #%d (%s/%s)",
                      order_id, tp_id, exchange, acct_name)
         except Exception as exc:
-            LOG.debug("Cancel order %s: %s", order_id, exc)
+            LOG.warning("Cancel order %s failed: %s", order_id, exc)
+            raise
 
     async def _reconcile_fills(self):
         """Phase 1 (2026-05-29) NEW - demo fill reconciliation.
@@ -1556,6 +1563,7 @@ class DemoBridge:
                         r["account_name"],
                         r["exchange_order_id"],
                         exchange=r.get("exchange", "bybit"),
+                        symbol=r["symbol"],
                     )
                     await pool.execute(
                         "UPDATE public.demo_orders SET status = 'cancelled', "
@@ -1674,11 +1682,13 @@ class DemoBridge:
                 if isinstance(info, dict):
                     oid = info.get("order_id")
                     exch = info.get("exchange", "bybit")
+                    sym_cache = info.get("symbol")
                 else:
                     oid = info  # backward compat with old string-format entries
                     exch = "bybit"
+                    sym_cache = None
                 if oid:
-                    await self._cancel_demo_order(tp_id, acct_name, oid, exchange=exch)
+                    await self._cancel_demo_order(tp_id, acct_name, oid, exchange=exch, symbol=sym_cache or "")
             if orders:
                 LOG.info("Signal #%d cancelled - removed %d demo orders", tp_id, len(orders))
 

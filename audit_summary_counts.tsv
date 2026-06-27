@@ -1,0 +1,5 @@
+ total_positions | with_toobit_order | without_toobit_order | with_competition_trade | without_competition_trade | paper_no_toobit | toobit_no_paper | both | neither 
+-----------------+-------------------+----------------------+------------------------+---------------------------+-----------------+-----------------+------+---------
+              78 |                 8 |                   70 |                      0 |                        78 |               0 |               8 |    0 |      70
+(1 row)
+
