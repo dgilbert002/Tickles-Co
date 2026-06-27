@@ -154,6 +154,7 @@ class DemoBridge:
         self._acct_position_margin: Dict[str, float] = {}  # → USDT position margin
         self._acct_order_margin: Dict[str, float] = {}     # → USDT order margin
         self._acct_margin_usage_pct: Dict[str, float] = {}  # → user cap
+        self._place_locks: Dict[str, asyncio.Lock] = {}  # per symbol/dir/acct placement lock
 
 
     async def _ensure_pool(self):
