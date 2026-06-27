@@ -1089,6 +1089,9 @@ class LiveCopyTradeMonitor:
                      entered_at, tracked_position_id, be_locked)
                     VALUES ('copy-trade-scenarios', $1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 'open',
                             $9, $10, FALSE)
+                    ON CONFLICT (agent_id, tracked_position_id)
+                      WHERE exit_price IS NULL AND tracked_position_id IS NOT NULL
+                      DO NOTHING
                 """, NAME_TO_ID.get(agent_name, agent_name), sym, pos["direction"],
                     pos["entry"], pos["sl"], pos["tp"], pos["allocated"], pos["leverage"],
                     pos["entered_at"], pos.get("trader_id"))
