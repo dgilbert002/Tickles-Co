@@ -557,28 +557,13 @@ class DemoBridge:
                 pass
 
         if dist_pct > SMART_QUEUE_PLACE_PCT:
-            # Beyond threshold - queue, don't place (skip if recently queued)
+            # Beyond 5% threshold - skip entirely. Don't chase the trade.
             _pipe_event(
                 "PIPE_DIST", tp_id, symbol=sym, side=direction,
                 entry=entry, dist_pct=dist_pct,
-                src=f"too_far band={SMART_QUEUE_PLACE_PCT}",
+                src=f"too_far skipped",
             )
-            pool = await self._ensure_pool()
-            recent = await pool.fetch_one(
-                "SELECT id FROM public.demo_orders "
-                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
-                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
-                (tp_id,))
-            if recent:
-                return False
-            await pool.execute(
-                "INSERT INTO public.demo_orders "
-                "(exchange, account_name, symbol, direction, paper_entry, "
-                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                "ON CONFLICT DO NOTHING",
-                (sym, direction, entry, sl, tp, tp_id))
-            LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
+            LOG.debug("Signal #%d %s %s @%.4f skipped (dist=%.1f%% > 5%%)",
                       tp_id, sym, direction, entry, dist_pct)
             return False
 
@@ -686,21 +671,20 @@ class DemoBridge:
                     new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
                     old_ts = existing.get("ordered_at")
 
-                    if entry_diff <= 0.02:  # within 2% - same trade, updated
+                    if entry_diff <= 0.02:  # within 2% - same trade
                         if existing.get("status") == "filled":
                             # Already have a position - do not add to it.
                             LOG.debug("Signal #%d: %s/%s %s already has filled position within 2%% - skip",
                                       tp_id, acct["exchange"], acct["account_name"], sym)
                             continue
+                        # Pending/queued: keep the most recent one. No churn.
                         if new_ts > old_ts:
-                            # Newer - place new first, cancel old after
                             LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
                                      tp_id, existing["id"], acct["exchange"],
                                      acct["account_name"], sym, old_entry, entry)
-                            # Fall through - place new order below
+                            # Fall through - place new order below, cancel old after
                         else:
-                            # Older or same age - keep existing
-                            LOG.debug("Signal #%d: existing order #%d is current (same trade) - skip",
+                            LOG.debug("Signal #%d: existing order #%d is current - skip",
                                       tp_id, existing["id"])
                             continue
                     else:
@@ -1839,7 +1823,9 @@ class DemoBridge:
         # every account and creates/updates demo_orders rows for any position
         # not already tracked.
         await self._sync_positions(mappings)
-        await self._cancel_exchange_orphans(mappings)
+        # Exchange orphan cleanup disabled: was causing place-then-cancel churn.
+        # User wants simple mirror: place once, track until filled/cancelled/updated.
+        # await self._cancel_exchange_orphans(mappings)
 
         # 1c. Cancel demo orders where the paper tracked_position is already
         # open/closed/expired. These demo limits missed their entry and will
