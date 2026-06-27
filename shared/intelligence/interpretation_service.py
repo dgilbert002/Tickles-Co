@@ -94,6 +94,13 @@ from shared.intelligence.payload_store import (
 
 logger = logging.getLogger("tickles.intelligence.interpretation")
 
+# Pipeline correlation logger (separate rotating file at /var/log/tickles/pipeline.log)
+try:
+    from shared.utils.pipeline_log import event as _pipe_event
+except Exception:  # pragma: no cover
+    def _pipe_event(name, tp_id, **fields):  # type: ignore
+        pass
+
 # ---------------------------------------------------------------------------
 # Rate-limit circuit breaker. One 429 silences ALL LLM paths for the
 # cooldown window.  Items touched during cooldown stay retriable.
@@ -3034,7 +3041,24 @@ async def write_signal_interpretation(
             news_item_id,
         )
         return None
-    return int(row["id"])
+    sid = int(row["id"])
+    _pipe_event(
+        "PIPE_INTE",
+        0,
+        exchange=exchange or "",
+        symbol=instrument_symbol or "",
+        side=(consensus.direction if consensus else "") or "",
+        entry=getattr(consensus, "entry_price", None) or levels_flat.get("entry_price"),
+        SL=levels_flat.get("stop_loss"),
+        TP=levels_flat.get("take_profit_1") or levels_flat.get("take_profit"),
+        src=f"news={news_item_id} media={media_item_id} trader={trader_profile_id}",
+    )
+    logger.info("PIPE_INTE sig=%s symbol=%s dir=%s entry=%s SL=%s TP=%s",
+                sid, instrument_symbol, getattr(consensus, "direction", ""),
+                getattr(consensus, "entry_price", None) or levels_flat.get("entry_price"),
+                levels_flat.get("stop_loss"),
+                levels_flat.get("take_profit_1") or levels_flat.get("take_profit"))
+    return sid
 
 
 # ---------------------------------------------------------------------------
@@ -4251,12 +4275,26 @@ async def create_tracked_position_from_interpretation(
 
     position_id = int(row["id"])
     logger.info(
-        "Created tracked_position %s from interpretation %s: %s %s @ %.4f",
+        "PIPE_PEND Created tracked_position %s from interpretation %s: %s %s @ %.4f SL=%.4f TP=%.4f exchange=%s",
         position_id,
         signal_interpretation_id,
         instrument_symbol,
         direction,
         entry_price or 0.0,
+        stop_loss or 0.0,
+        take_profit_1 or 0.0,
+        instrument_exchange or "",
+    )
+    _pipe_event(
+        "PIPE_PEND",
+        position_id,
+        exchange=instrument_exchange or "",
+        symbol=instrument_symbol or "",
+        side=direction or "",
+        entry=entry_price,
+        SL=stop_loss,
+        TP=take_profit_1,
+        src=f"sig={signal_interpretation_id} news={news_item_id} actor={actor_id}",
     )
 
     # Best-effort: seed current_price from the quant snapshot's market price so

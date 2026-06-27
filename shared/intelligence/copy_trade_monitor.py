@@ -36,6 +36,13 @@ from shared.services.banker import update_balance as banker_update
 
 logger = logging.getLogger("copy_trade.monitor")
 
+# Pipeline correlation logger
+try:
+    from shared.utils.pipeline_log import event as _pipe_event
+except Exception:  # pragma: no cover
+    def _pipe_event(name, tp_id, **fields):  # type: ignore
+        pass
+
 POLL_INTERVAL_S = int(os.environ.get("COPY_TRADE_POLL_S", "30"))
 ENTRY_TOUCH_CANDLES = int(os.environ.get("COPY_ENTRY_TOUCH_CANDLES", "60"))
 
@@ -752,6 +759,14 @@ class LiveCopyTradeMonitor:
             if not _entry_touched(touch_candles, entry):
                 logger.info("skip %s for %s: entry %.6f not touched in last %d candles",
                             sym, agent_name, entry, ENTRY_TOUCH_CANDLES)
+                _pipe_event(
+                    "PIPE_CAND",
+                    trader_pos.get("id", 0),
+                    symbol=sym, side=trader_pos.get("direction", ""),
+                    entry=entry, candle_low=touch_candles[0].get("low") if touch_candles else None,
+                    candle_high=touch_candles[0].get("high") if touch_candles else None,
+                    src="paper_skip: no wick touch in 60 candles",
+                )
                 return
         # else: monitor already activated — trust it, no candle check needed
 
@@ -1077,6 +1092,19 @@ class LiveCopyTradeMonitor:
                 """, NAME_TO_ID.get(agent_name, agent_name), sym, pos["direction"],
                     pos["entry"], pos["sl"], pos["tp"], pos["allocated"], pos["leverage"],
                     pos["entered_at"], pos.get("trader_id"))
+            _pipe_event(
+                "PIPE_COPY",
+                pos.get("trader_id", 0),
+                agent=agent_name,
+                symbol=sym,
+                side=pos["direction"],
+                entry=pos["entry"],
+                SL=pos["sl"],
+                TP=pos["tp"],
+                qty=pos.get("allocated"),
+                lev=pos["leverage"],
+                src=f"copy entered_at={pos.get('entered_at')}",
+            )
         except Exception:
             pass
 
@@ -1100,6 +1128,17 @@ class LiveCopyTradeMonitor:
                 """, pos["sl"], pos["leverage"], pos["allocated"],
                     NAME_TO_ID.get(agent_name, agent_name), pos["symbol"],
                     pos["direction"], pos["entry"])
+            _pipe_event(
+                "PIPE_BE",
+                pos.get("trader_id", 0),
+                agent=agent_name,
+                symbol=pos["symbol"],
+                side=pos["direction"],
+                entry=pos["entry"],
+                SL=pos["sl"],
+                lev=pos["leverage"],
+                src=f"BE-lock applied allocated={pos['allocated']}",
+            )
         except Exception:
             pass
 
@@ -1122,6 +1161,16 @@ class LiveCopyTradeMonitor:
                 """, exit_px, pnl, reason,
                     NAME_TO_ID.get(agent_name, agent_name), pos["symbol"],
                     pos["direction"], pos["entry"])
+                _pipe_event(
+                    "PIPE_EXIT",
+                    pos.get("trader_id", 0),
+                    agent=agent_name,
+                    symbol=pos["symbol"],
+                    side=pos["direction"],
+                    entry=pos["entry"],
+                    price=exit_px,
+                    src=f"close reason={reason} pnl={pnl}",
+                )
                 # If no row matched (legacy), fall back to INSERT
                 if result == "UPDATE 0":
                     await conn.execute("""

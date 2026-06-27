@@ -36,6 +36,13 @@ from shared.daemons.demo_forensic_log import flog
 LOG = logging.getLogger("demo.bridge")
 POLL_INTERVAL_S = int(os.environ.get("DEMO_BRIDGE_POLL_S", "15"))
 
+# Pipeline correlation logger
+try:
+    from shared.utils.pipeline_log import event as _pipe_event
+except Exception:  # pragma: no cover
+    def _pipe_event(name, tp_id, **fields):  # type: ignore
+        pass
+
 # Strip options-contract suffixes (e.g. -260531-90-P) before routing to CCXT.
 _OPT_RE_DEMO = re.compile(r"-\d{6}-\d+-[PC]$")
 
@@ -421,6 +428,11 @@ class DemoBridge:
         """Place limit order on demo accounts for a new signal."""
         tp_id = signal["id"]
         sym = signal["instrument_symbol"]
+        _pipe_event(
+            "PIPE_BRGE", tp_id, symbol=sym, side=signal.get("direction", ""),
+            entry=float(signal.get("entry_price") or 0),
+            src="mirror_signal_start",
+        )
         # Strip options contract suffixes only - keep :USDT perp suffix
         # (all accounts use swap/perps, never spot).
         import re as _re2
@@ -488,6 +500,11 @@ class DemoBridge:
         if dist_pct > SMART_QUEUE_PLACE_PCT:
             # Beyond threshold — but position_monitor already activated this.
             # Trust the monitor: if activated_at is set, entry WAS touched.
+            _pipe_event(
+                "PIPE_DIST", tp_id, symbol=sym, side=direction,
+                entry=entry, dist_pct=dist_pct,
+                src=f"too_far band={SMART_QUEUE_PLACE_PCT}",
+            )
             # Place immediately rather than queuing based on stale candle wicks.
             activated_at = signal.get("activated_at")
             if activated_at:
@@ -536,6 +553,12 @@ class DemoBridge:
                 (sym, direction, entry, sl, tp, tp_id))
             LOG.debug("Queued signal #%d %s %s (within %.1f%% but no wick touch)",
                       tp_id, sym, direction, dist_pct)
+            _pipe_event(
+                "PIPE_QUEUE", tp_id,
+                symbol=sym, side=direction,
+                entry=entry, dist_pct=dist_pct,
+                src=f"queue wait wick: {sym} candles={len(candles)}",
+            )
             return False
 
         # Map the actor to agent, then find accounts
@@ -739,10 +762,19 @@ class DemoBridge:
                         "order_id": ext_id,
                         "exchange": acct["exchange"],
                     }
-                    LOG.info("Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
+                    LOG.info("PIPE_PLACE Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
                              tp_id, agent_id or "?", acct["exchange"], acct["account_name"],
                              direction, sym, qty, entry, sl, tp, leverage,
                              ext_id or "?")
+                    _pipe_event(
+                        "PIPE_PLACE", tp_id,
+                        agent=agent_id or "?",
+                        exchange=acct["exchange"], account=acct["account_name"],
+                        symbol=sym, side=direction,
+                        entry=entry, SL=sl, TP=tp,
+                        qty=qty, lev=leverage, order_id=ext_id or "?",
+                        src=f"order placed",
+                    )
                     flog("mirror_placed", tp_id=tp_id, agent=agent_id,
                          exchange=acct["exchange"], account=acct["account_name"],
                          symbol=sym, direction=direction, paper_entry=entry,
@@ -780,6 +812,14 @@ class DemoBridge:
                          symbol=sym, direction=direction, paper_entry=entry,
                          qty=qty, leverage=leverage,
                          reason=(rej_msg or "")[:300])
+                    _pipe_event(
+                        "PIPE_REJ", tp_id,
+                        agent=agent_id or "?",
+                        exchange=acct["exchange"], account=acct["account_name"],
+                        symbol=sym, side=direction, entry=entry,
+                        qty=qty, lev=leverage,
+                        src=f"rejected: {(rej_msg or '')[:80]}",
+                    )
                     # Record error (no pool.close() - shared singleton, see above)
                     try:
                         pool = await self._ensure_pool()
@@ -858,10 +898,19 @@ class DemoBridge:
                     "filled_at=NOW(), slippage_entry=%s, entry_fee=%s, "
                     "fees_synced_at=NOW(), updated_at=NOW() WHERE id=%s",
                     (avg, slip, entry_fee, r["id"]))
-                LOG.info("Demo order %s FILLED @ %.6f (slip=%s fee=%s)",
+                LOG.info("PIPE_FILL Demo order %s FILLED @ %.6f (slip=%s fee=%s)",
                          r["exchange_order_id"], avg,
                          f"{slip:.4%}" if slip is not None else "n/a",
                          entry_fee)
+                _pipe_event(
+                    "PIPE_FILL", r.get("tracked_position_id", 0) or 0,
+                    exchange=r["exchange"], account=r["account_name"],
+                    symbol=r["symbol"], side=r["direction"],
+                    entry=r.get("paper_entry"),
+                    fill_price=avg, slippage=slip,
+                    order_id=r.get("exchange_order_id", ""),
+                    src=f"fill avg={avg}",
+                )
                 # Attach SL/TP for Toobit (must post-fill — createOrder rejects them)
                 if r["exchange"] == "toobit":
                     try:
@@ -1332,6 +1381,7 @@ class DemoBridge:
     # ═══════════════════════════════════════════════════════════════════
 
     async def _promote_queued(self):
+        t0 = time.monotonic()
         """Promote queued orders to pending when price is within place threshold.
 
         Checks current price + candle wick-touch for every order with
@@ -1397,9 +1447,22 @@ class DemoBridge:
             promoted += 1
             LOG.info("Promoted queued→pending #%d %s %s @%.2f (dist=%.1f%%)",
                      r["id"], sym, r["direction"], entry, dist_pct)
+            _pipe_event(
+                "PIPE_PROM",
+                r.get("tracked_position_id", 0) or 0,
+                exchange="toobit",  # which exchange? we only know it's promoted
+                symbol=sym, side=r["direction"],
+                entry=entry, dist_pct=dist_pct,
+                src=f"queued→pending id={r['id']}",
+            )
 
         if promoted:
-            LOG.info("_promote_queued: %d orders promoted", promoted)
+            LOG.info("_promote_queued: %d orders promoted in %.1fs", promoted, time.monotonic() - t0)
+            _pipe_event("PIPE_BRGE", 0, status="promote_done",
+                        src=f"promoted={promoted} elapsed={time.monotonic()-t0:.2f}s")
+        else:
+            LOG.info("_promote_queued: scanned %d queued rows, none promoted (elapsed %.1fs)",
+                     len(rows) if rows else 0, time.monotonic() - t0)
 
     async def _expire_distant(self):
         """Close/cancel orders where price has drifted past the close threshold.
@@ -1407,6 +1470,7 @@ class DemoBridge:
         Queued orders (never placed): status → 'expired', no exchange call.
         Pending orders (on exchange): cancel on exchange + status → 'cancelled'.
         """
+        t0 = time.monotonic()
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
             "SELECT id, symbol, direction, paper_entry, status, "
@@ -1499,12 +1563,25 @@ class DemoBridge:
                     cancelled_pending += 1
                     LOG.info("Cancelled distant #%d %s %s (dist=%.1f%%)",
                              r["id"], r["symbol"], r["direction"], dist_pct)
+                    _pipe_event(
+                        "PIPE_EXPIRE",
+                        r.get("tracked_position_id", 0) or 0,
+                        symbol=r["symbol"], side=r["direction"],
+                        entry=float(r.get("paper_entry") or 0),
+                        price=price, dist_pct=dist_pct,
+                        status="cancelled",
+                        src=f"pending stale age_h={age_h:.1f}",
+                    )
                 except Exception as exc:
                     LOG.debug("_expire_distant cancel failed #%d: %s", r["id"], exc)
 
         if expired_queued or cancelled_pending:
             LOG.info("_expire_distant: %d expired (queued) + %d cancelled (pending)",
                      expired_queued, cancelled_pending)
+        elif rows:
+            LOG.info("_expire_distant: scanned %d rows in %.1fs, no action", len(rows), time.monotonic() - t0)
+        _pipe_event("PIPE_BRGE", 0, status="expire_done",
+                    src=f"scanned={len(rows)} expired={expired_queued} cancelled={cancelled_pending} elapsed={time.monotonic()-t0:.2f}s")
 
     async def tick(self):
         mappings = await self._load_mappings()
@@ -1548,6 +1625,7 @@ class DemoBridge:
 
         # ── Smart Queue ──
         # 0a. Expire queued/pending orders that drifted past close threshold
+        LOG.info("PIPE_BRGE tick_start expiring+promoting")
         await self._expire_distant()
         # 0b. Promote queued orders whose price is now within place threshold
         await self._promote_queued()

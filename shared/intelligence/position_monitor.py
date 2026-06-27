@@ -73,6 +73,13 @@ from shared.intelligence.position_quant import (
 
 logger = logging.getLogger("tickles.intelligence.position_monitor")
 
+# Pipeline correlation logger
+try:
+    from shared.utils.pipeline_log import event as _pipe_event
+except Exception:  # pragma: no cover
+    def _pipe_event(name, tp_id, **fields):  # type: ignore
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Round 12 (2026-05-24): Multi-venue OHLCV fallback.
@@ -1019,6 +1026,15 @@ async def _find_entry_touch_candle(
         if row is not None:
             # Candle touch found locally — activate immediately.
             ts = ensure_utc(row["timestamp"])
+            _pipe_event(
+                "PIPE_CAND",
+                0,
+                symbol=symbol or "",
+                price=float(row["close"]),
+                candle_low=float(row["low"]),
+                candle_high=float(row["high"]),
+                src=f"local entry={entry} ts={ts}",
+            )
             return (ts, float(row["close"]))
 
         # 2026-05-23: Safe pending queue check optimization.
@@ -1951,6 +1967,22 @@ class PositionMonitor:
                     """,
                     (trigger_close, trigger_ts, pos_id, retro_reason),
                 )
+                _pipe_event(
+                    "PIPE_ACT",
+                    pos_id,
+                    symbol=pos.get("instrument_symbol", ""),
+                    side=pos.get("direction", ""),
+                    price=trigger_close,
+                    entry=float(pos.get("entry_price") or 0),
+                    src=f"candle_ts={trigger_ts} retro={is_retro}",
+                )
+                logger.info(
+                    "PIPE_ACT pos=%s activated candle=%.6f at %s retro=%s",
+                    pos_id,
+                    trigger_close,
+                    trigger_ts,
+                    is_retro,
+                )
                 # asyncpg returns "UPDATE n" — n=0 means we lost the race.
                 if isinstance(update_result, str) and update_result.endswith(" 0"):
                     logger.info(
@@ -2294,6 +2326,23 @@ class PositionMonitor:
             outcome = "tp1_hit" if snapshot.tp_hit else "sl_hit"
             breakdown = await self._settle_close(
                 pool, position, snapshot, outcome, price, now
+            )
+            event_name = "PIPE_TPCH" if snapshot.tp_hit else "PIPE_SLCH"
+            _pipe_event(
+                event_name,
+                pos_id,
+                symbol=position.get("instrument_symbol", ""),
+                side=position.get("direction", ""),
+                entry=position.get("entry_price"),
+                price=price,
+                SL=position.get("stop_loss"),
+                TP=position.get("take_profit_1"),
+                src=f"close_price={price} ts={now}",
+            )
+            logger.info(
+                "PIPE_%s pos=%s at price=%.4f",
+                "TP" if snapshot.tp_hit else "SL",
+                pos_id, price,
             )
             if breakdown is not None:
                 logger.info(
