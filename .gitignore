@@ -96,3 +96,4 @@ Thumbs.db
 !shared/migration/*.sql
 !shared/migration/*.py
 !shared/utils/*.py
+*.tsv
