@@ -671,11 +671,10 @@ class DemoBridge:
                     new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
                     old_ts = existing.get("ordered_at")
 
-                    if entry_diff <= 0.02:  # within 2% - same trade already tracked
-                        # Keep whatever is there. No replace, no add-to-position.
-                        LOG.debug("Signal #%d: %s/%s %s already tracked within 2%% (status=%s id=%d) - skip",
+                    if entry_diff <= 0.02:  # within 2% - already tracking a trade here
+                        LOG.debug("Signal #%d: %s/%s %s already has %s order #%d at %.4f within 2%% - skip",
                                   tp_id, acct["exchange"], acct["account_name"], sym,
-                                  existing.get("status"), existing["id"])
+                                  existing.get("status"), existing["id"], old_entry)
                         continue
                     else:
                         # Different trade - both valid
