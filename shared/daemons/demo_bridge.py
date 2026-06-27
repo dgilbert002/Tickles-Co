@@ -602,304 +602,309 @@ class DemoBridge:
         # Leverage, allocated margin, notional and the concurrency cap are all
         # resolved per-account INSIDE the loop below.
         for acct in unique_accounts:
-            # Which agent does this demo account mirror?
-            agent_id = self._agent_for_account(acct["exchange"], acct["account_name"])
-            acct_key = f"{acct['exchange']}/{acct['account_name']}"
-            balance = self._acct_balance.get(acct_key, DEMO_FALLBACK_BALANCE)
-
-            # Reproduce the mapped agent's sizing rule against the real balance.
-            # NOTE: we deliberately do NOT cap to signal["notional_usd"] - that
-            # field is always the paper WALLET (1000), not a position ceiling.
-            # Capping to it would clamp spot_lev_3x (3x notional) and the
-            # leveraged agents back to ~1000 and silently undo accurate sizing.
-            mode, allocated, leverage, notional_eff = self._compute_demo_size(
-                agent_id, balance, entry, sl)
-            # Clamp to exchange per-symbol max (matches paper engine)
-            if leverage and leverage > 1.0:
-                try:
-                    from shared.market_data.exchange_limits import get_max_leverage
-                    sym_max = await get_max_leverage(sym)
-                    leverage = min(leverage, sym_max)
-                except Exception:
-                    pass
-
-            # Pre-flight balance check: skip if free balance can't cover allocation.
-            # Saves API calls that would be rejected with "ab not enough."
-            if allocated > balance * 0.98:  # 2% headroom for concurrent orders
-                LOG.debug("Signal #%d → %s/%s: SKIP (allocated=%.2f > free=%.2f)",
-                          tp_id, acct["exchange"], acct["account_name"],
-                          allocated, balance)
-                continue
-
-            # Respect the agent's max-concurrent rule on the demo side so we
-            # don't over-place and exhaust margin (sequential agents = 1 at a
-            # time; 5%/3% parallel agents = 20/33).
-            cap = MODE_MAX_CONCURRENT.get(mode, 20)
-            open_n = await self._open_demo_count(acct["exchange"], acct["account_name"])
-            if open_n >= cap:
-                LOG.info("Signal #%d → %s/%s: SKIP (agent %s mode %s at cap %d/%d)",
-                         tp_id, acct["exchange"], acct["account_name"],
-                         agent_id or "?", mode, open_n, cap)
-                flog("mirror_skipped_cap", tp_id=tp_id, agent=agent_id,
-                     exchange=acct["exchange"], account=acct["account_name"],
-                     mode=mode, open_count=open_n, cap=cap)
-                continue
-
-            # ── Keep current: replace stale orders with updated trader data ──
-            # If a newer signal arrives for the same symbol+direction+account
-            # within 2% of an existing order's entry, cancel the old and place
-            # the new - the trader adjusted their entry/SL/TP.  Beyond 2% they're
-            # separate trades.  Older signals defer to the existing order.
-            dpool = await self._ensure_pool()
-            existing = await dpool.fetch_one(
-                "SELECT id, paper_entry, status, exchange_order_id, ordered_at "
-                "FROM public.demo_orders "
-                "WHERE symbol = $1 AND direction = $2 "
-                "AND exchange = $3 AND account_name = $4 "
-                "AND status IN ('queued', 'pending') "
-                "ORDER BY ordered_at DESC LIMIT 1",
-                (sym, direction, acct["exchange"], acct["account_name"]))
-            if existing:
-                old_entry = float(existing["paper_entry"] or 0)
-                # Guard: zero or negative old_entry means corrupted row - treat as different trade
-                if old_entry <= 0:
-                    LOG.debug("Signal #%d: existing order #%d has paper_entry=%.4f - treating as different trade",
-                              tp_id, existing["id"], old_entry)
-                else:
-                    entry_diff = abs(entry - old_entry) / old_entry
-                    # Use signal_timestamp from tracked_position; fall back to NOW()
-                    new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
-                    old_ts = existing.get("ordered_at")
-
-                    if entry_diff <= 0.02:  # within 2% - already tracking a trade here
-                        LOG.debug("Signal #%d: %s/%s %s already has %s order #%d at %.4f within 2%% - skip",
-                                  tp_id, acct["exchange"], acct["account_name"], sym,
-                                  existing.get("status"), existing["id"], old_entry)
-                        continue
-                    else:
-                        # Different trade - both valid
-                        LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f - both valid",
-                                  tp_id, entry, old_entry)
-                        existing = None  # prevent cancel-after-placement from destroying unrelated trade
-
-            # Skip when sizing produces zero notional (free balance exhausted).
-            if notional_eff <= 0 or allocated <= 0:
-                LOG.debug("Signal #%d → %s/%s: SKIP (notional=%.2f allocated=%.2f balance=%.2f)",
-                          tp_id, acct["exchange"], acct["account_name"],
-                          notional_eff, allocated, balance)
-                continue
-
-            # Account-level margin cap (default 100% = no cap).
-            # equity_cap = total_equity * margin_usage_pct / 100
-            # margin_used = total_equity - available_margin
-            # margin_headroom = equity_cap - margin_used
-            # If the new order needs more margin than headroom, shrink it.
-            acct_equity = self._acct_equity.get(acct_key, balance)
-            acct_avail = self._acct_balance.get(acct_key, 0.0)
-            margin_usage_pct = float(
-                getattr(self, "_acct_margin_usage_pct", {}).get(acct_key, 100.0))
-            # margin_used is whatever is already locked (positions + open orders).
-            # CCXT's USDT.used is the exchange-normalized locked margin; use it.
-            # Fall back to equity - available if unavailable.
-            margin_used = float(
-                getattr(self, "_acct_used", {}).get(acct_key, 0.0))
-            if margin_used <= 0 and acct_equity > 0 and acct_avail >= 0:
-                margin_used = max(0.0, acct_equity - acct_avail)
-            equity_cap = acct_equity * margin_usage_pct / 100.0
-            margin_headroom = max(0.0, equity_cap - margin_used)
-            required_margin = allocated  # allocated margin for this position
-
-            _pipe_event(
-                "PIPE_MARG", tp_id,
-                exchange=acct["exchange"], account=acct["account_name"],
-                symbol=sym, side=direction,
-                equity=acct_equity, equity_cap=equity_cap,
-                margin_used=margin_used, margin_headroom=margin_headroom,
-                required_margin=required_margin, margin_usage_pct=margin_usage_pct,
-            )
-
-            if required_margin > margin_headroom:
-                if margin_headroom <= 0:
-                    LOG.info("Signal #%d → %s/%s: SKIP margin cap hit "
-                             "(equity=%.2f cap=%.2f used=%.2f headroom=0)",
+            # Serialize per (symbol, direction, account) to eliminate the race
+            lock_key = f"{sym}/{direction}/{acct['exchange']}/{acct['account_name']}"
+            lock = self._place_locks.setdefault(lock_key, asyncio.Lock())
+            async with lock:
+                # Which agent does this demo account mirror?
+                agent_id = self._agent_for_account(acct["exchange"], acct["account_name"])
+                acct_key = f"{acct['exchange']}/{acct['account_name']}"
+                balance = self._acct_balance.get(acct_key, DEMO_FALLBACK_BALANCE)
+    
+                # Reproduce the mapped agent's sizing rule against the real balance.
+                # NOTE: we deliberately do NOT cap to signal["notional_usd"] - that
+                # field is always the paper WALLET (1000), not a position ceiling.
+                # Capping to it would clamp spot_lev_3x (3x notional) and the
+                # leveraged agents back to ~1000 and silently undo accurate sizing.
+                mode, allocated, leverage, notional_eff = self._compute_demo_size(
+                    agent_id, balance, entry, sl)
+                # Clamp to exchange per-symbol max (matches paper engine)
+                if leverage and leverage > 1.0:
+                    try:
+                        from shared.market_data.exchange_limits import get_max_leverage
+                        sym_max = await get_max_leverage(sym)
+                        leverage = min(leverage, sym_max)
+                    except Exception:
+                        pass
+    
+                # Pre-flight balance check: skip if free balance can't cover allocation.
+                # Saves API calls that would be rejected with "ab not enough."
+                if allocated > balance * 0.98:  # 2% headroom for concurrent orders
+                    LOG.debug("Signal #%d → %s/%s: SKIP (allocated=%.2f > free=%.2f)",
+                              tp_id, acct["exchange"], acct["account_name"],
+                              allocated, balance)
+                    continue
+    
+                # Respect the agent's max-concurrent rule on the demo side so we
+                # don't over-place and exhaust margin (sequential agents = 1 at a
+                # time; 5%/3% parallel agents = 20/33).
+                cap = MODE_MAX_CONCURRENT.get(mode, 20)
+                open_n = await self._open_demo_count(acct["exchange"], acct["account_name"])
+                if open_n >= cap:
+                    LOG.info("Signal #%d → %s/%s: SKIP (agent %s mode %s at cap %d/%d)",
                              tp_id, acct["exchange"], acct["account_name"],
-                             acct_equity, equity_cap, margin_used)
-                    _pipe_event(
-                        "PIPE_REJ", tp_id,
-                        exchange=acct["exchange"], account=acct["account_name"],
-                        agent=agent_id, symbol=sym, side=direction,
-                        entry=entry, qty=qty, lev=leverage,
-                        src=f"margin_cap headroom=0 usage={margin_usage_pct}%",
-                    )
+                             agent_id or "?", mode, open_n, cap)
+                    flog("mirror_skipped_cap", tp_id=tp_id, agent=agent_id,
+                         exchange=acct["exchange"], account=acct["account_name"],
+                         mode=mode, open_count=open_n, cap=cap)
                     continue
-                # Shrink notional proportionally to fit headroom
-                scale = margin_headroom / required_margin
-                old_notional = notional_eff
-                notional_eff = notional_eff * scale
-                allocated = allocated * scale
-                qty = notional_eff / entry if entry > 0 else 0.0
-                LOG.info("Signal #%d → %s/%s: SHRINK %.1fx to fit margin cap "
-                         "(notional %.2f→%.2f, allocated %.2f→%.2f, headroom %.2f)",
-                         tp_id, acct["exchange"], acct["account_name"], scale,
-                         old_notional, notional_eff, allocated / scale, allocated, margin_headroom)
-                if notional_eff <= 0 or allocated <= 0 or qty <= 0:
+    
+                # ── Keep current: replace stale orders with updated trader data ──
+                # If a newer signal arrives for the same symbol+direction+account
+                # within 2% of an existing order's entry, cancel the old and place
+                # the new - the trader adjusted their entry/SL/TP.  Beyond 2% they're
+                # separate trades.  Older signals defer to the existing order.
+                dpool = await self._ensure_pool()
+                existing = await dpool.fetch_one(
+                    "SELECT id, paper_entry, status, exchange_order_id, ordered_at "
+                    "FROM public.demo_orders "
+                    "WHERE symbol = $1 AND direction = $2 "
+                    "AND exchange = $3 AND account_name = $4 "
+                    "AND status IN ('queued', 'pending') "
+                    "ORDER BY ordered_at DESC LIMIT 1",
+                    (sym, direction, acct["exchange"], acct["account_name"]))
+                if existing:
+                    old_entry = float(existing["paper_entry"] or 0)
+                    # Guard: zero or negative old_entry means corrupted row - treat as different trade
+                    if old_entry <= 0:
+                        LOG.debug("Signal #%d: existing order #%d has paper_entry=%.4f - treating as different trade",
+                                  tp_id, existing["id"], old_entry)
+                    else:
+                        entry_diff = abs(entry - old_entry) / old_entry
+                        # Use signal_timestamp from tracked_position; fall back to NOW()
+                        new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
+                        old_ts = existing.get("ordered_at")
+    
+                        if entry_diff <= 0.02:  # within 2% - already tracking a trade here
+                            LOG.debug("Signal #%d: %s/%s %s already has %s order #%d at %.4f within 2%% - skip",
+                                      tp_id, acct["exchange"], acct["account_name"], sym,
+                                      existing.get("status"), existing["id"], old_entry)
+                            continue
+                        else:
+                            # Different trade - both valid
+                            LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f - both valid",
+                                      tp_id, entry, old_entry)
+                            existing = None  # prevent cancel-after-placement from destroying unrelated trade
+    
+                # Skip when sizing produces zero notional (free balance exhausted).
+                if notional_eff <= 0 or allocated <= 0:
+                    LOG.debug("Signal #%d → %s/%s: SKIP (notional=%.2f allocated=%.2f balance=%.2f)",
+                              tp_id, acct["exchange"], acct["account_name"],
+                              notional_eff, allocated, balance)
                     continue
-
-            # Quantity from the per-account notional, rounded to exchange
-            # precision and checked against the symbol's minimum order size.
-            qty = notional_eff / entry if notional_eff > 0 and entry > 0 else 0.0
-            if qty <= 0:
-                continue
-
-            # Symbol availability gate - checked against the DEMO environment's
-            # actual market list (bitget PAPTRADING has only ~29 swaps; bybit
-            # demo has ~678). Skips guaranteed rejections, logs once per
-            # exchange/symbol pair so the gap is visible, not silent.
-            avail_cache = getattr(self, "_symbol_avail", {})
-            avail_key = f"{acct['exchange']}/{sym}"
-            if avail_key not in avail_cache:
-                try:
-                    avail_cache[avail_key] = await self._adapter.has_market(
-                        exchange=acct["exchange"], symbol=sym)
-                except Exception:
-                    avail_cache[avail_key] = True  # fail open
-                self._symbol_avail = avail_cache
-                if not avail_cache[avail_key]:
-                    LOG.info("Signal #%d: %s not listed on %s (demo env) - will skip this exchange",
-                             tp_id, sym, acct["exchange"])
-            if not avail_cache[avail_key]:
-                flog("mirror_skipped_no_market", tp_id=tp_id, agent=agent_id,
-                     exchange=acct["exchange"], account=acct["account_name"],
-                     symbol=sym)
-                continue
-
-            # Fetch exchange limits for this symbol (cached per bridge instance).
-            limits_cache = getattr(self, "_market_limits", {})
-            cache_key = f"{acct['exchange']}/{sym}"
-            if cache_key not in limits_cache:
-                try:
-                    limits_cache[cache_key] = await self._adapter.get_market_limits(
-                        exchange=acct["exchange"], symbol=sym)
-                except Exception:
-                    limits_cache[cache_key] = {"min_amount": 0.001, "amount_precision": 3}
-                self._market_limits = limits_cache
-            limits = limits_cache[cache_key]
-            min_amount = limits["min_amount"]
-            prec = limits["amount_precision"]
-            qty = round(qty, prec)
-            if qty < min_amount:
-                LOG.debug("Signal #%d → %s/%s: qty=%.6f below min=%.6f for %s - skip",
-                          tp_id, acct["exchange"], acct["account_name"],
-                          qty, min_amount, sym)
-                continue
-
-            try:
-                intent = ExecutionIntent(
-                    company_id="jarvais", strategy_id=None, agent_id="demo_bridge",
-                    exchange=acct["exchange"],
-                    account_id_external=f"demo_signal_{tp_id}",
-                    symbol=sym, direction=direction, order_type=ORDER_TYPE_LIMIT,
-                    quantity=qty, requested_price=entry,
-                    stop_loss=sl if sl is not None and sl > 0 else None,
-                    take_profit=tp if tp is not None and tp > 0 else None,
-                    leverage=leverage if leverage is not None and leverage > 1 else None,
-                    metadata={
-                        "source": "demo_bridge_signal",
-                        "accountName": acct["account_name"],
-                        "tracked_position_id": tp_id,
-                    },
+    
+                # Account-level margin cap (default 100% = no cap).
+                # equity_cap = total_equity * margin_usage_pct / 100
+                # margin_used = total_equity - available_margin
+                # margin_headroom = equity_cap - margin_used
+                # If the new order needs more margin than headroom, shrink it.
+                acct_equity = self._acct_equity.get(acct_key, balance)
+                acct_avail = self._acct_balance.get(acct_key, 0.0)
+                margin_usage_pct = float(
+                    getattr(self, "_acct_margin_usage_pct", {}).get(acct_key, 100.0))
+                # margin_used is whatever is already locked (positions + open orders).
+                # CCXT's USDT.used is the exchange-normalized locked margin; use it.
+                # Fall back to equity - available if unavailable.
+                margin_used = float(
+                    getattr(self, "_acct_used", {}).get(acct_key, 0.0))
+                if margin_used <= 0 and acct_equity > 0 and acct_avail >= 0:
+                    margin_used = max(0.0, acct_equity - acct_avail)
+                equity_cap = acct_equity * margin_usage_pct / 100.0
+                margin_headroom = max(0.0, equity_cap - margin_used)
+                required_margin = allocated  # allocated margin for this position
+    
+                _pipe_event(
+                    "PIPE_MARG", tp_id,
+                    exchange=acct["exchange"], account=acct["account_name"],
+                    symbol=sym, side=direction,
+                    equity=acct_equity, equity_cap=equity_cap,
+                    margin_used=margin_used, margin_headroom=margin_headroom,
+                    required_margin=required_margin, margin_usage_pct=margin_usage_pct,
                 )
-                updates = await self._adapter.submit(intent)
-                acc = [u for u in updates if u.status == "accepted"]
-                
-                if acc:
-                    placed_any = True
-                    ext_id = acc[0].external_order_id
-                    self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
-                        "order_id": ext_id,
-                        "exchange": acct["exchange"],
-                        "symbol": sym,
-                    }
-                    LOG.info("PIPE_PLACE Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
-                             tp_id, agent_id or "?", acct["exchange"], acct["account_name"],
-                             direction, sym, qty, entry, sl, tp, leverage,
-                             ext_id or "?")
-                    _pipe_event(
-                        "PIPE_PLACE", tp_id,
-                        agent=agent_id or "?",
-                        exchange=acct["exchange"], account=acct["account_name"],
-                        symbol=sym, side=direction,
-                        entry=entry, SL=sl, TP=tp,
-                        qty=qty, lev=leverage, order_id=ext_id or "?",
-                        src=f"order placed",
-                    )
-                    flog("mirror_placed", tp_id=tp_id, agent=agent_id,
-                         exchange=acct["exchange"], account=acct["account_name"],
-                         symbol=sym, direction=direction, paper_entry=entry,
-                         sl=sl, tp=tp, qty=qty, leverage=leverage,
-                         notional=round(notional_eff, 2), order_id=ext_id)
-                    # Record in demo_orders table for comparison tracking.
-                    # Phase 1 (2026-05-29): record the EFFECTIVE notional we
-                    # actually sized to (after the safety factor), not the raw
-                    # 1000, so the dashboard "Demo Orders $" KPI is honest.
-                    # Now also stamps agent_id (account↔agent attribution).
-                    # Removed the per-insert `pool.close()` - the pool is a shared
-                    # singleton; closing it here broke subsequent ticks/daemons.
-                    try:
-                        pool = await self._ensure_pool()
-                        await pool.execute(
-                            "INSERT INTO public.demo_orders "
-                            "(tracked_position_id, exchange, account_name, exchange_order_id, "
-                            "agent_id, symbol, direction, paper_entry, demo_entry, paper_sl, paper_tp, "
-                            "leverage, quantity, notional_usd, status, ordered_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
-                            "ON CONFLICT DO NOTHING",
-                            (tp_id, acct["exchange"], acct["account_name"], ext_id,
-                             agent_id, sym, direction, entry, entry, sl, tp, leverage, qty, notional_eff)
+    
+                if required_margin > margin_headroom:
+                    if margin_headroom <= 0:
+                        LOG.info("Signal #%d → %s/%s: SKIP margin cap hit "
+                                 "(equity=%.2f cap=%.2f used=%.2f headroom=0)",
+                                 tp_id, acct["exchange"], acct["account_name"],
+                                 acct_equity, equity_cap, margin_used)
+                        _pipe_event(
+                            "PIPE_REJ", tp_id,
+                            exchange=acct["exchange"], account=acct["account_name"],
+                            agent=agent_id, symbol=sym, side=direction,
+                            entry=entry, qty=qty, lev=leverage,
+                            src=f"margin_cap headroom=0 usage={margin_usage_pct}%",
                         )
-                    except Exception as exc:
-                        LOG.debug("demo_orders insert (accepted) failed: %s", exc)
-                else:
-                    rej = [u for u in updates if u.status == "rejected"]
-                    rej_msg = rej[0].message if rej else "unknown"
-                    LOG.warning("Signal #%d [%s] → %s/%s FAILED: %s",
-                                tp_id, agent_id or "?", acct["exchange"],
-                                acct["account_name"], rej_msg)
-                    flog("mirror_rejected", tp_id=tp_id, agent=agent_id,
-                         exchange=acct["exchange"], account=acct["account_name"],
-                         symbol=sym, direction=direction, paper_entry=entry,
-                         qty=qty, leverage=leverage,
-                         reason=(rej_msg or "")[:300])
-                    _pipe_event(
-                        "PIPE_REJ", tp_id,
-                        agent=agent_id or "?",
-                        exchange=acct["exchange"], account=acct["account_name"],
-                        symbol=sym, side=direction, entry=entry,
-                        qty=qty, lev=leverage,
-                        src=f"rejected: {(rej_msg or '')[:80]}",
-                    )
-                    # Record error (no pool.close() - shared singleton, see above)
+                        continue
+                    # Shrink notional proportionally to fit headroom
+                    scale = margin_headroom / required_margin
+                    old_notional = notional_eff
+                    notional_eff = notional_eff * scale
+                    allocated = allocated * scale
+                    qty = notional_eff / entry if entry > 0 else 0.0
+                    LOG.info("Signal #%d → %s/%s: SHRINK %.1fx to fit margin cap "
+                             "(notional %.2f→%.2f, allocated %.2f→%.2f, headroom %.2f)",
+                             tp_id, acct["exchange"], acct["account_name"], scale,
+                             old_notional, notional_eff, allocated / scale, allocated, margin_headroom)
+                    if notional_eff <= 0 or allocated <= 0 or qty <= 0:
+                        continue
+    
+                # Quantity from the per-account notional, rounded to exchange
+                # precision and checked against the symbol's minimum order size.
+                qty = notional_eff / entry if notional_eff > 0 and entry > 0 else 0.0
+                if qty <= 0:
+                    continue
+    
+                # Symbol availability gate - checked against the DEMO environment's
+                # actual market list (bitget PAPTRADING has only ~29 swaps; bybit
+                # demo has ~678). Skips guaranteed rejections, logs once per
+                # exchange/symbol pair so the gap is visible, not silent.
+                avail_cache = getattr(self, "_symbol_avail", {})
+                avail_key = f"{acct['exchange']}/{sym}"
+                if avail_key not in avail_cache:
                     try:
-                        pool = await self._ensure_pool()
-                        await pool.execute(
-                            "INSERT INTO public.demo_orders "
-                            "(tracked_position_id, exchange, account_name, agent_id, symbol, direction, "
-                            "paper_entry, paper_sl, paper_tp, leverage, quantity, notional_usd, "
-                            "status, error_message, ordered_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'rejected',%s,NOW())",
-                            (tp_id, acct["exchange"], acct["account_name"], agent_id, sym, direction,
-                             entry, sl, tp, leverage, qty, notional_eff,
-                             (rej_msg or "unknown")[:500])
+                        avail_cache[avail_key] = await self._adapter.has_market(
+                            exchange=acct["exchange"], symbol=sym)
+                    except Exception:
+                        avail_cache[avail_key] = True  # fail open
+                    self._symbol_avail = avail_cache
+                    if not avail_cache[avail_key]:
+                        LOG.info("Signal #%d: %s not listed on %s (demo env) - will skip this exchange",
+                                 tp_id, sym, acct["exchange"])
+                if not avail_cache[avail_key]:
+                    flog("mirror_skipped_no_market", tp_id=tp_id, agent=agent_id,
+                         exchange=acct["exchange"], account=acct["account_name"],
+                         symbol=sym)
+                    continue
+    
+                # Fetch exchange limits for this symbol (cached per bridge instance).
+                limits_cache = getattr(self, "_market_limits", {})
+                cache_key = f"{acct['exchange']}/{sym}"
+                if cache_key not in limits_cache:
+                    try:
+                        limits_cache[cache_key] = await self._adapter.get_market_limits(
+                            exchange=acct["exchange"], symbol=sym)
+                    except Exception:
+                        limits_cache[cache_key] = {"min_amount": 0.001, "amount_precision": 3}
+                    self._market_limits = limits_cache
+                limits = limits_cache[cache_key]
+                min_amount = limits["min_amount"]
+                prec = limits["amount_precision"]
+                qty = round(qty, prec)
+                if qty < min_amount:
+                    LOG.debug("Signal #%d → %s/%s: qty=%.6f below min=%.6f for %s - skip",
+                              tp_id, acct["exchange"], acct["account_name"],
+                              qty, min_amount, sym)
+                    continue
+    
+                try:
+                    intent = ExecutionIntent(
+                        company_id="jarvais", strategy_id=None, agent_id="demo_bridge",
+                        exchange=acct["exchange"],
+                        account_id_external=f"demo_signal_{tp_id}",
+                        symbol=sym, direction=direction, order_type=ORDER_TYPE_LIMIT,
+                        quantity=qty, requested_price=entry,
+                        stop_loss=sl if sl is not None and sl > 0 else None,
+                        take_profit=tp if tp is not None and tp > 0 else None,
+                        leverage=leverage if leverage is not None and leverage > 1 else None,
+                        metadata={
+                            "source": "demo_bridge_signal",
+                            "accountName": acct["account_name"],
+                            "tracked_position_id": tp_id,
+                        },
+                    )
+                    updates = await self._adapter.submit(intent)
+                    acc = [u for u in updates if u.status == "accepted"]
+                    
+                    if acc:
+                        placed_any = True
+                        ext_id = acc[0].external_order_id
+                        self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
+                            "order_id": ext_id,
+                            "exchange": acct["exchange"],
+                            "symbol": sym,
+                        }
+                        LOG.info("PIPE_PLACE Signal #%d [%s] → %s/%s: LIMIT %s %s qty=%.4f @ %.4f SL=%s TP=%s lev=%dx (order %s)",
+                                 tp_id, agent_id or "?", acct["exchange"], acct["account_name"],
+                                 direction, sym, qty, entry, sl, tp, leverage,
+                                 ext_id or "?")
+                        _pipe_event(
+                            "PIPE_PLACE", tp_id,
+                            agent=agent_id or "?",
+                            exchange=acct["exchange"], account=acct["account_name"],
+                            symbol=sym, side=direction,
+                            entry=entry, SL=sl, TP=tp,
+                            qty=qty, lev=leverage, order_id=ext_id or "?",
+                            src=f"order placed",
                         )
-                    except Exception as exc:
-                        LOG.debug("demo_orders insert (rejected) failed: %s", exc)
-            except Exception as exc:
-                LOG.error("Signal #%d → %s/%s ERROR: %s",
-                          tp_id, acct["exchange"], acct["account_name"], exc)
-                flog("mirror_error", tp_id=tp_id, agent=agent_id,
-                     exchange=acct["exchange"], account=acct["account_name"],
-                     symbol=sym, error=str(exc)[:300])
-
+                        flog("mirror_placed", tp_id=tp_id, agent=agent_id,
+                             exchange=acct["exchange"], account=acct["account_name"],
+                             symbol=sym, direction=direction, paper_entry=entry,
+                             sl=sl, tp=tp, qty=qty, leverage=leverage,
+                             notional=round(notional_eff, 2), order_id=ext_id)
+                        # Record in demo_orders table for comparison tracking.
+                        # Phase 1 (2026-05-29): record the EFFECTIVE notional we
+                        # actually sized to (after the safety factor), not the raw
+                        # 1000, so the dashboard "Demo Orders $" KPI is honest.
+                        # Now also stamps agent_id (account↔agent attribution).
+                        # Removed the per-insert `pool.close()` - the pool is a shared
+                        # singleton; closing it here broke subsequent ticks/daemons.
+                        try:
+                            pool = await self._ensure_pool()
+                            await pool.execute(
+                                "INSERT INTO public.demo_orders "
+                                "(tracked_position_id, exchange, account_name, exchange_order_id, "
+                                "agent_id, symbol, direction, paper_entry, demo_entry, paper_sl, paper_tp, "
+                                "leverage, quantity, notional_usd, status, ordered_at) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
+                                "ON CONFLICT DO NOTHING",
+                                (tp_id, acct["exchange"], acct["account_name"], ext_id,
+                                 agent_id, sym, direction, entry, entry, sl, tp, leverage, qty, notional_eff)
+                            )
+                        except Exception as exc:
+                            LOG.debug("demo_orders insert (accepted) failed: %s", exc)
+                    else:
+                        rej = [u for u in updates if u.status == "rejected"]
+                        rej_msg = rej[0].message if rej else "unknown"
+                        LOG.warning("Signal #%d [%s] → %s/%s FAILED: %s",
+                                    tp_id, agent_id or "?", acct["exchange"],
+                                    acct["account_name"], rej_msg)
+                        flog("mirror_rejected", tp_id=tp_id, agent=agent_id,
+                             exchange=acct["exchange"], account=acct["account_name"],
+                             symbol=sym, direction=direction, paper_entry=entry,
+                             qty=qty, leverage=leverage,
+                             reason=(rej_msg or "")[:300])
+                        _pipe_event(
+                            "PIPE_REJ", tp_id,
+                            agent=agent_id or "?",
+                            exchange=acct["exchange"], account=acct["account_name"],
+                            symbol=sym, side=direction, entry=entry,
+                            qty=qty, lev=leverage,
+                            src=f"rejected: {(rej_msg or '')[:80]}",
+                        )
+                        # Record error (no pool.close() - shared singleton, see above)
+                        try:
+                            pool = await self._ensure_pool()
+                            await pool.execute(
+                                "INSERT INTO public.demo_orders "
+                                "(tracked_position_id, exchange, account_name, agent_id, symbol, direction, "
+                                "paper_entry, paper_sl, paper_tp, leverage, quantity, notional_usd, "
+                                "status, error_message, ordered_at) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'rejected',%s,NOW())",
+                                (tp_id, acct["exchange"], acct["account_name"], agent_id, sym, direction,
+                                 entry, sl, tp, leverage, qty, notional_eff,
+                                 (rej_msg or "unknown")[:500])
+                            )
+                        except Exception as exc:
+                            LOG.debug("demo_orders insert (rejected) failed: %s", exc)
+                except Exception as exc:
+                    LOG.error("Signal #%d → %s/%s ERROR: %s",
+                              tp_id, acct["exchange"], acct["account_name"], exc)
+                    flog("mirror_error", tp_id=tp_id, agent=agent_id,
+                         exchange=acct["exchange"], account=acct["account_name"],
+                         symbol=sym, error=str(exc)[:300])
+    
+            # end lock
         return placed_any
 
     async def _cancel_demo_order(self, tp_id: int, acct_name: str, order_id: str,
