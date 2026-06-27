@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,20 @@ from shared.utils.db import get_shared_pool
 logger = logging.getLogger("tickles.dashboard.market_routes")
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9./:_-]{2,40}$")
+
+
+def _parse_metadata(raw):
+    """Return a dict from a json/jsonb metadata value (handles str or dict)."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    return {}
 _ALLOWED_TF = {"1m", "5m", "15m", "30m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
 _TF_ALIASES = {
     "1M": "1m", "5M": "5m", "15M": "15m", "30M": "30m", "30": "30m",
@@ -1891,8 +1906,8 @@ async def handle_exchange_accounts(request: web.Request) -> web.Response:
             "lastTestedAt": r["last_tested_at"].isoformat() if r.get("last_tested_at") else None,
             "lastBalance": float(r["last_balance"]) if r.get("last_balance") else None,
             "lastError": r.get("last_error"),
-            "marginUsagePct": float(r["metadata"].get("margin_usage_pct", 100)) if r.get("metadata") else 100.0,
-            "marginMode": r["metadata"].get("margin_mode", "cross") if r.get("metadata") else "cross",
+            "marginUsagePct": float(_parse_metadata(r.get("metadata")).get("margin_usage_pct", 100)),
+            "marginMode": _parse_metadata(r.get("metadata")).get("margin_mode", "cross"),
             "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
         })
     return _json({"ok": True, "accounts": accounts})
@@ -1917,8 +1932,8 @@ async def handle_exchange_account(request: web.Request) -> web.Response:
             "isActive": r["is_active"],
             "lastTestedAt": r["last_tested_at"].isoformat() if r.get("last_tested_at") else None,
             "lastBalance": float(r["last_balance"]) if r.get("last_balance") else None,
-            "marginUsagePct": float(r["metadata"].get("margin_usage_pct", 100)) if r.get("metadata") else 100.0,
-            "marginMode": r["metadata"].get("margin_mode", "cross") if r.get("metadata") else "cross",
+            "marginUsagePct": float(_parse_metadata(r.get("metadata")).get("margin_usage_pct", 100)),
+            "marginMode": _parse_metadata(r.get("metadata")).get("margin_mode", "cross"),
         }})
     
     existing = await pool.fetch_one(
