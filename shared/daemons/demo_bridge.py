@@ -668,7 +668,6 @@ class DemoBridge:
                     "FROM public.demo_orders "
                     "WHERE symbol = $1 AND direction = $2 "
                     "AND exchange = $3 AND account_name = $4 "
-                    "AND status IN ('queued', 'pending') "
                     "ORDER BY ordered_at DESC LIMIT 1",
                     (sym, direction, acct["exchange"], acct["account_name"]))
                 if existing:
