@@ -25,7 +25,7 @@ from shared.execution.protocol import (
     ExecutionIntent, DIRECTION_LONG, DIRECTION_SHORT, ORDER_TYPE_LIMIT,
 )
 from shared.intelligence.copy_trade_monitor import (
-    _symbol_lookup_candidates, _distance_to_entry as _dist_to_entry, _entry_touched,
+    _symbol_lookup_candidates, _distance_to_entry as _dist_to_entry,
 )
 from shared.intelligence.position_monitor import fetch_latest_price as _fetch_price
 # Phase 1 (2026-05-29): forensic transaction log - every mirror event is
@@ -471,16 +471,17 @@ class DemoBridge:
             LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
             return False
 
-        # Replace snapshot price with candle-wick proximity.
-        # Same check the paper engine uses — if any recent 1m candle
-        # wick was within 5% of entry, the order is close enough to place.
-        dist_pct = 999.0  # default: assume far
+        # Smart queue: use the closest candle wick to entry to decide proximity.
+        # If price is within SMART_QUEUE_PLACE_PCT of entry, place a limit order
+        # at entry. The exchange fills it when price touches. We do NOT require a
+        # candle wick to have already touched entry — that caused misses when
+        # price moved past entry without a wick kiss.
+        dist_pct = 999.0
         try:
             candles = await self._queue_candles(sym, 60)
             if candles:
                 target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
                 if direction == DIRECTION_LONG:
-                    # Long: place when price dips within 5% above entry
                     for c in candles:
                         lo = c.get("low", 0)
                         if isinstance(lo, (int, float)) and entry > 0:
@@ -488,7 +489,6 @@ class DemoBridge:
                                 dist_pct = abs(lo - entry) / entry * 100.0
                                 break
                 else:
-                    # Short: place when price rises within 5% below entry
                     for c in candles:
                         hi = c.get("high", 0)
                         if isinstance(hi, (int, float)) and entry > 0:
@@ -497,45 +497,14 @@ class DemoBridge:
                                 break
         except Exception:
             pass
+
         if dist_pct > SMART_QUEUE_PLACE_PCT:
-            # Beyond threshold — but position_monitor already activated this.
-            # Trust the monitor: if activated_at is set, entry WAS touched.
+            # Beyond threshold - queue, don't place (skip if recently queued)
             _pipe_event(
                 "PIPE_DIST", tp_id, symbol=sym, side=direction,
                 entry=entry, dist_pct=dist_pct,
                 src=f"too_far band={SMART_QUEUE_PLACE_PCT}",
             )
-            # Place immediately rather than queuing based on stale candle wicks.
-            activated_at = signal.get("activated_at")
-            if activated_at:
-                LOG.debug("Signal #%d %s: activated %s, placing despite distance",
-                          tp_id, sym, activated_at)
-                dist_pct = 0  # force through the gate
-            else:
-                # Beyond threshold - queue, don't place (skip if recently queued)
-                pool = await self._ensure_pool()
-                recent = await pool.fetch_one(
-                    "SELECT id FROM public.demo_orders "
-                    "WHERE tracked_position_id = $1 AND exchange = 'queue' "
-                    "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
-                    (tp_id,))
-                if recent:
-                    return False
-                await pool.execute(
-                    "INSERT INTO public.demo_orders "
-                    "(exchange, account_name, symbol, direction, paper_entry, "
-                    "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                    "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                    "ON CONFLICT DO NOTHING",
-                    (sym, direction, entry, sl, tp, tp_id))
-                LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
-                          tp_id, sym, direction, entry, dist_pct)
-                return False
-        # Within threshold - verify wick touch before placing
-        candles = await self._queue_candles(
-            sym, SMART_QUEUE_TOUCH_CANDLES)
-        if not signal.get("activated_at") and not _entry_touched(candles, entry):
-            # Close but no wick yet - queue anyway (skip if recently queued)
             pool = await self._ensure_pool()
             recent = await pool.fetch_one(
                 "SELECT id FROM public.demo_orders "
@@ -551,17 +520,19 @@ class DemoBridge:
                 "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
                 "ON CONFLICT DO NOTHING",
                 (sym, direction, entry, sl, tp, tp_id))
-            LOG.debug("Queued signal #%d %s %s (within %.1f%% but no wick touch)",
-                      tp_id, sym, direction, dist_pct)
-            _pipe_event(
-                "PIPE_QUEUE", tp_id,
-                symbol=sym, side=direction,
-                entry=entry, dist_pct=dist_pct,
-                src=f"queue wait wick: {sym} candles={len(candles)}",
-            )
+            LOG.debug("Queued signal #%d %s %s @%.4f (dist=%.1f%%)",
+                      tp_id, sym, direction, entry, dist_pct)
             return False
 
-        # Map the actor to agent, then find accounts
+        # Within threshold (or activated by monitor): proceed to place
+        if not signal.get("activated_at"):
+            _pipe_event(
+                "PIPE_QUEUE", tp_id,
+                symbol=sym, side=direction, entry=entry, dist_pct=dist_pct,
+                src=f"within band; placing limit order",
+            )
+
+        # Map the actor to agent, then find accounts        # Map the actor to agent, then find accounts
         actor_id = signal.get("actor_id", "")
         
         # For now: mirror ALL trader signals to ALL mapped agents
@@ -1358,7 +1329,7 @@ class DemoBridge:
                 try:
                     await self._cancel_demo_order(
                         r["id"], r["account_name"], oid,
-                        exchange=r["exchange"],
+                        exchange=r["exchange"], symbol=r["symbol"],
                     )
                 except Exception:
                     pass
@@ -1388,21 +1359,22 @@ class DemoBridge:
     # ═══════════════════════════════════════════════════════════════════
 
     async def _promote_queued(self):
-        t0 = time.monotonic()
-        """Promote queued orders to pending when price is within place threshold.
+        """Promote queued orders whose price is now within place threshold.
 
-        Checks current price + candle wick-touch for every order with
-        status='queued'.  If price is within SMART_QUEUE_PLACE_PCT AND a
-        recent 1m candle's [low,high] range contains the entry price, the
-        order is promoted - status → 'pending', and the next _mirror_signal
-        call will place it on the exchange.
+        Uses tracked_positions.current_price for the distance check, then fetches
+        candles only for rows that are actually within the band. This avoids the
+        O(n) candle-fetch bottleneck that previously caused the function to time
+        out before reaching newer queued rows.
         """
+        t0 = time.monotonic()
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
-            "SELECT id, symbol, direction, paper_entry, tracked_position_id "
-            "FROM public.demo_orders "
-            "WHERE status = 'queued' "
-            "ORDER BY created_at ASC LIMIT 100"
+            "SELECT dmo.id, dmo.tracked_position_id, dmo.symbol, dmo.direction, "
+            "       dmo.paper_entry, dmo.status, dmo.created_at, tp.current_price "
+            "FROM public.demo_orders dmo "
+            "LEFT JOIN public.tracked_positions tp ON dmo.tracked_position_id = tp.id "
+            "WHERE dmo.status = 'queued' AND dmo.exchange = 'queue' "
+            "ORDER BY dmo.created_at ASC"
         )
         if not rows:
             return
@@ -1414,37 +1386,29 @@ class DemoBridge:
             if entry <= 0:
                 continue
             sym = r["symbol"]
+            direction = r["direction"]
 
-            # Check candle-wick proximity (same as placement gate)
-            candles = await self._queue_candles(sym, SMART_QUEUE_TOUCH_CANDLES)
-            if not candles:
-                continue
-            
+            # Fast distance check using tracked_positions.current_price
+            current = float(r["current_price"] or 0)
             dist_pct = 999.0
-            target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
-            if r["direction"] == DIRECTION_LONG:
-                for c in candles:
-                    lo = c.get("low", 0)
-                    if isinstance(lo, (int, float)) and entry > 0:
-                        if lo <= entry * target_band:
-                            dist_pct = abs(lo - entry) / entry * 100.0
-                            break
-            else:
-                for c in candles:
-                    hi = c.get("high", 0)
-                    if isinstance(hi, (int, float)) and entry > 0:
-                        if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
-                            dist_pct = abs(hi - entry) / entry * 100.0
-                            break
+            if current > 0:
+                dist_pct = abs(current - entry) / entry * 100.0
 
             if dist_pct > SMART_QUEUE_PLACE_PCT:
                 continue  # still too far
 
-            # Verify a wick actually touched entry (not just proximity)
-            if not _entry_touched(candles, entry):
-                continue  # within range but no wick kiss yet
+            # Within band - verify with a quick candle check (optional sanity)
+            candles = await self._queue_candles(sym, SMART_QUEUE_TOUCH_CANDLES)
+            if candles:
+                # Use the wick closest to entry
+                nearest = min((abs(float(c.get("low", 999999)) - entry) for c in candles))
+                nearest = min(nearest, min((abs(float(c.get("high", 0)) - entry) for c in candles)))
+                dist_pct = nearest / entry * 100.0
 
-            # Promote: status queued → pending so _mirror_signal picks it up
+            if dist_pct > SMART_QUEUE_PLACE_PCT:
+                continue
+
+            # Promote: status queued -> pending so _mirror_signal picks it up
             await pool.execute(
                 "UPDATE public.demo_orders SET status = 'pending', "
                 "updated_at = NOW() WHERE id = $1",
@@ -1452,15 +1416,15 @@ class DemoBridge:
             if r.get("tracked_position_id"):
                 self._mirrored.discard(r["tracked_position_id"])
             promoted += 1
-            LOG.info("Promoted queued→pending #%d %s %s @%.2f (dist=%.1f%%)",
-                     r["id"], sym, r["direction"], entry, dist_pct)
+            LOG.info("Promoted queued->pending #%d %s %s @%.2f (dist=%.1f%%)",
+                     r["id"], sym, direction, entry, dist_pct)
             _pipe_event(
                 "PIPE_PROM",
                 r.get("tracked_position_id", 0) or 0,
-                exchange="toobit",  # which exchange? we only know it's promoted
-                symbol=sym, side=r["direction"],
+                exchange="toobit",
+                symbol=sym, side=direction,
                 entry=entry, dist_pct=dist_pct,
-                src=f"queued→pending id={r['id']}",
+                src=f"queued->pending id={r['id']}",
             )
 
         if promoted:
@@ -1471,7 +1435,6 @@ class DemoBridge:
         else:
             LOG.info("_promote_queued: scanned %d queued rows, none promoted (elapsed %.1fs)",
                      len(rows) if rows else 0, time.monotonic() - t0)
-
     async def _expire_distant(self):
         """Close/cancel orders where price has drifted past the close threshold.
 
@@ -1481,11 +1444,13 @@ class DemoBridge:
         t0 = time.monotonic()
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
-            "SELECT id, symbol, direction, paper_entry, status, "
-            "exchange_order_id, exchange, account_name "
-            "FROM public.demo_orders "
-            "WHERE status IN ('queued', 'pending') "
-            "ORDER BY created_at ASC LIMIT 100"
+            "SELECT dmo.id, dmo.symbol, dmo.direction, dmo.paper_entry, dmo.status, "
+            "       dmo.exchange_order_id, dmo.exchange, dmo.account_name, dmo.ordered_at, "
+            "       tp.current_price "
+            "FROM public.demo_orders dmo "
+            "LEFT JOIN public.tracked_positions tp ON dmo.tracked_position_id = tp.id "
+            "WHERE dmo.status IN ('queued', 'pending') "
+            "ORDER BY dmo.created_at ASC LIMIT 100"
         )
         if not rows:
             return
@@ -1497,7 +1462,8 @@ class DemoBridge:
             if entry <= 0:
                 continue
 
-            price = await self._queue_price(r["symbol"])
+            # Use tracked_positions.current_price if available; fall back to live fetch
+            price = float(r["current_price"] or 0) or await self._queue_price(r["symbol"])
             dist_pct = 0.0
             if price is not None and price > 0:
                 dist_pct = _dist_to_entry(price, entry) * 100.0
