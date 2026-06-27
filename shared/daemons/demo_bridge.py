@@ -348,34 +348,31 @@ class DemoBridge:
         row = await pool.fetch_one(
             "SELECT COUNT(*) AS n FROM public.demo_orders "
             "WHERE exchange=%s AND account_name=%s "
-            "AND (status='pending' AND ordered_at > NOW() - INTERVAL '24 hours' "
+            "AND ((status='pending' AND ordered_at > NOW() - INTERVAL '24 hours') "
             "     OR (status='filled' AND closed_at IS NULL))",
             (exchange, account_name))
         return int(row["n"] if row else 0)
 
     async def _load_mirrored(self):
-        """Load already-mirrored tracked_position IDs from persistent tracking.
+        """Load already-mirrored competition_trade IDs from demo_orders on restart.
 
-        Phase 1 (2026-05-29) FIX - duplicate-order stacking on restart:
-        previously this only excluded positions that had a PAPER fill
-        (competition_trades). A pending signal whose paper leg had not yet
-        filled was NOT excluded, so EVERY daemon restart re-placed a fresh
-        resting limit order for it - duplicate orders piled up on the exchange
-        and ate the account margin ("ab not enough" / "balance not enough").
-        We now ALSO exclude any tracked_position that already has a
-        pending/filled demo order, so restarts never duplicate. Rejected
-        orders are intentionally NOT excluded so they can be retried after the
-        underlying cause (balance/position-mode) is fixed.
+        Phase B (2026-06-27): the bridge now mirrors competition_trades keyed by
+        competition_trade_id (one open paper trade → one exchange order). On
+        restart we rebuild self._mirrored from demo_orders.competition_trade_id
+        for rows that are still live on the exchange (pending/filled, not the
+        'queue' placeholder), so we never re-place an order for a paper trade we
+        already mirrored. Rejected/cancelled rows are intentionally NOT excluded
+        so they can retry once the cause clears.
         """
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
-            "SELECT DISTINCT tracked_position_id FROM public.demo_orders "
-            "WHERE tracked_position_id IS NOT NULL "
+            "SELECT DISTINCT competition_trade_id FROM public.demo_orders "
+            "WHERE competition_trade_id IS NOT NULL "
             "  AND status IN ('pending','filled') "
             "  AND exchange != 'queue'"
         )
-        self._mirrored = {r["tracked_position_id"] for r in rows}
-        LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
+        self._mirrored = {r["competition_trade_id"] for r in rows}
+        LOG.info("Loaded %d already-mirrored competition trades", len(self._mirrored))
 
     # ── Smart Queue helpers (delegate to paper's implementations) ──
 
@@ -408,44 +405,69 @@ class DemoBridge:
         return []
 
     async def _get_new_signals(self) -> List[Dict]:
-        """Get tracked_positions with pending/open status that haven't been mirrored."""
+        """Get OPEN paper trades from competition_trades for mapped agents.
+
+        SOURCE OF TRUTH = competition_trades (what each paper agent actually
+        entered), NOT tracked_positions (every interpreter signal). This is the
+        Phase B fix: the bridge mirrors exactly what e.g. copy_lev_3pct decided,
+        using the paper engine's own sizing (allocated, leverage). One open
+        competition_trade → at most one exchange order, keyed by
+        competition_trade_id.
+
+        Returns signal dicts shaped for _mirror_signal, carrying:
+          id (= tracked_position_id, for logging/correlation),
+          competition_trade_id, agent_id (the specific paper agent),
+          instrument_symbol, direction, entry_price, stop_loss, take_profit_1,
+          paper_allocated, paper_leverage, signal_timestamp, current_price.
+        """
+        mappings = getattr(self, "_mappings_cache", None) or {}
+        mapped_agents = list(mappings.keys())
+        if not mapped_agents:
+            return []
         pool = await self._ensure_pool()
         exclude = list(self._mirrored) if self._mirrored else [-1]
         rows = await pool.fetch_all(
-            "SELECT tp.id, tp.actor_id, tp.instrument_symbol, tp.direction, "
-            "tp.entry_price, tp.stop_loss, tp.take_profit_1, tp.status, "
-            "tp.signal_timestamp, tp.notional_usd, tp.activated_at, tp.current_price "
-            "FROM tracked_positions tp "
-            "WHERE tp.status IN ('pending', 'open') "
-            "AND tp.entry_price > 0 "
-            "AND tp.id != ALL($1::bigint[]) "
-            "AND ("
-            "  tp.signal_timestamp >= NOW() - INTERVAL '24 hours' "
-            "  OR EXISTS ("
-            "    SELECT 1 FROM public.demo_orders dord "
-            "    WHERE dord.tracked_position_id = tp.id "
-            "      AND dord.exchange = 'queue' "
-            "      AND dord.status = 'pending'"
-            "  )"
-            ")"
-            "ORDER BY tp.signal_timestamp ASC "
-            "LIMIT 50",
-            (exclude,)
+            "SELECT ct.id AS competition_trade_id, ct.tracked_position_id AS id, "
+            "       ct.agent_id, ct.symbol AS instrument_symbol, ct.direction, "
+            "       ct.entry_price, ct.sl_price AS stop_loss, ct.tp_price AS take_profit_1, "
+            "       ct.allocated AS paper_allocated, ct.leverage AS paper_leverage, "
+            "       ct.entered_at AS signal_timestamp, tp.current_price, tp.status AS tp_status "
+            "FROM public.competition_trades ct "
+            "JOIN public.tracked_positions tp ON tp.id = ct.tracked_position_id "
+            "WHERE ct.contest_id = 'copy-trade-scenarios' "
+            "  AND ct.exit_price IS NULL "                      # still open in paper
+            "  AND ct.tracked_position_id IS NOT NULL "
+            "  AND ct.agent_id = ANY($1::text[]) "              # only mapped agents
+            "  AND ct.entry_price > 0 "
+            "  AND ct.id != ALL($2::bigint[]) "                 # not already mirrored
+            "ORDER BY ct.entered_at ASC "
+            "LIMIT 100",
+            (mapped_agents, exclude)
         )
         return [dict(r) for r in rows]
 
     async def _get_cancelled_signals(self) -> List[Dict]:
-        """Get mirrored signals that are now cancelled - cancel their demo orders."""
-        if not self._orders:
-            return []
+        """Find live exchange orders whose paper trade has CLOSED.
+
+        Phase B: the paper trade (competition_trades) is authoritative. When it
+        closes (exit_price set), any still-resting/filled exchange order we
+        placed for it must be cancelled/closed. We read this from the DB (not
+        in-memory self._orders) so it survives restarts. Returns rows with the
+        demo_order id, exchange_order_id, exchange, account_name, symbol so the
+        caller can cancel on the exchange and mark the demo_order cancelled.
+        """
         pool = await self._ensure_pool()
-        ids = list(self._orders.keys())
-        if not ids:
-            return []
         rows = await pool.fetch_all(
-            "SELECT id, status FROM tracked_positions "
-            "WHERE id = ANY($1::bigint[]) AND status IN ('cancelled', 'expired', 'closed')",
-            (ids,),
+            "SELECT do.id AS demo_id, do.tracked_position_id AS id, "
+            "       do.competition_trade_id, do.exchange_order_id, do.exchange, "
+            "       do.account_name, do.symbol, do.status "
+            "FROM public.demo_orders do "
+            "JOIN public.competition_trades ct ON ct.id = do.competition_trade_id "
+            "WHERE do.competition_trade_id IS NOT NULL "
+            "  AND do.status = 'pending' "
+            "  AND do.exchange != 'queue' "
+            "  AND do.exchange_order_id IS NOT NULL "
+            "  AND ct.exit_price IS NOT NULL"          # paper trade has closed
         )
         return [dict(r) for r in rows]
 
@@ -474,6 +496,7 @@ class DemoBridge:
     async def _mirror_signal(self, signal: Dict, mappings: Dict[str, List[Dict]]):
         """Place limit order on demo accounts for a new signal."""
         tp_id = signal["id"]
+        ct_id = signal.get("competition_trade_id")
         sym = signal["instrument_symbol"]
         _pipe_event(
             "PIPE_BRGE", tp_id, symbol=sym, side=signal.get("direction", ""),
@@ -489,33 +512,18 @@ class DemoBridge:
         entry = float(signal["entry_price"] or 0)
         sl = float(signal["stop_loss"] or 0) if signal.get("stop_loss") else None
         tp = float(signal["take_profit_1"] or 0) if signal.get("take_profit_1") else None
-        notional = float(signal["notional_usd"] or 0)
-        
+
         if entry <= 0:
             return False
 
         # ── Smart Queue proximity gate ──
-        # Don't place orders when price is far from entry.  Queued orders
-        # wait until price approaches (promoted by _promote_queued).
+        # The paper trade is already open; we just decide WHEN to place the
+        # exchange order based on price proximity to entry (margin management).
         current_price = await self._queue_price(sym)
         if current_price is None or current_price <= 0:
-            # No price data - queue, don't place blindly (skip if recently queued)
-            pool = await self._ensure_pool()
-            recent = await pool.fetch_one(
-                "SELECT id FROM public.demo_orders "
-                "WHERE tracked_position_id = $1 AND exchange = 'queue' "
-                "AND ordered_at > NOW() - INTERVAL '5 minutes' LIMIT 1",
-                (tp_id,))
-            if recent:
-                return False
-            await pool.execute(
-                "INSERT INTO public.demo_orders "
-                "(exchange, account_name, symbol, direction, paper_entry, "
-                "paper_sl, paper_tp, tracked_position_id, status, ordered_at) "
-                "VALUES ('queue', 'queue', %s, %s, %s, %s, %s, %s, 'queued', NOW()) "
-                "ON CONFLICT DO NOTHING",
-                (sym, direction, entry, sl, tp, tp_id))
-            LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
+            # No price data yet — skip this tick and retry next tick (no queue
+            # placeholder; the open paper trade itself is the durable record).
+            LOG.debug("Signal #%d %s %s: no price data, retry next tick", tp_id, sym, direction)
             return False
 
         # Smart queue: use current price proximity to decide whether to place.
@@ -576,15 +584,14 @@ class DemoBridge:
                 src=f"within band; placing limit order",
             )
 
-        # Map the actor to agent, then find accounts
-        actor_id = signal.get("actor_id", "")
-        
-        # For now: mirror ALL trader signals to ALL mapped agents
-        # This places limit orders for every tracked_position on every mapped account
-        accounts = []
-        for agent_id, accts in mappings.items():
-            accounts.extend(accts)
-        
+        # Phase B routing: this signal IS a specific paper agent's open trade
+        # (from competition_trades). Mirror it ONLY to the account(s) mapped to
+        # THAT agent — never to every mapped account. This is the fix for the
+        # old "mirror all trader signals to all accounts" behaviour that caused
+        # divergence from what the paper agent actually entered.
+        signal_agent = signal.get("agent_id", "")
+        accounts = list(mappings.get(signal_agent, []))
+
         # Deduplicate accounts
         seen = set()
         unique_accounts = []
@@ -733,7 +740,7 @@ class DemoBridge:
                             "PIPE_REJ", tp_id,
                             exchange=acct["exchange"], account=acct["account_name"],
                             agent=agent_id, symbol=sym, side=direction,
-                            entry=entry, qty=qty, lev=leverage,
+                            entry=entry, qty=0, lev=leverage,
                             src=f"margin_cap headroom=0 usage={margin_usage_pct}%",
                         )
                         continue
@@ -854,14 +861,23 @@ class DemoBridge:
                             pool = await self._ensure_pool()
                             await pool.execute(
                                 "INSERT INTO public.demo_orders "
-                                "(tracked_position_id, exchange, account_name, exchange_order_id, "
+                                "(tracked_position_id, competition_trade_id, exchange, account_name, exchange_order_id, "
                                 "agent_id, symbol, direction, paper_entry, demo_entry, paper_sl, paper_tp, "
                                 "leverage, quantity, notional_usd, status, ordered_at) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',NOW()) "
                                 "ON CONFLICT DO NOTHING",
-                                (tp_id, acct["exchange"], acct["account_name"], ext_id,
+                                (tp_id, ct_id, acct["exchange"], acct["account_name"], ext_id,
                                  agent_id, sym, direction, entry, entry, sl, tp, leverage, qty, notional_eff)
                             )
+                            # Write the exchange order back onto the paper trade so
+                            # the dashboard/APIs can do 100% paper-vs-real comparison.
+                            if ct_id is not None:
+                                await pool.execute(
+                                    "UPDATE public.competition_trades "
+                                    "SET exchange_order_id = %s, exchange_name = %s, exchange_account = %s "
+                                    "WHERE id = %s",
+                                    (ext_id, acct["exchange"], acct["account_name"], ct_id)
+                                )
                         except Exception as exc:
                             LOG.debug("demo_orders insert (accepted) failed: %s", exc)
                     else:
@@ -888,11 +904,12 @@ class DemoBridge:
                             pool = await self._ensure_pool()
                             await pool.execute(
                                 "INSERT INTO public.demo_orders "
-                                "(tracked_position_id, exchange, account_name, agent_id, symbol, direction, "
+                                "(tracked_position_id, competition_trade_id, exchange, account_name, agent_id, symbol, direction, "
                                 "paper_entry, paper_sl, paper_tp, leverage, quantity, notional_usd, "
                                 "status, error_message, ordered_at) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'rejected',%s,NOW())",
-                                (tp_id, acct["exchange"], acct["account_name"], agent_id, sym, direction,
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'rejected',%s,NOW()) "
+                                "ON CONFLICT DO NOTHING",
+                                (tp_id, ct_id, acct["exchange"], acct["account_name"], agent_id, sym, direction,
                                  entry, sl, tp, leverage, qty, notional_eff,
                                  (rej_msg or "unknown")[:500])
                             )
@@ -1625,7 +1642,7 @@ class DemoBridge:
         t0 = time.monotonic()
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
-            "SELECT dmo.id, dmo.symbol, dmo.direction, dmo.paper_entry, dmo.status, "
+            "SELECT dmo.id, dmo.tracked_position_id, dmo.symbol, dmo.direction, dmo.paper_entry, dmo.status, "
             "       dmo.exchange_order_id, dmo.exchange, dmo.account_name, dmo.ordered_at, "
             "       tp.current_price "
             "FROM public.demo_orders dmo "
@@ -1665,7 +1682,8 @@ class DemoBridge:
                         await self._cancel_demo_order(
                             r.get("tracked_position_id", 0),
                             r["account_name"], r["exchange_order_id"],
-                            exchange=r.get("exchange", "bybit"))
+                            exchange=r.get("exchange", "bybit"),
+                            symbol=r.get("symbol", ""))
                     except Exception:
                         pass
                     await pool.execute(
@@ -1726,7 +1744,7 @@ class DemoBridge:
                         entry=float(r.get("paper_entry") or 0),
                         price=price, dist_pct=dist_pct,
                         status="cancelled",
-                        src=f"pending stale age_h={age_h:.1f}",
+                        src=f"distant dist_pct={dist_pct:.1f}",
                     )
                 except Exception as exc:
                     LOG.debug("_expire_distant cancel failed #%d: %s", r["id"], exc)
@@ -1745,6 +1763,7 @@ class DemoBridge:
         mappings = await self._load_mappings()
         if not mappings:
             return
+        self._mappings_cache = mappings  # so _get_new_signals can read mapped agents
 
         # 0. Refresh sizing knobs from the same DB table the paper engine uses.
         await self._refresh_sizing()
@@ -1794,8 +1813,10 @@ class DemoBridge:
             LOG.info("Tick: %d new signals to mirror", len(signals))
             for s in signals:
                 placed = await self._mirror_signal(s, mappings)
+                # Track by competition_trade_id (the source-of-truth key) so the
+                # exclude filter in _get_new_signals matches ct.id.
                 if placed:
-                    self._mirrored.add(s["id"])
+                    self._mirrored.add(s["competition_trade_id"])
                 await asyncio.sleep(0.3)  # Rate limit
         
         # 1b. Reconcile pending demo orders against the exchange (mark fills)
@@ -1823,24 +1844,30 @@ class DemoBridge:
         # is the authoritative signal.)
         await self._cancel_orphan_orders()
 
-        # 2. Cancel orders for cancelled/expired signals
+        # 2. Cancel exchange orders whose paper trade has CLOSED (DB-driven,
+        #    survives restarts — competition_trades.exit_price is authoritative).
         cancelled = await self._get_cancelled_signals()
         for c in cancelled:
             tp_id = c["id"]
-            orders = self._orders.pop(tp_id, {})
-            for acct_name, info in orders.items():
-                if isinstance(info, dict):
-                    oid = info.get("order_id")
-                    exch = info.get("exchange", "bybit")
-                    sym_cache = info.get("symbol")
-                else:
-                    oid = info  # backward compat with old string-format entries
-                    exch = "bybit"
-                    sym_cache = None
-                if oid:
-                    await self._cancel_demo_order(tp_id, acct_name, oid, exchange=exch, symbol=sym_cache or "")
-            if orders:
-                LOG.info("Signal #%d cancelled - removed %d demo orders", tp_id, len(orders))
+            oid = c.get("exchange_order_id")
+            exch = c.get("exchange", "bybit")
+            sym_cache = c.get("symbol") or ""
+            acct_name = c.get("account_name")
+            if not oid:
+                continue
+            try:
+                await self._cancel_demo_order(tp_id, acct_name, oid, exchange=exch, symbol=sym_cache)
+                pool = await self._ensure_pool()
+                await pool.execute(
+                    "UPDATE public.demo_orders SET status='cancelled', "
+                    "error_message='paper trade closed', updated_at=NOW() WHERE id=$1",
+                    (c["demo_id"],))
+                # Drop from in-memory tracking if present
+                self._orders.pop(tp_id, None)
+                LOG.info("Paper closed → cancelled exchange order %s (tp=%s ct=%s)",
+                         oid, tp_id, c.get("competition_trade_id"))
+            except Exception as exc:
+                LOG.warning("cancel-on-paper-close failed for order %s: %s", oid, exc)
 
     async def run_forever(self):
         LOG.info("DemoBridge starting - signal-driven (poll=%ds)", POLL_INTERVAL_S)
