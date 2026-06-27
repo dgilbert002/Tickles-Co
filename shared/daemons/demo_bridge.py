@@ -333,7 +333,9 @@ class DemoBridge:
         pool = await self._ensure_pool()
         rows = await pool.fetch_all(
             "SELECT DISTINCT tracked_position_id FROM public.demo_orders "
-            "WHERE tracked_position_id IS NOT NULL AND status IN ('pending','filled')"
+            "WHERE tracked_position_id IS NOT NULL "
+            "  AND status IN ('pending','filled') "
+            "  AND exchange != 'queue'"
         )
         self._mirrored = {r["tracked_position_id"] for r in rows}
         LOG.info("Loaded %d already-mirrored tracked positions", len(self._mirrored))
@@ -375,12 +377,20 @@ class DemoBridge:
         rows = await pool.fetch_all(
             "SELECT tp.id, tp.actor_id, tp.instrument_symbol, tp.direction, "
             "tp.entry_price, tp.stop_loss, tp.take_profit_1, tp.status, "
-            "tp.signal_timestamp, tp.notional_usd, tp.activated_at "
+            "tp.signal_timestamp, tp.notional_usd, tp.activated_at, tp.current_price "
             "FROM tracked_positions tp "
             "WHERE tp.status IN ('pending', 'open') "
             "AND tp.entry_price > 0 "
             "AND tp.id != ALL($1::bigint[]) "
-            "AND tp.signal_timestamp >= NOW() - INTERVAL '24 hours' "
+            "AND ("
+            "  tp.signal_timestamp >= NOW() - INTERVAL '24 hours' "
+            "  OR EXISTS ("
+            "    SELECT 1 FROM public.demo_orders dord "
+            "    WHERE dord.tracked_position_id = tp.id "
+            "      AND dord.exchange = 'queue' "
+            "      AND dord.status = 'pending'"
+            "  )"
+            ")"
             "ORDER BY tp.signal_timestamp ASC "
             "LIMIT 50",
             (exclude,)
@@ -471,32 +481,44 @@ class DemoBridge:
             LOG.debug("Queued signal #%d %s %s (no price data)", tp_id, sym, direction)
             return False
 
-        # Smart queue: use the closest candle wick to entry to decide proximity.
+        # Smart queue: use current price proximity to decide whether to place.
         # If price is within SMART_QUEUE_PLACE_PCT of entry, place a limit order
-        # at entry. The exchange fills it when price touches. We do NOT require a
-        # candle wick to have already touched entry — that caused misses when
-        # price moved past entry without a wick kiss.
+        # at entry. The exchange fills it when price touches. We use
+        # tracked_positions.current_price first (same as _promote_queued) and
+        # only fall back to candles if current_price is missing.
         dist_pct = 999.0
-        try:
-            candles = await self._queue_candles(sym, 60)
-            if candles:
-                target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
-                if direction == DIRECTION_LONG:
-                    for c in candles:
-                        lo = c.get("low", 0)
-                        if isinstance(lo, (int, float)) and entry > 0:
-                            if lo <= entry * target_band:
-                                dist_pct = abs(lo - entry) / entry * 100.0
-                                break
-                else:
-                    for c in candles:
-                        hi = c.get("high", 0)
-                        if isinstance(hi, (int, float)) and entry > 0:
-                            if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
-                                dist_pct = abs(hi - entry) / entry * 100.0
-                                break
-        except Exception:
-            pass
+        current = signal.get("current_price")
+        if current is not None:
+            try:
+                current = float(current)
+            except (TypeError, ValueError):
+                current = 0.0
+        if isinstance(current, (int, float)) and current > 0 and entry > 0:
+            if direction == DIRECTION_LONG:
+                dist_pct = (current - entry) / entry * 100.0
+            else:
+                dist_pct = (entry - current) / entry * 100.0
+        else:
+            try:
+                candles = await self._queue_candles(sym, 60)
+                if candles:
+                    target_band = 1.0 + (SMART_QUEUE_PLACE_PCT / 100.0)
+                    if direction == DIRECTION_LONG:
+                        for c in candles:
+                            lo = c.get("low", 0)
+                            if isinstance(lo, (int, float)) and entry > 0:
+                                if lo <= entry * target_band:
+                                    dist_pct = abs(lo - entry) / entry * 100.0
+                                    break
+                    else:
+                        for c in candles:
+                            hi = c.get("high", 0)
+                            if isinstance(hi, (int, float)) and entry > 0:
+                                if hi >= entry * (1.0 - SMART_QUEUE_PLACE_PCT / 100.0):
+                                    dist_pct = abs(hi - entry) / entry * 100.0
+                                    break
+            except Exception:
+                pass
 
         if dist_pct > SMART_QUEUE_PLACE_PCT:
             # Beyond threshold - queue, don't place (skip if recently queued)
@@ -532,7 +554,7 @@ class DemoBridge:
                 src=f"within band; placing limit order",
             )
 
-        # Map the actor to agent, then find accounts        # Map the actor to agent, then find accounts
+        # Map the actor to agent, then find accounts
         actor_id = signal.get("actor_id", "")
         
         # For now: mirror ALL trader signals to ALL mapped agents
@@ -1380,13 +1402,44 @@ class DemoBridge:
             return
         LOG.debug("_promote_queued: checking %d queued orders", len(rows))
 
+        # Pre-load existing non-queue demo_orders so we don't promote a queue
+        # row for a position that already has a real order on some exchange.
+        tp_ids = [r["tracked_position_id"] for r in rows if r.get("tracked_position_id")]
+        existing_rows = await pool.fetch_all(
+            "SELECT tracked_position_id, exchange, status, direction, paper_entry "
+            "FROM public.demo_orders "
+            "WHERE tracked_position_id = ANY($1) AND exchange != 'queue'",
+            (tp_ids,)
+        ) if tp_ids else []
+        existing_map = {}
+        for er in existing_rows:
+            tid = er["tracked_position_id"]
+            existing_map.setdefault(tid, []).append(dict(er))
+
         promoted = 0
+        skipped_existing = 0
         for r in rows:
             entry = float(r["paper_entry"] or 0)
             if entry <= 0:
                 continue
             sym = r["symbol"]
             direction = r["direction"]
+            tp_id = r.get("tracked_position_id")
+
+            # Skip if this position already has a real demo order on any exchange
+            if tp_id and existing_map.get(tp_id):
+                skip = False
+                for ex in existing_map[tp_id]:
+                    # Same-direction, similar-entry existing order means the
+                    # bridge already placed this trade; the queue row is stale.
+                    if ex["direction"] == direction and ex["status"] in ("pending", "filled", "closed"):
+                        ex_entry = float(ex["paper_entry"] or 0)
+                        if ex_entry > 0 and abs(ex_entry - entry) / entry < 0.02:
+                            skip = True
+                            break
+                if skip:
+                    skipped_existing += 1
+                    continue
 
             # Fast distance check using tracked_positions.current_price
             current = float(r["current_price"] or 0)
@@ -1413,24 +1466,25 @@ class DemoBridge:
                 "UPDATE public.demo_orders SET status = 'pending', "
                 "updated_at = NOW() WHERE id = $1",
                 (r["id"],))
-            if r.get("tracked_position_id"):
-                self._mirrored.discard(r["tracked_position_id"])
+            if tp_id:
+                self._mirrored.discard(tp_id)
             promoted += 1
             LOG.info("Promoted queued->pending #%d %s %s @%.2f (dist=%.1f%%)",
                      r["id"], sym, direction, entry, dist_pct)
             _pipe_event(
                 "PIPE_PROM",
-                r.get("tracked_position_id", 0) or 0,
+                tp_id or 0,
                 exchange="toobit",
                 symbol=sym, side=direction,
                 entry=entry, dist_pct=dist_pct,
                 src=f"queued->pending id={r['id']}",
             )
 
-        if promoted:
-            LOG.info("_promote_queued: %d orders promoted in %.1fs", promoted, time.monotonic() - t0)
+        if promoted or skipped_existing:
+            LOG.info("_promote_queued: %d promoted, %d skipped (existing order) in %.1fs",
+                     promoted, skipped_existing, time.monotonic() - t0)
             _pipe_event("PIPE_BRGE", 0, status="promote_done",
-                        src=f"promoted={promoted}",
+                        src=f"promoted={promoted} skipped_existing={skipped_existing}",
                         age_h=(time.monotonic() - t0) / 3600.0)
         else:
             LOG.info("_promote_queued: scanned %d queued rows, none promoted (elapsed %.1fs)",
