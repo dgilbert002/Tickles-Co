@@ -698,12 +698,40 @@ class CcxtExecutionAdapter:
                 total_dict = bal.get("total", {})
                 for k, v in total_dict.items():
                     result[f"__total__{k}"] = float(v or 0)
-                # Unrealized PnL from exchange info
-                info_list = bal.get("info", [])
-                if info_list and isinstance(info_list, list):
-                    upnl = info_list[0].get("unrealizedPL")
-                    if upnl is not None:
-                        result["__unrealizedPL__USDT"] = float(upnl)
+                used_dict = bal.get("used", {})
+                for k, v in used_dict.items():
+                    result[f"__used__{k}"] = float(v or 0)
+                # Unrealized PnL + margin breakdown from exchange info
+                info = bal.get("info", {})
+                # Toobit: info is a list; Bybit/Bitget: info is a dict with nested list
+                if isinstance(info, list) and len(info) > 0:
+                    raw = info[0]
+                elif isinstance(info, dict):
+                    raw = info
+                    # Bybit Unified nests coin data under result.list[0]
+                    lst = info.get("result", {}).get("list") if isinstance(info.get("result"), dict) else None
+                    if isinstance(lst, list) and len(lst) > 0:
+                        raw = lst[0]
+                else:
+                    raw = {}
+                if isinstance(raw, dict):
+                    # Toobit
+                    if "crossUnRealizedPnl" in raw:
+                        result["__unrealizedPL__USDT"] = float(raw["crossUnRealizedPnl"])
+                    if "positionMargin" in raw:
+                        result["__positionMargin__USDT"] = float(raw["positionMargin"])
+                    if "orderMargin" in raw:
+                        result["__orderMargin__USDT"] = float(raw["orderMargin"])
+                    # Bitget / generic
+                    if "unrealizedPL" in raw:
+                        result["__unrealizedPL__USDT"] = float(raw["unrealizedPL"])
+                    # Bybit Unified
+                    if "totalPerpUPL" in raw:
+                        result["__unrealizedPL__USDT"] = float(raw["totalPerpUPL"])
+                    if "totalInitialMargin" in raw:
+                        result["__positionMargin__USDT"] = float(raw["totalInitialMargin"])
+                    if "totalOrderIM" in raw:
+                        result["__orderMargin__USDT"] = float(raw["totalOrderIM"])
                 return result
             # Fallback: extract "free" from each per-currency dict (legacy format).
             result = {}

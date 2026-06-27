@@ -127,6 +127,10 @@ _DEMO_SIZING_CACHE: Dict[str, Any] = {
 # Fallback balance when the exchange balance can't be fetched (~paper wallet).
 DEMO_FALLBACK_BALANCE = float(os.environ.get("DEMO_FALLBACK_BALANCE", "1000.0"))
 
+# Default cap on how much of total equity can be locked in positions+orders.
+# 100 = use full account (legacy behaviour). 50 = lock at most 50% of equity.
+DEFAULT_MARGIN_USAGE_PCT = float(os.environ.get("DEFAULT_MARGIN_USAGE_PCT", "100.0"))
+
 # ── Smart Queue proximity thresholds ──
 # Place when price is within this % of entry (with wick-touch verification).
 SMART_QUEUE_PLACE_PCT = float(os.environ.get("SMART_QUEUE_PLACE_PCT", "5.0"))
@@ -144,7 +148,12 @@ class DemoBridge:
 
         self._mirrored: set = set()        # tracked_position IDs already mirrored
         self._orders: Dict[int, Dict] = {} # tracked_position_id → {account: order_id}
-        self._acct_balance: Dict[str, float] = {}  # "{exchange}/{account}" → USDT balance (refreshed each tick)
+        self._acct_balance: Dict[str, float] = {}  # "{exchange}/{account}" → USDT available balance
+        self._acct_equity: Dict[str, float] = {}    # "{exchange}/{account}" → USDT total equity
+        self._acct_used: Dict[str, float] = {}      # → USDT locked margin (positions + orders)
+        self._acct_position_margin: Dict[str, float] = {}  # → USDT position margin
+        self._acct_order_margin: Dict[str, float] = {}     # → USDT order margin
+        self._acct_margin_usage_pct: Dict[str, float] = {}  # → user cap
 
 
     async def _ensure_pool(self):
@@ -183,13 +192,15 @@ class DemoBridge:
         return getattr(self, "_acct_agent", {}).get(f"{exchange}/{account_name}")
 
     async def _refresh_balances(self, mappings: Dict[str, List[Dict]]):
-        """Pull the REAL USDT balance for every mapped demo account once per tick.
+        """Pull the REAL USDT balance/equity for every mapped account once per tick.
 
-        The accurate sizing model derives each order's notional from the demo
-        account's actual balance (so a demo order reproduces what the paper
-        agent would do with the same money). We cache it per tick to avoid one
-        balance call per signal. On failure we keep the last value, falling back
-        to DEMO_FALLBACK_BALANCE the first time.
+        Caches per account:
+          - balance: available/free USDT for immediate trading
+          - total_equity: total account value including unrealized PnL
+          - position_margin + order_margin: already-locked margin
+          - unrealized_pnl
+          - margin_usage_pct: user cap on how much equity may be locked
+        On failure keep the last value, falling back to DEMO_FALLBACK_BALANCE.
         """
         seen = set()
         for accts in mappings.values():
@@ -202,17 +213,13 @@ class DemoBridge:
                     bal = await self._adapter.fetch_balance(
                         exchange=a["exchange"], account_name=a["account_name"])
                     usdt = float(bal.get("USDT") or 0.0)
-                    # Always update - even zero balance must be recorded
-                    # so sizing sees the real free balance, not the fallback.
-                    if "USDT" in bal:
-                        self._acct_balance[key] = usdt
-                    # Persist to DB so dashboard/cron see live balances
-                    # last_balance = free USDT (for order sizing gas gauge)
-                    # metadata stores full breakdown: total, free, used, equity
-                    pool = await self._ensure_pool()
+                    used_usdt = float(bal.get("__used__USDT", 0.0))
                     total_usdt = float(bal.get("__total__USDT", usdt))
                     unrealized_pnl = float(bal.get("__unrealizedPL__USDT", 0))
+                    position_margin = float(bal.get("__positionMargin__USDT", 0))
+                    order_margin = float(bal.get("__orderMargin__USDT", 0))
                     free_usdt = usdt
+
                     # Sanity floor: if free balance dropped >90% from last known
                     # value, the exchange returned garbage (Toobit decimal quirk).
                     prev = self._acct_balance.get(key)
@@ -221,24 +228,53 @@ class DemoBridge:
                                     key, prev, usdt, prev)
                         usdt = prev
                         free_usdt = usdt
-                    self._acct_balance[key] = usdt
+
+                    # Load user margin cap from metadata (default 100 = no cap)
+                    pool = await self._ensure_pool()
+                    cap_row = await pool.fetch_one(
+                        "SELECT COALESCE(metadata->>'margin_usage_pct','100')::float AS margin_usage_pct "
+                        "FROM public.exchange_accounts WHERE exchange=$1 AND account_name=$2",
+                        (a["exchange"], a["account_name"]))
+                    margin_usage_pct = float(cap_row["margin_usage_pct"]) if cap_row else DEFAULT_MARGIN_USAGE_PCT
+
+                    # Always update - even zero balance must be recorded
+                    # so sizing sees the real free balance, not the fallback.
+                    if "USDT" in bal:
+                        self._acct_balance[key] = usdt
+                    self._acct_used[key] = used_usdt
+                    self._acct_equity[key] = total_usdt
+                    self._acct_position_margin[key] = position_margin
+                    self._acct_order_margin[key] = order_margin
+                    self._acct_margin_usage_pct[key] = margin_usage_pct
+
+                    # Persist to DB so dashboard/cron see live balances
                     await pool.execute(
                         "UPDATE public.exchange_accounts "
                         "SET last_balance = $1, "
                         "    metadata = jsonb_set("
                         "      jsonb_set("
-                        "        jsonb_set(COALESCE(metadata,'{}'::jsonb), "
-                        "          '{balance_free}', $2::text::jsonb), "
-                        "        '{balance_total}', $3::text::jsonb), "
-                        "      '{unrealized_pnl}', $4::text::jsonb), "
+                        "        jsonb_set("
+                        "          jsonb_set("
+                        "            jsonb_set(COALESCE(metadata,'{}'::jsonb), "
+                        "              '{balance_free}', $2::text::jsonb), "
+                        "            '{balance_total}', $3::text::jsonb), "
+                        "          '{unrealized_pnl}', $4::text::jsonb), "
+                        "        '{position_margin}', $5::text::jsonb), "
+                        "      '{order_margin}', $6::text::jsonb), "
                         "    last_tested_at = NOW() "
-                        "WHERE exchange = $5 AND account_name = $6",
+                        "WHERE exchange = $7 AND account_name = $8",
                         (round(free_usdt, 2), str(round(free_usdt, 2)),
                          str(round(total_usdt, 2)), str(round(unrealized_pnl, 2)),
+                         str(round(position_margin, 2)), str(round(order_margin, 2)),
                          a["exchange"], a["account_name"]))
                 except Exception as exc:
-                    LOG.debug("balance refresh %s failed: %s", key, exc)
+                    LOG.info("balance refresh %s failed: %s", key, exc)
                 self._acct_balance.setdefault(key, DEMO_FALLBACK_BALANCE)
+                self._acct_used.setdefault(key, 0.0)
+                self._acct_equity.setdefault(key, DEMO_FALLBACK_BALANCE)
+                self._acct_position_margin.setdefault(key, 0.0)
+                self._acct_order_margin.setdefault(key, 0.0)
+                self._acct_margin_usage_pct.setdefault(key, DEFAULT_MARGIN_USAGE_PCT)
 
     @staticmethod
     def _demo_sizing(key: str, default: float) -> float:
@@ -674,6 +710,62 @@ class DemoBridge:
                           tp_id, acct["exchange"], acct["account_name"],
                           notional_eff, allocated, balance)
                 continue
+
+            # Account-level margin cap (default 100% = no cap).
+            # equity_cap = total_equity * margin_usage_pct / 100
+            # margin_used = total_equity - available_margin
+            # margin_headroom = equity_cap - margin_used
+            # If the new order needs more margin than headroom, shrink it.
+            acct_equity = self._acct_equity.get(acct_key, balance)
+            acct_avail = self._acct_balance.get(acct_key, 0.0)
+            margin_usage_pct = float(
+                getattr(self, "_acct_margin_usage_pct", {}).get(acct_key, 100.0))
+            # margin_used is whatever is already locked (positions + open orders).
+            # CCXT's USDT.used is the exchange-normalized locked margin; use it.
+            # Fall back to equity - available if unavailable.
+            margin_used = float(
+                getattr(self, "_acct_used", {}).get(acct_key, 0.0))
+            if margin_used <= 0 and acct_equity > 0 and acct_avail >= 0:
+                margin_used = max(0.0, acct_equity - acct_avail)
+            equity_cap = acct_equity * margin_usage_pct / 100.0
+            margin_headroom = max(0.0, equity_cap - margin_used)
+            required_margin = allocated  # allocated margin for this position
+
+            _pipe_event(
+                "PIPE_MARG", tp_id,
+                exchange=acct["exchange"], account=acct["account_name"],
+                symbol=sym, side=direction,
+                equity=acct_equity, equity_cap=equity_cap,
+                margin_used=margin_used, margin_headroom=margin_headroom,
+                required_margin=required_margin, margin_usage_pct=margin_usage_pct,
+            )
+
+            if required_margin > margin_headroom:
+                if margin_headroom <= 0:
+                    LOG.info("Signal #%d → %s/%s: SKIP margin cap hit "
+                             "(equity=%.2f cap=%.2f used=%.2f headroom=0)",
+                             tp_id, acct["exchange"], acct["account_name"],
+                             acct_equity, equity_cap, margin_used)
+                    _pipe_event(
+                        "PIPE_REJ", tp_id,
+                        exchange=acct["exchange"], account=acct["account_name"],
+                        agent=agent_id, symbol=sym, side=direction,
+                        entry=entry, qty=qty, lev=leverage,
+                        src=f"margin_cap headroom=0 usage={margin_usage_pct}%",
+                    )
+                    continue
+                # Shrink notional proportionally to fit headroom
+                scale = margin_headroom / required_margin
+                old_notional = notional_eff
+                notional_eff = notional_eff * scale
+                allocated = allocated * scale
+                qty = notional_eff / entry if entry > 0 else 0.0
+                LOG.info("Signal #%d → %s/%s: SHRINK %.1fx to fit margin cap "
+                         "(notional %.2f→%.2f, allocated %.2f→%.2f, headroom %.2f)",
+                         tp_id, acct["exchange"], acct["account_name"], scale,
+                         old_notional, notional_eff, allocated / scale, allocated, margin_headroom)
+                if notional_eff <= 0 or allocated <= 0 or qty <= 0:
+                    continue
 
             # Quantity from the per-account notional, rounded to exchange
             # precision and checked against the symbol's minimum order size.
