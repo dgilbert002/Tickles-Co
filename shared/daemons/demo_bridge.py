@@ -687,6 +687,11 @@ class DemoBridge:
                     old_ts = existing.get("ordered_at")
 
                     if entry_diff <= 0.02:  # within 2% - same trade, updated
+                        if existing.get("status") == "filled":
+                            # Already have a position - do not add to it.
+                            LOG.debug("Signal #%d: %s/%s %s already has filled position within 2%% - skip",
+                                      tp_id, acct["exchange"], acct["account_name"], sym)
+                            continue
                         if new_ts > old_ts:
                             # Newer - place new first, cancel old after
                             LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
