@@ -1469,93 +1469,78 @@ async def handle_unified_signals(request: web.Request) -> web.Response:
     pool = await get_shared_pool()
 
     # 1. Query all signals with their metadata
+    # CTE fetches the newest signal_interpretations first, then joins metadata.
+    # This avoids DISTINCT ON over large left-joined tables and lets Postgres
+    # use the new idx_tp_signal_interp index for the tracked_positions join.
     status_filter_sql = f"AND tp.status = '{status_filter}'" if status_filter else ""
     limit_sql = str(int(limit))
 
     rows = await pool.fetch_all(
-        """
-        SELECT DISTINCT ON (si.id) si.id, si.instrument_symbol, si.instrument_exchange,
-               si.consensus_direction, si.entry_price, si.stop_loss, si.take_profit_1,
-               si.take_profit_2, si.take_profit_3, si.timeframe,
-               si.consensus_confidence, si.consensus_method,
-               si.llm_reasoning, si.ai_comment, si.created_at,
-               si.news_item_id, si.media_item_id, si.trader_profile_id,
-               ni.author, ni.headline,
-               tr.handle_raw, tr.handle_normalized, tr.display_name, tr.platform,
-               mi.id AS media_id, mi.local_path AS media_local_path, mi.source_url AS media_source_url,
+        f"""
+        WITH recent_si AS (
+            SELECT si.id, si.instrument_symbol, si.instrument_exchange,
+                   si.consensus_direction, si.entry_price, si.stop_loss, si.take_profit_1,
+                   si.take_profit_2, si.take_profit_3, si.timeframe,
+                   si.consensus_confidence, si.consensus_method,
+                   si.llm_reasoning, si.ai_comment, si.created_at,
+                   si.news_item_id, si.media_item_id, si.trader_profile_id
+            FROM public.signal_interpretations si
+            WHERE si.created_at > now() - interval '7 days'
+            ORDER BY si.id DESC LIMIT {limit_sql}
+        )
+        SELECT si.*,
                tp.id AS position_id, tp.status AS position_status,
                tp.activated_at AS position_activated_at,
                tp.signal_timestamp, tp.current_price AS tp_current_price,
                tp.distance_to_entry_pct AS tp_distance_to_entry_pct,
-               tp.actor_id, tp.signal_source, tp.detection_method
-        FROM public.signal_interpretations si
+               tp.actor_id, tp.signal_source, tp.detection_method,
+               ni.author, ni.headline,
+               tr.handle_raw, tr.handle_normalized, tr.display_name, tr.platform,
+               mi.id AS media_id, mi.local_path AS media_local_path, mi.source_url AS media_source_url
+        FROM recent_si si
         LEFT JOIN public.tracked_positions tp ON tp.signal_interpretation_id = si.id
         LEFT JOIN public.news_items ni ON ni.id = si.news_item_id
         LEFT JOIN public.trader_profiles tr ON tr.id = si.trader_profile_id
         LEFT JOIN public.media_items mi ON mi.id = si.media_item_id
-        WHERE si.created_at > now() - interval '30 days'
-          -- Phase 1 overnight cleanup: exclude stale signals (>7d, no tracked_position).
-          -- These clutter the radar with dead interpretations that will never trade.
-          AND (tp.id IS NOT NULL OR si.created_at > now() - interval '7 days')
-        """ + status_filter_sql + f" ORDER BY si.id DESC, tp.id DESC NULLS LAST LIMIT {limit_sql}",
+        WHERE 1=1 {status_filter_sql}
+        ORDER BY si.id DESC
+        LIMIT {limit_sql}
+        """,
         (),
     )
-    # Phase 3 (2026-05-29) ROOT-CAUSE FIX: the LIMIT used to order by `si.id`
-    # ASCENDING, so it returned the OLDEST 120 interpretations (whose positions
-    # are long closed/expired) and never the recent ones — the radar was
-    # perpetually stale/empty regardless of any frontend filtering. We now order
-    # `si.id DESC` (newest first) and break DISTINCT ON ties by the newest
-    # tracked_position (`tp.id DESC`), so recent pending + just-filled setups
-    # are actually fetched.
 
     # 2. Collect unique symbols and batch-fetch latest prices
-    # Build a lookup map: every raw symbol form → cleaned canonical form
+    # Use tracked_positions.current_price (maintained by position_monitor) instead
+    # of scanning the huge candles table. This is the only price source we need
+    # for the pending-signals view and avoids 10+ second candle scans.
     raw_to_clean: dict = {}
     for r in rows:
         raw = (r.get("instrument_symbol") or "").strip()
         clean = _clean_symbol(raw)
         if clean:
             raw_to_clean[raw] = clean
-    
+
     all_cleaned = list(set(raw_to_clean.values()))
     prices: dict = {}
-    
+
     if all_cleaned:
-        # Primary: latest 1m candle close (candles table via instruments)
+        tp_forms = all_cleaned + [s + ":USDT" for s in all_cleaned]
         price_rows = await pool.fetch_all(
             """
-            SELECT DISTINCT ON (i.symbol) i.symbol, c.close
-            FROM public.candles c
-            JOIN public.instruments i ON i.id = c.instrument_id
-            WHERE i.symbol = ANY($1) AND c.timeframe::text = '1m'
-            ORDER BY i.symbol, c.timestamp DESC
+            SELECT DISTINCT ON (instrument_symbol)
+                   REPLACE(REPLACE(instrument_symbol, ':USDT', ''), ':USDC', '') as clean_sym,
+                   current_price
+            FROM public.tracked_positions
+            WHERE (instrument_symbol = ANY($1) OR REPLACE(REPLACE(instrument_symbol, ':USDT', ''), ':USDC', '') = ANY($2))
+              AND current_price IS NOT NULL AND current_price > 0
+            ORDER BY instrument_symbol, updated_at DESC
             """,
-            (all_cleaned,),
+            (tp_forms, all_cleaned),
         )
         for pr in price_rows:
-            prices[pr["symbol"]] = float(pr["close"])
-
-        # Fallback: tracked_positions for symbols with no candles
-        unpriced = [s for s in all_cleaned if s not in prices]
-        if unpriced:
-            # Try both cleaned and :USDT-suffixed forms
-            tp_forms = unpriced + [s + ":USDT" for s in unpriced]
-            tp_rows = await pool.fetch_all(
-                """
-                SELECT DISTINCT ON (instrument_symbol) 
-                       REPLACE(REPLACE(instrument_symbol, ':USDT', ''), ':USDC', '') as clean_sym,
-                       current_price
-                FROM public.tracked_positions
-                WHERE (instrument_symbol = ANY($1) OR REPLACE(REPLACE(instrument_symbol, ':USDT', ''), ':USDC', '') = ANY($2))
-                  AND current_price IS NOT NULL AND current_price > 0
-                ORDER BY instrument_symbol, updated_at DESC
-                """,
-                (tp_forms, unpriced),
-            )
-            for tr in tp_rows:
-                cs = tr["clean_sym"] or ""
-                if cs and tr["current_price"] and cs not in prices:
-                    prices[cs] = float(tr["current_price"])
+            cs = pr["clean_sym"] or ""
+            if cs and pr["current_price"] and cs not in prices:
+                prices[cs] = float(pr["current_price"])
 
     # 3. Build enriched response (skip mispriced entries)
     result: list = []
