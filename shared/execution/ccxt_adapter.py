@@ -823,6 +823,33 @@ class CcxtExecutionAdapter:
         return self._raw_to_update(client_order_id, raw,
             default_status=STATUS_CANCELED, default_event=EVENT_CANCEL)
 
+    async def fetch_open_orders(
+        self, *, exchange: str, account_name: str = "main",
+        symbol: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return open orders from the exchange for an account."""
+        client = self._get_client(exchange, account_name)
+        try:
+            raw = await asyncio.to_thread(client.fetch_open_orders, symbol)
+            return [dict(o) for o in (raw or [])]
+        except Exception as exc:
+            LOG.warning("fetch_open_orders %s/%s failed: %s", exchange, account_name, exc)
+            return []
+
+    async def cancel_order(
+        self, *, exchange: str, account_name: str = "main",
+        symbol: str, order_id: str,
+    ) -> bool:
+        """Cancel an exchange order by its native order ID."""
+        client = self._get_client(exchange, account_name)
+        try:
+            await asyncio.to_thread(client.cancel_order, order_id, symbol)
+            return True
+        except Exception as exc:
+            LOG.warning("cancel_order %s/%s %s %s failed: %s",
+                        exchange, account_name, symbol, order_id, exc)
+            return False
+
     async def poll_updates(
         self, client_order_ids: Sequence[str], account_name: str = "main",
     ) -> List[OrderUpdate]:

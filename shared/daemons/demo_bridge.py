@@ -1394,6 +1394,63 @@ class DemoBridge:
                     LOG.info("_sync_positions %s/%s: %d positions detected as closed",
                              ex, acct_name, len(closed_ids))
 
+    async def _cancel_exchange_orphans(self, mappings: Dict[str, List[Dict]]):
+        """Cancel live exchange orders that have no corresponding pending DB row.
+
+        Compares exchange open orders against demo_orders.status='pending'.
+        Any live order whose exchange_order_id is not in the pending set is
+        cancelled. This cleans up orders left behind by failed cancels or
+        crashes without touching DB-authoritative pending orders.
+        """
+        pool = await self._ensure_pool()
+        seen = set()
+        for accts in mappings.values():
+            for a in accts:
+                key = (a["exchange"], a["account_name"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    open_orders = await self._adapter.fetch_open_orders(
+                        exchange=a["exchange"], account_name=a["account_name"])
+                    if not open_orders:
+                        continue
+                    db_rows = await pool.fetch_all(
+                        "SELECT exchange_order_id FROM public.demo_orders "
+                        "WHERE exchange=$1 AND account_name=$2 "
+                        "AND exchange_order_id IS NOT NULL",
+                        (a["exchange"], a["account_name"]))
+                    db_ids = {r["exchange_order_id"] for r in db_rows}
+
+                    now_ms = int(time.time() * 1000)
+                    for o in open_orders:
+                        # Grace period: give newly-placed orders 60s to appear in DB
+                        ts = int(o.get("timestamp") or 0)
+                        if ts > 0 and (now_ms - ts) < 60000:
+                            continue
+                        oid = o.get("id")
+                        if not oid or oid in db_ids:
+                            continue
+                        symbol = o.get("symbol", "")
+                        LOG.info("Exchange orphan %s/%s: order %s %s not in DB — cancelling",
+                                 a["exchange"], a["account_name"], oid, symbol)
+                        try:
+                            await self._adapter.cancel_order(
+                                exchange=a["exchange"], account_name=a["account_name"],
+                                symbol=symbol, order_id=oid)
+                            _pipe_event(
+                                "PIPE_EXPIRE", 0,
+                                exchange=a["exchange"], account=a["account_name"],
+                                symbol=symbol, order_id=oid,
+                                src="exchange_orphan_cleanup",
+                            )
+                        except Exception as exc:
+                            LOG.warning("Failed to cancel exchange orphan %s/%s %s: %s",
+                                        a["exchange"], a["account_name"], oid, exc)
+                except Exception as exc:
+                    LOG.debug("Exchange orphan cleanup %s/%s failed: %s",
+                              a["exchange"], a["account_name"], exc)
+
     @staticmethod
     def _extract_fee(raw: Dict) -> Optional[float]:
         """Best-effort total execution fee (USDT) from a CCXT order dict."""
@@ -1777,6 +1834,7 @@ class DemoBridge:
         # every account and creates/updates demo_orders rows for any position
         # not already tracked.
         await self._sync_positions(mappings)
+        await self._cancel_exchange_orphans(mappings)
 
         # 1c. Cancel demo orders where the paper tracked_position is already
         # open/closed/expired. These demo limits missed their entry and will
