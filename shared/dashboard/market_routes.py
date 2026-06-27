@@ -1891,6 +1891,8 @@ async def handle_exchange_accounts(request: web.Request) -> web.Response:
             "lastTestedAt": r["last_tested_at"].isoformat() if r.get("last_tested_at") else None,
             "lastBalance": float(r["last_balance"]) if r.get("last_balance") else None,
             "lastError": r.get("last_error"),
+            "marginUsagePct": float(r["metadata"].get("margin_usage_pct", 100)) if r.get("metadata") else 100.0,
+            "marginMode": r["metadata"].get("margin_mode", "cross") if r.get("metadata") else "cross",
             "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
         })
     return _json({"ok": True, "accounts": accounts})
@@ -1915,6 +1917,8 @@ async def handle_exchange_account(request: web.Request) -> web.Response:
             "isActive": r["is_active"],
             "lastTestedAt": r["last_tested_at"].isoformat() if r.get("last_tested_at") else None,
             "lastBalance": float(r["last_balance"]) if r.get("last_balance") else None,
+            "marginUsagePct": float(r["metadata"].get("margin_usage_pct", 100)) if r.get("metadata") else 100.0,
+            "marginMode": r["metadata"].get("margin_mode", "cross") if r.get("metadata") else "cross",
         }})
     
     existing = await pool.fetch_one(
@@ -1947,6 +1951,20 @@ async def handle_exchange_account(request: web.Request) -> web.Response:
         if field in body and body[field] is not None:
             sets.append(f"{col} = %s")
             params.append(body[field])
+
+    # Margin settings stored in metadata jsonb
+    if "marginUsagePct" in body:
+        try:
+            pct = max(0.0, min(100.0, float(body["marginUsagePct"])))
+            sets.append("metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), '{margin_usage_pct}', %s::text::jsonb)")
+            params.append(str(pct))
+        except (ValueError, TypeError):
+            pass
+    if "marginMode" in body:
+        mode = str(body["marginMode"]).lower()
+        if mode in ("cross", "isolated"):
+            sets.append("metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), '{margin_mode}', %s::text::jsonb)")
+            params.append(mode)
     
     if not sets:
         return _err(400, "No fields to update")
