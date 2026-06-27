@@ -671,22 +671,12 @@ class DemoBridge:
                     new_ts = signal.get("signal_timestamp") or datetime.now(timezone.utc)
                     old_ts = existing.get("ordered_at")
 
-                    if entry_diff <= 0.02:  # within 2% - same trade
-                        if existing.get("status") == "filled":
-                            # Already have a position - do not add to it.
-                            LOG.debug("Signal #%d: %s/%s %s already has filled position within 2%% - skip",
-                                      tp_id, acct["exchange"], acct["account_name"], sym)
-                            continue
-                        # Pending/queued: keep the most recent one. No churn.
-                        if new_ts > old_ts:
-                            LOG.info("Signal #%d: replacing order #%d %s/%s %s (entry %.4f→%.4f)",
-                                     tp_id, existing["id"], acct["exchange"],
-                                     acct["account_name"], sym, old_entry, entry)
-                            # Fall through - place new order below, cancel old after
-                        else:
-                            LOG.debug("Signal #%d: existing order #%d is current - skip",
-                                      tp_id, existing["id"])
-                            continue
+                    if entry_diff <= 0.02:  # within 2% - same trade already tracked
+                        # Keep whatever is there. No replace, no add-to-position.
+                        LOG.debug("Signal #%d: %s/%s %s already tracked within 2%% (status=%s id=%d) - skip",
+                                  tp_id, acct["exchange"], acct["account_name"], sym,
+                                  existing.get("status"), existing["id"])
+                        continue
                     else:
                         # Different trade - both valid
                         LOG.debug("Signal #%d: entry %.4f differs >2%% from existing %.4f - both valid",
@@ -826,12 +816,6 @@ class DemoBridge:
                 if acc:
                     placed_any = True
                     ext_id = acc[0].external_order_id
-                    if existing and existing.get("status") == "pending" and existing.get("exchange_order_id"):
-                        try:
-                            await self._cancel_demo_order(tp_id, acct["account_name"], existing["exchange_order_id"], exchange=acct["exchange"], symbol=sym)
-                            await dpool.execute("UPDATE public.demo_orders SET status = 'cancelled', error_message = 'replaced by newer signal', updated_at = NOW() WHERE id = $1", (existing["id"],))
-                        except Exception:
-                            pass
                     self._orders.setdefault(tp_id, {})[acct["account_name"]] = {
                         "order_id": ext_id,
                         "exchange": acct["exchange"],
