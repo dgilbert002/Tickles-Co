@@ -879,7 +879,8 @@ class DemoBridge:
                                     (ext_id, acct["exchange"], acct["account_name"], ct_id)
                                 )
                         except Exception as exc:
-                            LOG.debug("demo_orders insert (accepted) failed: %s", exc)
+                            LOG.error("demo_orders insert (accepted) failed for tp=%s ct=%s: %s",
+                                      tp_id, ct_id, exc)
                     else:
                         rej = [u for u in updates if u.status == "rejected"]
                         rej_msg = rej[0].message if rej else "unknown"
