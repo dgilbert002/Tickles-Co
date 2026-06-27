@@ -1459,7 +1459,8 @@ class DemoBridge:
         if promoted:
             LOG.info("_promote_queued: %d orders promoted in %.1fs", promoted, time.monotonic() - t0)
             _pipe_event("PIPE_BRGE", 0, status="promote_done",
-                        src=f"promoted={promoted} elapsed={time.monotonic()-t0:.2f}s")
+                        src=f"promoted={promoted}",
+                        age_h=(time.monotonic() - t0) / 3600.0)
         else:
             LOG.info("_promote_queued: scanned %d queued rows, none promoted (elapsed %.1fs)",
                      len(rows) if rows else 0, time.monotonic() - t0)
@@ -1580,8 +1581,10 @@ class DemoBridge:
                      expired_queued, cancelled_pending)
         elif rows:
             LOG.info("_expire_distant: scanned %d rows in %.1fs, no action", len(rows), time.monotonic() - t0)
+        elapsed = time.monotonic() - t0
         _pipe_event("PIPE_BRGE", 0, status="expire_done",
-                    src=f"scanned={len(rows)} expired={expired_queued} cancelled={cancelled_pending} elapsed={time.monotonic()-t0:.2f}s")
+                    src=f"scanned={len(rows)}|expired={expired_queued}|cancelled={cancelled_pending}",
+                    age_h=elapsed / 3600.0)
 
     async def tick(self):
         mappings = await self._load_mappings()
